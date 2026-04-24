@@ -8,6 +8,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useAuth } from "@/contexts/AuthContext";
 
 // ── SVG icon set ─────────────────────────────────────────────
 // Each icon is a tiny inline SVG. strokeWidth="1.75" keeps
@@ -19,6 +20,14 @@ const Icons = {
       <rect x="14" y="3" width="7" height="7" rx="1.5" />
       <rect x="3" y="14" width="7" height="7" rx="1.5" />
       <rect x="14" y="14" width="7" height="7" rx="1.5" />
+    </svg>
+  ),
+  frontdesk: (
+    /* Clipboard with checkmark — daily operations / front desk */
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">
+      <rect x="8" y="2" width="8" height="4" rx="1" />
+      <path d="M8 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2h-2" />
+      <path d="M9 12l2 2 4-4" />
     </svg>
   ),
   rooms: (
@@ -52,18 +61,39 @@ const Icons = {
       <path d="M12 18h.01" />
     </svg>
   ),
+  employees: (
+    /* ID card icon — person avatar on left, text lines on right */
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">
+      <rect x="2" y="5" width="20" height="14" rx="2" />
+      <circle cx="8" cy="12" r="2.5" />
+      <path d="M13 10h5" />
+      <path d="M13 14h3" />
+    </svg>
+  ),
+  profile: (
+    /* Circle user silhouette — personal profile */
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">
+      <circle cx="12" cy="12" r="10" />
+      <circle cx="12" cy="9"  r="3"  />
+      <path d="M6.168 18.849A4 4 0 0110 16h4a4 4 0 013.834 2.855" />
+    </svg>
+  ),
 };
 
 // ── Nav items ─────────────────────────────────────────────────
 const navItems = [
-  { label: "Dashboard", href: "/",         icon: Icons.dashboard },
-  { label: "Rooms",     href: "/rooms",    icon: Icons.rooms     },
-  { label: "Guests",    href: "/guests",   icon: Icons.guests    },
-  { label: "Bookings",  href: "/bookings", icon: Icons.bookings  },
+  { label: "Dashboard",  href: "/",            icon: Icons.dashboard  },
+  { label: "Front Desk", href: "/front-desk",  icon: Icons.frontdesk  },
+  { label: "Rooms",      href: "/rooms",       icon: Icons.rooms      },
+  { label: "Guests",     href: "/guests",      icon: Icons.guests     },
+  { label: "Bookings",   href: "/bookings",    icon: Icons.bookings   },
+  { label: "Employees",  href: "/employees",   icon: Icons.employees  },
+  { label: "My Profile", href: "/profile",     icon: Icons.profile    },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const { profile, role, signOut } = useAuth();
 
   return (
     <aside className="w-60 min-h-screen bg-slate-900 text-white flex flex-col flex-shrink-0">
@@ -128,21 +158,54 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* ── Bottom footer ────────────────────────────────────── */}
-      <div className="px-5 py-5 border-t border-slate-700/60">
-        {/* Staff avatar placeholder */}
+      {/* ── Bottom footer — real user info + sign out ────────── */}
+      <div className="px-4 py-4 border-t border-slate-700/60 space-y-3">
+
+        {/* User identity */}
         <div className="flex items-center gap-3">
+          {/* Avatar — initials derived from full_name */}
           <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-slate-400">
-              <circle cx="12" cy="8" r="4" />
-              <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
-            </svg>
+            {profile ? (
+              <span className="text-[11px] font-bold text-slate-300 uppercase leading-none">
+                {profile.full_name
+                  .split(" ")
+                  .slice(0, 2)
+                  .map(n => n[0])
+                  .join("")}
+              </span>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-slate-400">
+                <circle cx="12" cy="8" r="4" />
+                <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
+              </svg>
+            )}
           </div>
-          <div className="min-w-0">
-            <p className="text-[12px] font-medium text-slate-300 truncate">Front Desk Staff</p>
-            <p className="text-[11px] text-slate-500">Admin</p>
+          <div className="min-w-0 flex-1">
+            <p className="text-[12px] font-medium text-slate-300 truncate leading-tight">
+              {profile?.full_name ?? "Loading…"}
+            </p>
+            <p className={`text-[11px] font-medium capitalize leading-tight mt-0.5 ${
+              role === "admin" ? "text-amber-400" : "text-slate-500"
+            }`}>
+              {role ?? "—"}
+            </p>
           </div>
         </div>
+
+        {/* Sign out button */}
+        <button
+          onClick={signOut}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[12.5px] font-medium
+            text-slate-400 hover:text-slate-100 hover:bg-slate-800/70 transition-colors"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 flex-shrink-0">
+            <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
+          Sign out
+        </button>
+
       </div>
     </aside>
   );

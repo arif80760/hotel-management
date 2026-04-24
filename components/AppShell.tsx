@@ -1,0 +1,85 @@
+"use client";
+
+// components/AppShell.tsx
+//
+// ─── APP SHELL ───────────────────────────────────────────────────────────────
+//
+// Client component that sits between the root layout and every page.
+// It owns two responsibilities:
+//
+//   1. ROUTING GUARD
+//      • Not signed in + not on /login → redirect to /login
+//      • Signed in + on /login         → redirect to /
+//
+//   2. CONDITIONAL LAYOUT
+//      • /login page         → renders children only (no sidebar, no topbar)
+//      • All other pages     → renders Sidebar + TopBar + HotelProvider + children
+//
+// WHY HERE INSTEAD OF MIDDLEWARE:
+//   Supabase Auth stores the session client-side (localStorage).
+//   A true server-side middleware redirect would require @supabase/ssr and
+//   cookie-based sessions — a bigger change. This client guard achieves the
+//   same result with zero extra packages and is easier to reason about.
+//   The only visible difference is a brief loading spinner on first paint
+//   while the session is being read from localStorage.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { useEffect, type ReactNode } from "react";
+import { useRouter, usePathname } from "next/navigation";
+import { useAuth } from "@/contexts/AuthContext";
+import { HotelProvider } from "@/contexts/HotelContext";
+import Sidebar from "@/components/Sidebar";
+import TopBar from "@/components/TopBar";
+
+export default function AppShell({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth();
+  const router   = useRouter();
+  const pathname = usePathname();
+
+  const isLoginPage = pathname === "/login";
+
+  // ── Routing guard ─────────────────────────────────────────────
+  useEffect(() => {
+    if (loading) return;                            // wait until session is known
+    if (!user && !isLoginPage) router.replace("/login");
+    if ( user &&  isLoginPage) router.replace("/");
+  }, [user, loading, isLoginPage, router]);
+
+  // ── Loading state ──────────────────────────────────────────────
+  // Show a minimal spinner while the Supabase session check is in flight.
+  // This prevents a flash of the app before the redirect fires.
+  if (loading) {
+    return (
+      <div className="h-full w-full flex items-center justify-center bg-slate-50">
+        <div className="w-6 h-6 border-2 border-slate-300 border-t-amber-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  // ── Login page — bare render, no shell ────────────────────────
+  if (isLoginPage) {
+    // If already logged in, render nothing while the redirect to "/" fires.
+    if (user) return null;
+    return <>{children}</>;
+  }
+
+  // ── Not logged in — render nothing while redirect fires ───────
+  if (!user) return null;
+
+  // ── Authenticated — full shell ────────────────────────────────
+  // HotelProvider is mounted here (not in root layout) so it only
+  // loads data when the user is actually signed in. Mounting it when
+  // unauthenticated would trigger Supabase fetches that RLS would block.
+  return (
+    <HotelProvider>
+      <Sidebar />
+      <div className="flex-1 flex flex-col min-h-screen overflow-hidden">
+        <TopBar />
+        <main className="flex-1 overflow-y-auto bg-slate-50">
+          {children}
+        </main>
+      </div>
+    </HotelProvider>
+  );
+}
