@@ -43,6 +43,10 @@ type BookingRow = {
   total_amount:             number;
   paid_amount:              number;
   payment_status:           string;   // lowercase enum
+  fixed_rate:               number | null;
+  booking_rate:             number | null;
+  extra_charge_amount:      number | null;
+  extra_charge_reason:      string | null;
   override_checkout:        boolean;
   override_reason:          string | null;
   override_by:              string | null;
@@ -51,6 +55,14 @@ type BookingRow = {
   checked_in_at:            string | null;
   checked_out_at:           string | null;
   cancelled_at:             string | null;
+  // ── Step 2: early checkout + additional discount ──────────
+  actual_checkout_date:       string | null;
+  early_nights_deducted:      number | null;
+  early_deduction_amount:     number | null;
+  additional_discount_amount: number | null;
+  additional_discount_reason: string | null;
+  additional_discount_by:     string | null;
+  additional_discount_at:     string | null;
   created_at:               string;
   updated_at:               string;
   // Joined relations
@@ -154,9 +166,20 @@ function mapBooking(row: BookingRow): MockBooking {
       .sort((a, b) => a.sort_order - b.sort_order)
       .map(g => ({ name: g.name, nationality: g.nationality ?? "" })),
     checkoutOverride: override,
+    fixedRate:          row.fixed_rate          ?? undefined,
+    bookingRate:        row.booking_rate        ?? undefined,
+    extraChargeAmount:  row.extra_charge_amount ?? undefined,
+    extraChargeReason:  row.extra_charge_reason ?? undefined,
     createdAt:    row.created_at,
     checkedInAt:  row.checked_in_at  ?? undefined,
     checkedOutAt: row.checked_out_at ?? undefined,
+    actualCheckoutDate:       row.actual_checkout_date       ?? undefined,
+    earlyNightsDeducted:      row.early_nights_deducted      ?? undefined,
+    earlyDeductionAmount:     row.early_deduction_amount     ?? undefined,
+    additionalDiscountAmount: row.additional_discount_amount ?? undefined,
+    additionalDiscountReason: row.additional_discount_reason ?? undefined,
+    additionalDiscountBy:     row.additional_discount_by     ?? undefined,
+    additionalDiscountAt:     row.additional_discount_at     ?? undefined,
   };
 }
 
@@ -350,6 +373,71 @@ export async function createBooking(booking: MockBooking): Promise<MockBooking> 
 
   console.log("[createBooking] Step 2 — room UUID:", roomRow!.id);
 
+  // ── Step 2.5 — Overlap / double-booking check ──────────────
+  //
+  // Query the DB for any active booking on this room whose dates overlap
+  // with the requested range using the half-open interval rule:
+  //
+  //   existing.check_in_date  < new.check_out_date   (existing starts before new ends)
+  //   existing.check_out_date > new.check_in_date    (existing ends after new starts)
+  //
+  // "Checked Out" and "Cancelled" are excluded so past/cancelled bookings
+  // never block new ones.  Same-day checkout → check-in is intentionally ALLOWED
+  // because check_in_date of the new booking equals check_out_date of the old
+  // one, which means `existing.check_out_date > new.check_in_date` is FALSE
+  // (equal, not greater), so the query returns no row.
+  //
+  // Layer A (UI useMemo) and Layer B (handleSubmit guard) should already have
+  // blocked here; this is the final database-level safeguard that catches race
+  // conditions (e.g. two staff submitting the same room simultaneously).
+  //
+  // NOTE: A PostgreSQL EXCLUSION CONSTRAINT on (room_id, tsrange(check_in_date,
+  //   check_out_date)) would enforce this at the DB engine level with no extra
+  //   round-trip.  Recommended for production.  The SQL is:
+  //   ALTER TABLE bookings ADD CONSTRAINT no_overlapping_bookings
+  //     EXCLUDE USING gist (
+  //       room_id WITH =,
+  //       tsrange(check_in_date::timestamp, check_out_date::timestamp) WITH &&
+  //     )
+  //     WHERE (status IN ('confirmed', 'checked_in'));
+
+  const checkInISO  = parseDisplayDate(booking.checkIn);
+  const checkOutISO = parseDisplayDate(booking.checkOut);
+
+  console.log(
+    `[createBooking] Step 2.5 — overlap check: room ${booking.roomNumber}` +
+    ` (uuid: ${roomRow!.id}) ${checkInISO} → ${checkOutISO}`
+  );
+
+  const {
+    data:  conflictRows,
+    error: conflictErr,
+  } = await supabase
+    .from("bookings")
+    .select("booking_ref, check_in_date, check_out_date, status")
+    .eq("room_id", roomRow!.id)
+    .in("status", ["confirmed", "checked_in"])
+    .lt("check_in_date", checkOutISO)   // existing starts before new ends
+    .gt("check_out_date", checkInISO);  // existing ends after new starts
+
+  if (conflictErr) {
+    // Non-fatal: log and continue — the UI layers already ran their checks.
+    console.warn(
+      "[createBooking] Step 2.5 — overlap query failed, proceeding:",
+      conflictErr.message
+    );
+  } else if (conflictRows && conflictRows.length > 0) {
+    const c = conflictRows[0];
+    const msg =
+      `Room is unavailable for this date range. ` +
+      `Existing booking ${c.booking_ref} covers ${c.check_in_date} – ${c.check_out_date}` +
+      ` (status: ${c.status}). Please select another room or different dates.`;
+    console.error("[createBooking] Step 2.5 — BLOCKED:", msg);
+    throw new Error(msg);
+  } else {
+    console.log(`[createBooking] Step 2.5 — room ${booking.roomNumber} is available`);
+  }
+
   // ── Step 3 — Insert booking row ────────────────────────────
   const bookingPayload = {
     room_id:                  roomRow!.id,
@@ -361,6 +449,8 @@ export async function createBooking(booking: MockBooking): Promise<MockBooking> 
     status:                   "confirmed",
     total_amount:             booking.totalAmount,
     paid_amount:              booking.amountPaid,
+    fixed_rate:               booking.fixedRate   ?? null,
+    booking_rate:             booking.bookingRate ?? null,
   };
 
   console.log("[createBooking] Step 3 — INSERT bookings, payload:", bookingPayload);
@@ -561,30 +651,138 @@ export async function recordPayment(
 }
 
 // ─────────────────────────────────────────────────────────────
+// UPDATE — NORMAL CHECKOUT  (no outstanding balance)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Check out a booking that has no outstanding balance.
+ * Records extra charges, early-checkout deduction, and any additional discount.
+ *
+ * @param id                       booking_ref ("BK-1041"), not the UUID
+ * @param extraChargeAmount        additional amount charged at checkout (0 = none)
+ * @param extraChargeReason        human-readable reason, e.g. "Mini-bar - 3 soft drinks"
+ * @param actualCheckoutDate       ISO date (YYYY-MM-DD) the guest actually left
+ * @param earlyNightsDeducted      number of unused nights deducted (0 if on-time/late)
+ * @param earlyDeductionAmount     BDT amount deducted for early checkout (0 if none)
+ * @param additionalDiscountAmount ad-hoc discount applied at checkout (0 = none)
+ * @param additionalDiscountReason optional plain-text reason for the discount
+ * @param additionalDiscountBy     auth.users UUID of who applied the discount (null if none)
+ */
+export async function checkoutNormal(
+  id: string,
+  extraChargeAmount: number,
+  extraChargeReason: string | null,
+  actualCheckoutDate: string,
+  earlyNightsDeducted: number,
+  earlyDeductionAmount: number,
+  additionalDiscountAmount: number,
+  additionalDiscountReason: string | null,
+  additionalDiscountBy: string | null,
+): Promise<void> {
+  const updatePayload: Record<string, unknown> = {
+    status:                     "checked_out",
+    actual_checkout_date:       actualCheckoutDate,
+    early_nights_deducted:      earlyNightsDeducted,
+    early_deduction_amount:     earlyDeductionAmount,
+    additional_discount_amount: additionalDiscountAmount,
+    additional_discount_at:     new Date().toISOString(),
+  };
+  if (extraChargeAmount > 0) {
+    updatePayload.extra_charge_amount = extraChargeAmount;
+    updatePayload.extra_charge_reason = extraChargeReason || null;
+  }
+  if (additionalDiscountReason) {
+    updatePayload.additional_discount_reason = additionalDiscountReason;
+  }
+  if (additionalDiscountBy) {
+    updatePayload.additional_discount_by = additionalDiscountBy;
+  }
+
+  console.log("[checkoutNormal] UPDATE bookings, booking_ref:", id, "| payload:", updatePayload);
+
+  const { error, status, statusText } = await supabase
+    .from("bookings")
+    .update(updatePayload)
+    .eq("booking_ref", id);
+
+  if (error) {
+    console.error("──────────── [checkoutNormal] UPDATE bookings FAILED ────────────");
+    console.error("  message    :", error.message);
+    console.error("  details    :", error.details);
+    console.error("  hint       :", error.hint);
+    console.error("  code       :", error.code);
+    console.error("  HTTP status:", status, statusText);
+    console.error("  booking_ref:", id);
+    console.error("  payload    :", updatePayload);
+    console.error("────────────────────────────────────────────────────────────────");
+    throw new Error(
+      `[checkoutNormal] Update failed — ${error.message}` +
+      (error.code    ? ` (code: ${error.code})`       : "") +
+      (error.hint    ? ` | hint: ${error.hint}`        : "") +
+      (error.details ? ` | details: ${error.details}`  : "")
+    );
+  }
+
+  console.log("[checkoutNormal] succeeded for booking_ref:", id);
+}
+
+// ─────────────────────────────────────────────────────────────
 // UPDATE — ADMIN OVERRIDE CHECKOUT
 // ─────────────────────────────────────────────────────────────
 
 /**
  * Admin-only: check out a booking that has an outstanding balance.
  * Sets status to "checked_out", stamps the override audit fields, and
- * records checked_out_at. The DB trigger syncs the room to "cleaning".
+ * records checked_out_at. Optionally records extra charges, early-checkout
+ * deduction, and any additional discount applied at checkout.
  *
- * @param id            booking_ref ("BK-1041"), not the UUID
- * @param overrideReason free-text reason entered by the admin
- * @param overrideBy    auth.users UUID of the admin performing the override
+ * @param id                       booking_ref ("BK-1041"), not the UUID
+ * @param overrideReason           free-text reason entered by the admin
+ * @param overrideBy               auth.users UUID of the admin performing the override
+ * @param extraChargeAmount        additional amount charged at checkout (0 = none)
+ * @param extraChargeReason        formatted reason string for the extra charge
+ * @param actualCheckoutDate       ISO date (YYYY-MM-DD) the guest actually left
+ * @param earlyNightsDeducted      number of unused nights deducted (0 if on-time/late)
+ * @param earlyDeductionAmount     BDT amount deducted for early checkout (0 if none)
+ * @param additionalDiscountAmount ad-hoc discount applied at checkout (0 = none)
+ * @param additionalDiscountReason optional plain-text reason for the discount
+ * @param additionalDiscountBy     auth.users UUID of who applied the discount (null if none)
  */
 export async function checkoutWithOverride(
   id: string,
   overrideReason: string,
   overrideBy: string,
+  extraChargeAmount?: number,
+  extraChargeReason?: string | null,
+  actualCheckoutDate?: string,
+  earlyNightsDeducted?: number,
+  earlyDeductionAmount?: number,
+  additionalDiscountAmount?: number,
+  additionalDiscountReason?: string | null,
+  additionalDiscountBy?: string | null,
 ): Promise<void> {
-  const updatePayload = {
+  const updatePayload: Record<string, unknown> = {
     status:            "checked_out",
     override_checkout: true,
     override_reason:   overrideReason.trim() || "No reason provided",
     override_by:       overrideBy,
     override_at:       new Date().toISOString(),
   };
+  if (extraChargeAmount && extraChargeAmount > 0) {
+    updatePayload.extra_charge_amount = extraChargeAmount;
+    updatePayload.extra_charge_reason = extraChargeReason || null;
+  }
+  if (actualCheckoutDate) {
+    updatePayload.actual_checkout_date   = actualCheckoutDate;
+    updatePayload.early_nights_deducted  = earlyNightsDeducted  ?? 0;
+    updatePayload.early_deduction_amount = earlyDeductionAmount ?? 0;
+  }
+  if (additionalDiscountAmount && additionalDiscountAmount > 0) {
+    updatePayload.additional_discount_amount = additionalDiscountAmount;
+    updatePayload.additional_discount_at     = new Date().toISOString();
+    if (additionalDiscountReason) updatePayload.additional_discount_reason = additionalDiscountReason;
+    if (additionalDiscountBy)     updatePayload.additional_discount_by     = additionalDiscountBy;
+  }
 
   console.log("[checkoutWithOverride] UPDATE bookings, booking_ref:", id, "| payload:", updatePayload);
 

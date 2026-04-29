@@ -701,11 +701,11 @@ export default function RoomsClient() {
                 {/* Row 3: Price */}
                 <div>
                   <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                    Price per Night (USD) <span className="text-rose-500">*</span>
+                    Price per Night (BDT) <span className="text-rose-500">*</span>
                   </label>
                   <div className="relative">
                     <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold text-[14px] pointer-events-none">
-                      $
+                      ৳
                     </span>
                     <input
                       type="number"

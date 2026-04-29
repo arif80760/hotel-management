@@ -83,6 +83,20 @@ export type CheckoutOverride = {
 };
 
 /**
+ * Hotel-wide stay timing policy — single source of truth for all timing calculations.
+ *   Standard check-in:  12:00 PM
+ *   Standard checkout:  11:59 AM
+ *   Grace period:       30 minutes after checkout time
+ */
+export const HOTEL_POLICY = {
+  checkinHour:    12,   // 12:00 PM
+  checkinMinute:  0,
+  checkoutHour:   11,   // 11:59 AM
+  checkoutMinute: 59,
+  graceMinutes:   30,
+} as const;
+
+/**
  * Booking record.
  * Core fields match the user's spec; extended fields (nights, payment,
  * amount) are kept for UI display until they can be computed server-side.
@@ -98,7 +112,7 @@ export type MockBooking = {
   nights:       number;
   status:       BookingStatus;
   payment:      PaymentStatus;   // auto-derived from totalAmount vs amountPaid
-  totalAmount:  number;          // total charge for the stay (USD)
+  totalAmount:  number;          // total charge for the stay (BDT)
   amountPaid:   number;          // amount collected at / before booking time
   // dueAmount is derived at render: totalAmount - amountPaid  (not stored)
   totalGuests:       number;           // total number of guests in the room (including primary)
@@ -110,12 +124,42 @@ export type MockBooking = {
    * TODO: Store in a separate checkout_overrides table in Supabase.
    */
   checkoutOverride?: CheckoutOverride;
+  // ── Room rate fields ─────────────────────────────────────
+  // fixedRate   = published/standard nightly rate at time of booking
+  // bookingRate = actual negotiated nightly rate (may be discounted)
+  // When bookingRate < fixedRate → a discount was applied.
+  // totalAmount is always computed from bookingRate × nights.
+  fixedRate?:    number;   // standard published rate per night
+  bookingRate?:  number;   // actual rate charged per night (may differ)
+  // ── Extra charges stamped at checkout ────────────────────
+  // Recorded when staff adds damage / mini-bar / late-checkout fees, etc.
+  // finalPayable = (totalAmount + extraChargeAmount) - earlyDeductionAmount - additionalDiscountAmount - amountPaid
+  extraChargeAmount?: number;   // total extra charge applied at checkout
+  extraChargeReason?: string;   // e.g. "Mini-bar - 3 soft drinks"
   // ── Lifecycle timestamps (ISO 8601) ───────────────────────
   // Set once when the event occurs; never mutated afterwards.
   // TODO: Derive from a database trigger / server action when backend exists.
   createdAt?:    string;   // when the booking record was first created
   checkedInAt?:  string;   // when status transitioned to "Checked In"
   checkedOutAt?: string;   // when status transitioned to "Checked Out"
+  // ── Checkout timing (Step 1 — display only) ──────────────────────────────
+  actualChargedNights?: number;   // nights charged (same as planned for now)
+  lateCheckoutMinutes?: number;   // minutes past scheduled checkout (negative = early)
+  // ── Early checkout billing (Step 2) ──────────────────────────────────────
+  // Computed at checkout time from calendar-date comparison (no clock comparison).
+  // earlyNightsDeducted = max(0, plannedCheckoutDate − actualCheckoutDate)
+  // earlyDeductionAmount = earlyNightsDeducted × bookingRate
+  // Both are 0 for on-time and late checkouts.
+  actualCheckoutDate?:       string;   // ISO date (YYYY-MM-DD) guest actually vacated
+  earlyNightsDeducted?:      number;   // unused nights deducted from the bill
+  earlyDeductionAmount?:     number;   // total deduction in BDT (earlyNightsDeducted × bookingRate)
+  // ── Additional discount at checkout (Step 2) ─────────────────────────────
+  // Ad-hoc discount negotiated at checkout. No role restriction — staff or admin.
+  // Cannot exceed remaining balance after early deduction.
+  additionalDiscountAmount?: number;   // discount amount in BDT
+  additionalDiscountReason?: string;   // optional plain-text reason, e.g. "Loyalty discount"
+  additionalDiscountBy?:     string;   // auth.users UUID of who applied the discount
+  additionalDiscountAt?:     string;   // ISO 8601 timestamp when discount was applied
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -218,6 +262,23 @@ export type MockGuest = {
   nationality: string;
   notes:       string;   // freeform staff notes  [placeholder — editable later]
   vip:         boolean;  // VIP flag               [placeholder — editable later]
+};
+
+/**
+ * A guest identity/travel document uploaded for a booking.
+ * Stored in Supabase Storage (bucket: guest-documents) + booking_documents table.
+ */
+export type BookingDocument = {
+  id:           string;   // uuid
+  bookingRef:   string;   // matches MockBooking.id, e.g. "BK-1041"
+  documentType: string;   // "Passport" | "National ID Card" | etc.
+  fileUrl:      string;   // public URL from Supabase Storage
+  storagePath:  string;   // storage object key — used for deletion
+  fileName:     string;   // original file name from the browser
+  fileType:     string;   // MIME type, e.g. "image/jpeg" or "application/pdf"
+  note?:        string;   // optional staff note
+  uploadedBy?:  string;   // uuid of the user who uploaded
+  createdAt:    string;   // ISO 8601
 };
 
 export const MOCK_GUESTS: MockGuest[] = [

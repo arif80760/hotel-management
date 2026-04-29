@@ -26,11 +26,31 @@ import {
   type PaymentStatus,
   type MockBooking as Booking,
   type AdditionalGuest,
+  type BookingDocument,
+  HOTEL_POLICY,
 } from "@/lib/mockData";
+import {
+  DOCUMENT_TYPES,
+  ALLOWED_EXTENSIONS_LABEL,
+  ALLOWED_MIME_TYPES,
+  getDocuments,
+  uploadDocument,
+  deleteDocument,
+} from "@/services/documentsService";
 
 // ─────────────────────────────────────────────────────────────
 // LOCAL TYPES
 // ─────────────────────────────────────────────────────────────
+
+/** A document staged in the Create Booking form — held locally until the
+ *  booking_ref is available (after createBooking resolves). */
+type PendingDoc = {
+  id:       string;   // temp UUID for React key / updates
+  docType:  string;
+  file:     File | null;
+  note:     string;
+};
+
 type FormData = {
   guest:            string;
   phone:            string;
@@ -40,8 +60,11 @@ type FormData = {
   status:           BookingStatus;
   totalGuests:      number;
   additionalGuests: AdditionalGuest[];
+  // Rate fields — stored as strings for simple <input> bindings
+  fixedRate:        string;   // published/standard room rate per night (auto-filled from room)
+  bookingRate:      string;   // actual negotiated rate per night (editable for discounts)
   // Payment fields — stored as strings so <input> bindings are simple
-  totalAmount:      string;   // total charge; auto-filled from room×nights, editable
+  totalAmount:      string;   // total charge = bookingRate × nights (auto-computed, editable)
   amountPaid:       string;   // deposit/payment collected at booking time
 };
 
@@ -127,11 +150,215 @@ function formatTimestamp(iso: string): string {
 
 const TODAY = new Date().toISOString().split("T")[0];
 
+/** Extra charge type options shown in the checkout confirmation modal. */
+const CHARGE_TYPES = [
+  "Room damage", "Mini-bar", "Laundry", "Extra bed",
+  "Late checkout", "Missing item", "Restaurant/Food", "Transport", "Other",
+] as const;
+
+/** Formats an extra charge type + note into a storable string. */
+function formatChargeReason(type: string, note: string): string | null {
+  if (!type) return null;
+  return note.trim() ? `${type} - ${note.trim()}` : type;
+}
+
+/** Short date: "2026-04-22" → "Apr 22" */
+function formatDateShort(iso: string): string {
+  if (!iso) return "";
+  return new Date(`${iso}T12:00:00`).toLocaleDateString("en-US", {
+    month: "short", day: "numeric",
+  });
+}
+
+/** Abbreviated day name: "2026-04-22" → "Wed" */
+function dayName(iso: string): string {
+  if (!iso) return "";
+  return new Date(`${iso}T12:00:00`).toLocaleDateString("en-US", { weekday: "short" });
+}
+
+// ─────────────────────────────────────────────────────────────
+// CHECKOUT TIMING HELPERS
+// ─────────────────────────────────────────────────────────────
+
+type CheckoutTiming = {
+  scheduledAt:      Date;    // checkout date at 11:59 AM
+  graceDeadlineAt:  Date;    // scheduledAt + 30 min (12:29 PM)
+  actualAt:         Date;    // when modal was opened
+  minutesDiff:      number;  // actual − scheduled (positive = late, negative = early)
+  minutesPastGrace: number;  // actual − grace deadline (positive = truly late past grace)
+  status:           "early" | "on_time" | "late";
+};
+
+/**
+ * Calculates checkout timing status given the booking's checkout display date
+ * ("Apr 25, 2026") and the actual checkout moment (when modal was opened).
+ *
+ *   Before 11:59 AM              → "early"
+ *   11:59 AM – 12:29 PM (grace)  → "on_time"
+ *   After 12:29 PM               → "late"
+ */
+function calcCheckoutTiming(checkOutDisplay: string, actualAt: Date): CheckoutTiming {
+  const base = new Date(`${checkOutDisplay} 12:00:00`);   // parse local date
+  const scheduledAt = new Date(base);
+  scheduledAt.setHours(HOTEL_POLICY.checkoutHour, HOTEL_POLICY.checkoutMinute, 0, 0);
+  const graceDeadlineAt = new Date(scheduledAt.getTime() + HOTEL_POLICY.graceMinutes * 60_000);
+  const minutesDiff      = Math.round((actualAt.getTime() - scheduledAt.getTime())    / 60_000);
+  const minutesPastGrace = Math.round((actualAt.getTime() - graceDeadlineAt.getTime()) / 60_000);
+  let status: CheckoutTiming["status"];
+  if      (minutesDiff <= 0)        status = "early";
+  else if (minutesPastGrace <= 0)   status = "on_time";
+  else                              status = "late";
+  return { scheduledAt, graceDeadlineAt, actualAt, minutesDiff, minutesPastGrace, status };
+}
+
+/** Format a Date to "2:30 PM" */
+function fmtTime(d: Date): string {
+  return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+}
+
+/** Format a Date to "Apr 22, 2026" */
+function fmtShortDate(d: Date): string {
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+/**
+ * Canonical outstanding-balance formula.
+ * Always use this instead of the naive (totalAmount − amountPaid).
+ * Early deduction and additional discount are 0 for bookings not yet checked out,
+ * so the formula naturally reduces to the original for in-progress stays.
+ */
+function calcTrueDue(b: {
+  totalAmount:             number;
+  amountPaid:              number;
+  extraChargeAmount?:      number;
+  earlyDeductionAmount?:   number;
+  additionalDiscountAmount?: number;
+}): number {
+  return b.totalAmount
+    + (b.extraChargeAmount          ?? 0)
+    - (b.earlyDeductionAmount       ?? 0)
+    - (b.additionalDiscountAmount   ?? 0)
+    - b.amountPaid;
+}
+
+/**
+ * Computes early-checkout billing deduction.
+ * Calendar-date comparison only — wall-clock time is irrelevant.
+ *
+ *   earlyDays     = max(0, plannedCheckoutDate − actualCheckoutDate)  whole days
+ *   earlyAmt      = earlyDays × bookingRate  (falls back to totalAmount / nights)
+ *   actualDateISO = YYYY-MM-DD string for DB persistence
+ */
+function calcEarlyDeduction(
+  checkOut:    string,              // display format "Apr 29, 2026"
+  bookingRate: number | undefined,
+  totalAmount: number,
+  nights:      number,
+  actualAt:    Date,
+): { earlyDays: number; earlyAmt: number; actualDateISO: string } {
+  const actualMidnight = new Date(actualAt);
+  actualMidnight.setHours(0, 0, 0, 0);
+
+  const plannedMidnight = new Date(`${checkOut} 00:00:00`);
+  plannedMidnight.setHours(0, 0, 0, 0);
+
+  const earlyDays = Math.max(0, Math.round(
+    (plannedMidnight.getTime() - actualMidnight.getTime()) / 86_400_000
+  ));
+
+  const rate = (bookingRate && bookingRate > 0)
+    ? bookingRate
+    : nights > 0 ? totalAmount / nights : 0;
+
+  const earlyAmt = earlyDays * rate;
+
+  const y = actualAt.getFullYear();
+  const m = String(actualAt.getMonth() + 1).padStart(2, "0");
+  const d = String(actualAt.getDate()).padStart(2, "0");
+  const actualDateISO = `${y}-${m}-${d}`;
+
+  return { earlyDays, earlyAmt, actualDateISO };
+}
+
 const EMPTY_FORM: FormData = {
   guest: "", phone: "", room: "", checkIn: "", checkOut: "",
   status: "Confirmed", totalGuests: 1, additionalGuests: [],
+  fixedRate: "", bookingRate: "",
   totalAmount: "", amountPaid: "0",
 };
+
+// ─────────────────────────────────────────────────────────────
+// DOUBLE-BOOKING HELPERS
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Statuses that hold a room and must block new bookings for overlapping dates.
+ * "Checked Out" and "Cancelled" release the room — they don't block.
+ */
+const BLOCKING_STATUSES = new Set<BookingStatus>(["Confirmed", "Checked In"]);
+
+/**
+ * Normalise any date string to "YYYY-MM-DD" for safe lexicographic comparison.
+ * Accepts ISO dates ("2026-04-22") and display dates ("Apr 22, 2026").
+ * Returns "" on parse failure so callers can skip the overlap test safely.
+ */
+function toISODate(s: string): string {
+  if (!s) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;         // already ISO
+  // Display-format string — append time so the Date constructor uses local
+  // interpretation and getFullYear/Month/Date stay on the right calendar day.
+  const d = new Date(`${s} 12:00:00`);
+  if (isNaN(d.getTime())) return "";
+  return [
+    d.getFullYear(),
+    String(d.getMonth() + 1).padStart(2, "0"),
+    String(d.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+/**
+ * True when two date ranges for the SAME room overlap.
+ * Uses the half-open [checkIn, checkOut) convention so that a checkout on
+ * the same day as a new check-in is explicitly ALLOWED:
+ *
+ *   existingCheckIn  < newCheckOut
+ *   existingCheckOut > newCheckIn
+ *
+ * Accepts any mix of ISO or display-format date strings.
+ */
+function bookingDatesOverlap(
+  existingIn:  string, existingOut: string,
+  newIn:       string, newOut:      string,
+): boolean {
+  const eIn  = toISODate(existingIn);
+  const eOut = toISODate(existingOut);
+  const nIn  = toISODate(newIn);
+  const nOut = toISODate(newOut);
+  if (!eIn || !eOut || !nIn || !nOut) return false;
+  return eIn < nOut && eOut > nIn;
+}
+
+/**
+ * Scan the live local bookings array for a conflict.
+ * Returns the first conflicting booking or undefined.
+ *
+ * @param excludeId  Optional booking_ref to skip (used when editing a booking).
+ */
+function findRoomConflict(
+  bookings:   Booking[],
+  roomNumber: string,
+  checkIn:    string,   // ISO "YYYY-MM-DD"
+  checkOut:   string,   // ISO "YYYY-MM-DD"
+  excludeId?: string,
+): Booking | undefined {
+  if (!roomNumber || !checkIn || !checkOut) return undefined;
+  return bookings.find(b => {
+    if (excludeId && b.id === excludeId) return false;
+    if (b.roomNumber.trim() !== roomNumber.trim()) return false;
+    if (!BLOCKING_STATUSES.has(b.status)) return false;
+    return bookingDatesOverlap(b.checkIn, b.checkOut, checkIn, checkOut);
+  });
+}
 
 // Next workflow action per booking status
 type ActionDef = { label: string; next: BookingStatus; style: string } | null;
@@ -154,11 +381,12 @@ export default function BookingsClient({ initialRoom }: Props) {
   // ── Shared context ─────────────────────────────────────────
   const {
     rooms, bookings, nextBookingId,
-    createBooking, changeBookingStatus, checkoutWithOverride, recordPayment,
+    createBooking, changeBookingStatus,
+    checkoutNormal, checkoutWithOverride, recordPayment,
   } = useHotel();
 
   // Real role from authenticated session
-  const { role } = useAuth();
+  const { user, role } = useAuth();
   const isAdmin = role === "admin";
 
   // ── Local UI state ─────────────────────────────────────────
@@ -174,11 +402,45 @@ export default function BookingsClient({ initialRoom }: Props) {
   const [payAmount,    setPayAmount]    = useState<string>("");
   const [payError,     setPayError]     = useState<string>("");
 
-  // ── Blocked-checkout modal state ────────────────────────────
-  // Set to the booking when a checkout is attempted with an outstanding balance.
-  const [checkoutBlock,   setCheckoutBlock]   = useState<Booking | null>(null);
-  const [overrideReason,  setOverrideReason]  = useState<string>("");
-  const [overrideError,   setOverrideError]   = useState<string>("");
+  // ── Checkout confirmation modal state ──────────────────────
+  const [checkoutConfirm, setCheckoutConfirm] = useState<Booking | null>(null);
+  // Extra charge fields
+  const [chargeType,   setChargeType]   = useState<string>("");
+  const [chargeAmount, setChargeAmount] = useState<string>("");
+  const [chargeNote,   setChargeNote]   = useState<string>("");
+  const [chargeError,  setChargeError]  = useState<string>("");
+  // In-modal payment
+  const [showModalPay,   setShowModalPay]   = useState<boolean>(false);
+  const [modalPayAmt,    setModalPayAmt]    = useState<string>("");
+  const [modalPayError,  setModalPayError]  = useState<string>("");
+  // Override
+  const [overrideReason, setOverrideReason] = useState<string>("");
+  const [overrideError,  setOverrideError]  = useState<string>("");
+  // More Discount (ad-hoc checkout discount)
+  const [moreDiscountAmt,    setMoreDiscountAmt]    = useState<string>("");
+  const [moreDiscountReason, setMoreDiscountReason] = useState<string>("");
+  const [discountError,      setDiscountError]      = useState<string>("");
+
+  // ── Checkout timing — time captured when modal opens ────────
+  // Used as the "actual checkout time" in the timing analysis panel.
+  const [checkoutOpenedAt, setCheckoutOpenedAt] = useState<Date | null>(null);
+
+  // ── Documents modal ─────────────────────────────────────────
+  const [docsModal,      setDocsModal]      = useState<Booking | null>(null);
+  const [docsList,       setDocsList]       = useState<BookingDocument[]>([]);
+  const [docsLoading,    setDocsLoading]    = useState<boolean>(false);
+  const [docsError,      setDocsError]      = useState<string>("");
+  // Upload form inside the documents modal
+  const [docType,        setDocType]        = useState<string>("");
+  const [docFile,        setDocFile]        = useState<File | null>(null);
+  const [docNote,        setDocNote]        = useState<string>("");
+  const [docUploading,   setDocUploading]   = useState<boolean>(false);
+  const [docUploadError, setDocUploadError] = useState<string>("");
+
+  // ── Pending documents (Create Booking form) ─────────────────
+  // Documents staged before the booking exists; uploaded after createBooking.
+  const [pendingDocs,      setPendingDocs]      = useState<PendingDoc[]>([]);
+  const [pendingDocError,  setPendingDocError]  = useState<string>("");
 
   // ── Timeline modal ───────────────────────────────────────────
   // null = closed; set to a booking to show that booking's full timeline.
@@ -204,6 +466,33 @@ export default function BookingsClient({ initialRoom }: Props) {
   const nights         = calcNights(form.checkIn, form.checkOut);
   const estimatedTotal = roomInfo && nights > 0 ? roomInfo.price * nights : null;
 
+  // Rate derived values
+  const fixedRateNum   = parseFloat(form.fixedRate)   || roomInfo?.price || 0;
+  const bookingRateNum = parseFloat(form.bookingRate)  || fixedRateNum;
+  const discountPerNight = fixedRateNum > 0 && bookingRateNum < fixedRateNum
+    ? fixedRateNum - bookingRateNum : 0;
+  const discountPct = fixedRateNum > 0 && discountPerNight > 0
+    ? Math.round((discountPerNight / fixedRateNum) * 100) : 0;
+  const totalSaving  = discountPerNight > 0 && nights > 0 ? discountPerNight * nights : 0;
+
+  // ── Room availability (Layer A — real-time form feedback) ───
+  // Scans the live bookings array whenever the room number or dates change.
+  // Shows a warning banner BEFORE the user submits — no network call needed.
+  const roomConflict = useMemo((): Booking | null => {
+    const room = form.room.trim();
+    if (!room || !form.checkIn || !form.checkOut) return null;
+    if (calcNights(form.checkIn, form.checkOut) <= 0) return null;
+    return findRoomConflict(bookings, room, form.checkIn, form.checkOut) ?? null;
+  }, [bookings, form.room, form.checkIn, form.checkOut]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Live amountPaid for the booking in the checkout confirmation modal.
+  // Updates in real-time when the staff records a payment inside the modal.
+  const liveAmountPaid = useMemo(() => {
+    if (!checkoutConfirm) return 0;
+    return bookings.find(b => b.id === checkoutConfirm.id)?.amountPaid
+      ?? checkoutConfirm.amountPaid;
+  }, [bookings, checkoutConfirm?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Payment derived values (updated live as the user types)
   const totalAmountNum  = parseFloat(form.totalAmount) || 0;
   const amountPaidNum   = parseFloat(form.amountPaid)  || 0;
@@ -223,8 +512,11 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   // ── Dues view derived values ────────────────────────────────
   // All bookings with any outstanding balance, regardless of status.
+  // Uses calcTrueDue() so early deductions and additional discounts are
+  // accounted for — guests who left early and fully paid their reduced bill
+  // will not appear here as having an outstanding balance.
   const dueBookings = useMemo(
-    () => bookings.filter(b => b.totalAmount - b.amountPaid > 0),
+    () => bookings.filter(b => calcTrueDue(b) > 0),
     [bookings]
   );
 
@@ -235,7 +527,7 @@ export default function BookingsClient({ initialRoom }: Props) {
   }, [dueBookings, dueFilter]);
 
   const totalOutstanding = useMemo(
-    () => dueBookings.reduce((sum, b) => sum + (b.totalAmount - b.amountPaid), 0),
+    () => dueBookings.reduce((sum, b) => sum + calcTrueDue(b), 0),
     [dueBookings]
   );
   const dueInHouseCount     = dueBookings.filter(b => b.status === "Confirmed" || b.status === "Checked In").length;
@@ -268,14 +560,14 @@ export default function BookingsClient({ initialRoom }: Props) {
     return () => document.removeEventListener("keydown", onKey);
   }, [payModal]);
 
-  // Close blocked-checkout modal on Escape
+  // Close checkout confirmation modal on Escape
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") closeCheckoutBlock();
+      if (e.key === "Escape") closeCheckoutConfirm();
     }
-    if (checkoutBlock) document.addEventListener("keydown", onKey);
+    if (checkoutConfirm) document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [checkoutBlock]);
+  }, [checkoutConfirm]);
 
   // Close timeline modal on Escape
   useEffect(() => {
@@ -286,14 +578,36 @@ export default function BookingsClient({ initialRoom }: Props) {
     return () => document.removeEventListener("keydown", onKey);
   }, [timelineModal]);
 
-  // Auto-fill totalAmount from room rate × nights whenever either changes.
-  // Staff can always type over it for special/corporate rates.
+  // Close documents modal on Escape
   useEffect(() => {
-    if (roomInfo && nights > 0) {
-      setForm(prev => ({ ...prev, totalAmount: String(roomInfo.price * nights) }));
+    function onKey(e: KeyboardEvent) { if (e.key === "Escape") closeDocsModal(); }
+    if (docsModal) document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [docsModal]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-fill fixedRate and bookingRate when the room changes.
+  // Both start at the published room price. Staff can lower bookingRate to apply a discount.
+  useEffect(() => {
+    if (roomInfo) {
+      setForm(prev => ({
+        ...prev,
+        fixedRate:   String(roomInfo.price),
+        bookingRate: String(roomInfo.price),
+      }));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomInfo?.price, nights]);
+  }, [roomInfo?.price]);
+
+  // Auto-fill totalAmount from bookingRate × nights.
+  // Fires whenever the user edits bookingRate or when dates change.
+  // Staff can still override totalAmount directly for packages or flat rates.
+  useEffect(() => {
+    const rate = parseFloat(form.bookingRate) || 0;
+    if (rate > 0 && nights > 0) {
+      setForm(prev => ({ ...prev, totalAmount: String(rate * nights) }));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.bookingRate, nights]);
 
   // ── Core form field handler ─────────────────────────────────
   function setField<K extends keyof FormData>(key: K, value: FormData[K]) {
@@ -352,9 +666,39 @@ export default function BookingsClient({ initialRoom }: Props) {
   }
 
   // ── Submit ─────────────────────────────────────────────────
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!validate()) return;
+
+    // Validate pending documents — each must have both type and file, or be empty
+    const incompleteDoc = pendingDocs.find(d => (d.docType && !d.file) || (!d.docType && d.file));
+    if (incompleteDoc) {
+      setPendingDocError(
+        !incompleteDoc.docType
+          ? "Please select a document type for each added document."
+          : "Please select a file for each added document."
+      );
+      return;
+    }
+    setPendingDocError("");
+
+    // ── Layer B: double-booking guard ─────────────────────────
+    // Re-check against the live bookings array right before we commit.
+    // This catches any race where the useMemo warning was dismissed or
+    // the form was submitted programmatically.
+    const conflict = findRoomConflict(bookings, form.room.trim(), form.checkIn, form.checkOut);
+    if (conflict) {
+      console.warn(
+        `[handleSubmit] double-booking blocked — room ${form.room} conflicts with` +
+        ` booking ${conflict.id} (${conflict.checkIn} – ${conflict.checkOut})`
+      );
+      setErrors(prev => ({
+        ...prev,
+        room: "Room is unavailable for this date range. Please select another room or different dates.",
+      }));
+      return;
+    }
+    // ─────────────────────────────────────────────────────────
 
     const n    = calcNights(form.checkIn, form.checkOut);
     const info = rooms.find(r => r.roomNumber === form.room.trim());
@@ -370,6 +714,9 @@ export default function BookingsClient({ initialRoom }: Props) {
       : info ? info.price * n : 0;
     const resolvedPaid  = amountPaidNum;
 
+    const resolvedFixedRate   = parseFloat(form.fixedRate)   || info?.price || 0;
+    const resolvedBookingRate = parseFloat(form.bookingRate) || resolvedFixedRate;
+
     const newBooking: Booking = {
       id:               `BK-${nextBookingId}`,
       guestName:        form.guest.trim(),
@@ -383,6 +730,8 @@ export default function BookingsClient({ initialRoom }: Props) {
       payment:          derivePaymentStatus(resolvedTotal, resolvedPaid),
       totalAmount:      resolvedTotal,
       amountPaid:       resolvedPaid,
+      fixedRate:        resolvedFixedRate   || undefined,
+      bookingRate:      resolvedBookingRate || undefined,
       // Ensure count is never less than actual named guests + primary
       totalGuests:      Math.max(form.totalGuests, cleanedExtras.length + 1),
       additionalGuests: cleanedExtras,
@@ -396,11 +745,56 @@ export default function BookingsClient({ initialRoom }: Props) {
       ? ` · ${newBooking.totalGuests} guests total`
       : "";
     const paymentSummary = resolvedPaid > 0
-      ? ` · $${resolvedPaid.toLocaleString()} paid`
+      ? ` · ৳${resolvedPaid.toLocaleString()} paid`
       : " · payment pending";
-    setSuccessMsg(
-      `Booking ${newBooking.id} created for ${newBooking.guestName}${guestSummary}${paymentSummary} · Room ${newBooking.roomNumber} is now Reserved`
-    );
+
+    // ── Upload staged documents (if any) ───────────────────────
+    const docsToUpload = pendingDocs.filter(d => d.docType && d.file);
+    if (docsToUpload.length > 0) {
+      const bookingRef = newBooking.id;
+      let uploadFailed = false;
+
+      // Sequential uploads so each can be individually diagnosed in console
+      for (const pd of docsToUpload) {
+        try {
+          await uploadDocument(
+            bookingRef,
+            pd.file!,
+            pd.docType,
+            pd.note || null,
+            user?.id ?? null,
+          );
+          console.log(`[BookingsClient] pending doc uploaded → booking_ref=${bookingRef}, type=${pd.docType}`);
+        } catch (err) {
+          uploadFailed = true;
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(
+            `[BookingsClient] pending doc upload failed →`,
+            `\n  booking_ref: ${bookingRef}`,
+            `\n  docType:     ${pd.docType}`,
+            `\n  fileName:    ${pd.file!.name}`,
+            `\n  error:       ${msg}`,
+          );
+        }
+      }
+
+      if (uploadFailed) {
+        setSuccessMsg(
+          `Booking ${newBooking.id} created for ${newBooking.guestName}${guestSummary}${paymentSummary} · Room ${newBooking.roomNumber} is now Reserved — ⚠️ Document upload failed. You can upload documents later from the Documents button.`
+        );
+      } else {
+        setSuccessMsg(
+          `Booking ${newBooking.id} created for ${newBooking.guestName}${guestSummary}${paymentSummary} · Room ${newBooking.roomNumber} is now Reserved`
+        );
+      }
+    } else {
+      setSuccessMsg(
+        `Booking ${newBooking.id} created for ${newBooking.guestName}${guestSummary}${paymentSummary} · Room ${newBooking.roomNumber} is now Reserved`
+      );
+    }
+
+    setPendingDocs([]);
+    setPendingDocError("");
     setForm(EMPTY_FORM);
     setFormOpen(false);
     setActiveFilter("All");
@@ -409,12 +803,53 @@ export default function BookingsClient({ initialRoom }: Props) {
   function handleCancel() {
     setForm({ ...EMPTY_FORM, room: initialRoom ?? "" });
     setErrors({});
+    setPendingDocs([]);
+    setPendingDocError("");
     setFormOpen(false);
+  }
+
+  // ── Pending-doc helpers (Create Booking form) ───────────────
+
+  function addPendingDoc() {
+    setPendingDocs(prev => [
+      ...prev,
+      { id: crypto.randomUUID(), docType: "", file: null, note: "" },
+    ]);
+  }
+
+  function updatePendingDoc(id: string, field: keyof Omit<PendingDoc, "id" | "file">, value: string) {
+    setPendingDocs(prev =>
+      prev.map(d => d.id === id ? { ...d, [field]: value } : d)
+    );
+  }
+
+  function handlePendingFileChange(id: string, e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0] ?? null;
+    setPendingDocs(prev =>
+      prev.map(d => d.id === id ? { ...d, file } : d)
+    );
+  }
+
+  function removePendingDoc(id: string) {
+    setPendingDocs(prev => prev.filter(d => d.id !== id));
   }
 
   // ── Payment modal handlers ──────────────────────────────────
 
   function openPayModal(booking: Booking) {
+    // Guard: read live status + current role and block before even opening
+    const liveStatus    = bookings.find(b => b.id === booking.id)?.status ?? booking.status;
+    const currentRole   = role;
+    const canAddPayment = currentRole === "admin" || liveStatus === "Checked In";
+
+    if (!canAddPayment) {
+      console.log("[recordPayment] blocked before check-in", {
+        bookingId: booking.id,
+        liveStatus,
+        currentRole,
+      });
+      return;
+    }
     setPayModal(booking);
     setPayAmount("");
     setPayError("");
@@ -429,66 +864,314 @@ export default function BookingsClient({ initialRoom }: Props) {
   // ── Workflow action handler ─────────────────────────────────
   /**
    * Called whenever the "Check In" or "Check Out" button is clicked.
-   * For "Check Out" with an outstanding balance → intercept and show the
-   * blocked-checkout modal instead of proceeding directly.
-   * All other workflow transitions pass through unchanged.
+   * "Check Out" always opens the checkout confirmation modal — no checkout
+   * can ever happen without the operator reviewing the billing summary first.
+   * Check In passes straight through.
    */
   function handleWorkflowAction(booking: Booking, nextStatus: BookingStatus) {
-    const due = booking.totalAmount - booking.amountPaid;
-    if (nextStatus === "Checked Out" && due > 0) {
-      setCheckoutBlock(booking);
-      setOverrideReason("");
-      setOverrideError("");
+    if (nextStatus === "Checked Out") {
+      setCheckoutConfirm(booking);
+      setCheckoutOpenedAt(new Date());   // stamp "actual checkout time" for timing panel
+      setChargeType(""); setChargeAmount(""); setChargeNote(""); setChargeError("");
+      setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
+      setOverrideReason(""); setOverrideError("");
+      setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
     } else {
       changeBookingStatus(booking.id, nextStatus);
     }
   }
 
-  // ── Blocked-checkout modal handlers ────────────────────────
-  function closeCheckoutBlock() {
-    setCheckoutBlock(null);
-    setOverrideReason("");
-    setOverrideError("");
+  // ── Checkout confirmation modal handlers ───────────────────
+  function closeCheckoutConfirm() {
+    setCheckoutConfirm(null);
+    setCheckoutOpenedAt(null);
+    setChargeType(""); setChargeAmount(""); setChargeNote(""); setChargeError("");
+    setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
+    setOverrideReason(""); setOverrideError("");
+    setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
+  }
+
+  /** Records a payment entered inside the checkout confirmation modal. */
+  function handleModalPayment() {
+    if (!checkoutConfirm) return;
+
+    // ── Hard payment guard ────────────────────────────────────────
+    // Read booking status from the LIVE bookings array (not the stale modal
+    // snapshot) and role directly from the auth context.
+    const liveBooking   = bookings.find(b => b.id === checkoutConfirm.id);
+    const liveStatus    = liveBooking?.status ?? checkoutConfirm.status;
+    const currentRole   = role;   // "admin" | "staff" | null — from useAuth()
+    const canAddPayment = currentRole === "admin" || liveStatus === "Checked In";
+
+    if (!canAddPayment) {
+      console.log("[recordPayment] blocked before check-in", {
+        bookingId: checkoutConfirm.id,
+        liveStatus,
+        currentRole,
+      });
+      setModalPayError("Payment can only be added after check-in.");
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────
+
+    const amt       = parseFloat(modalPayAmt);
+    const extraAmt  = parseFloat(chargeAmount) || 0;
+    const { earlyAmt: earlyDeductionAmt } = calcEarlyDeduction(
+      checkoutConfirm.checkOut,
+      checkoutConfirm.bookingRate,
+      checkoutConfirm.totalAmount,
+      checkoutConfirm.nights,
+      checkoutOpenedAt ?? new Date(),
+    );
+    const moreDiscAmt = parseFloat(moreDiscountAmt) || 0;
+    const maxPay = (checkoutConfirm.totalAmount + extraAmt) - earlyDeductionAmt - moreDiscAmt - liveAmountPaid;
+    if (isNaN(amt) || amt <= 0) {
+      setModalPayError("Enter a valid amount greater than ৳0.");
+      return;
+    }
+    if (amt > maxPay) {
+      setModalPayError(`Cannot exceed outstanding balance of ৳${maxPay.toLocaleString()}.`);
+      return;
+    }
+    recordPayment(checkoutConfirm.id, amt, currentRole ?? "staff");
+    setShowModalPay(false);
+    setModalPayAmt("");
+    setModalPayError("");
+  }
+
+  /**
+   * Validates extra charge fields; returns formatted reason string or null.
+   * Returns undefined (not null) when validation fails — callers check for undefined.
+   */
+  function validateAndBuildCharge(): { amount: number; reason: string | null } | undefined {
+    const amt = parseFloat(chargeAmount) || 0;
+    if (chargeType && amt <= 0) {
+      setChargeError("Enter a valid charge amount greater than ৳0.");
+      return undefined;
+    }
+    if (chargeType === "Other" && !chargeNote.trim()) {
+      setChargeError("Description is required when charge type is 'Other'.");
+      return undefined;
+    }
+    return { amount: amt, reason: formatChargeReason(chargeType, chargeNote) };
+  }
+
+  /**
+   * Validates "More Discount" inputs.
+   * remainingAfterPayment = totalAmount + extraChargeAmt − earlyDeductionAmt − amountPaid
+   * Returns { amount } on success, undefined on validation failure (sets discountError).
+   */
+  function validateAndBuildDiscount(
+    remainingAfterPayment: number,
+  ): { amount: number } | undefined {
+    const amt = parseFloat(moreDiscountAmt) || 0;
+    if (amt < 0) {
+      setDiscountError("Discount amount cannot be negative.");
+      return undefined;
+    }
+    if (amt > remainingAfterPayment) {
+      setDiscountError(
+        `Discount cannot exceed remaining balance of ৳${remainingAfterPayment.toLocaleString()}.`
+      );
+      return undefined;
+    }
+    return { amount: amt };
+  }
+
+  /**
+   * Confirms normal checkout (finalPayable ≤ 0).
+   * Stores extra charges if present, then changes status to Checked Out.
+   */
+  function handleConfirmCheckout() {
+    if (!checkoutConfirm) return;
+    const charge = validateAndBuildCharge();
+    if (charge === undefined) return;
+    const { earlyDays, earlyAmt: earlyDeductionAmt, actualDateISO } = calcEarlyDeduction(
+      checkoutConfirm.checkOut,
+      checkoutConfirm.bookingRate,
+      checkoutConfirm.totalAmount,
+      checkoutConfirm.nights,
+      checkoutOpenedAt ?? new Date(),
+    );
+    const remainingAfterPayment =
+      checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt - liveAmountPaid;
+    const discount = validateAndBuildDiscount(remainingAfterPayment);
+    if (discount === undefined) return;
+    const finalPayable = remainingAfterPayment - discount.amount;
+    if (finalPayable > 0) {
+      setOverrideError("There is an outstanding balance. Admin override is required to proceed.");
+      return;
+    }
+    checkoutNormal(
+      checkoutConfirm.id,
+      charge.amount,
+      charge.reason,
+      actualDateISO,
+      earlyDays,
+      earlyDeductionAmt,
+      discount.amount,
+      moreDiscountReason.trim() || null,
+    );
+    setSuccessMsg(
+      `${checkoutConfirm.guestName} checked out · Room ${checkoutConfirm.roomNumber} is now Cleaning.`
+    );
+    closeCheckoutConfirm();
   }
 
   function handleAdminOverride(e: React.FormEvent) {
     e.preventDefault();
-    if (!checkoutBlock) return;
+    if (!checkoutConfirm) return;
     if (!isAdmin) {
       setOverrideError("Only admins can use this override.");
       return;
     }
-    checkoutWithOverride(checkoutBlock.id, overrideReason);
-    const due = checkoutBlock.totalAmount - checkoutBlock.amountPaid;
-    setSuccessMsg(
-      `Admin override: Booking ${checkoutBlock.id} checked out with $${due.toLocaleString()} still outstanding.`
+    const charge = validateAndBuildCharge();
+    if (charge === undefined) return;
+    const { earlyDays, earlyAmt: earlyDeductionAmt, actualDateISO } = calcEarlyDeduction(
+      checkoutConfirm.checkOut,
+      checkoutConfirm.bookingRate,
+      checkoutConfirm.totalAmount,
+      checkoutConfirm.nights,
+      checkoutOpenedAt ?? new Date(),
     );
-    closeCheckoutBlock();
+    const remainingAfterPayment =
+      checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt - liveAmountPaid;
+    const discount = validateAndBuildDiscount(remainingAfterPayment);
+    if (discount === undefined) return;
+    const finalPayable = remainingAfterPayment - discount.amount;
+    checkoutWithOverride(
+      checkoutConfirm.id,
+      overrideReason,
+      charge.amount,
+      charge.reason,
+      actualDateISO,
+      earlyDays,
+      earlyDeductionAmt,
+      discount.amount,
+      moreDiscountReason.trim() || null,
+    );
+    setSuccessMsg(
+      `Admin override: ${checkoutConfirm.guestName} checked out with ৳${finalPayable.toLocaleString()} still outstanding.`
+    );
+    closeCheckoutConfirm();
   }
+
+  // ── Document modal handlers ─────────────────────────────────
+
+  async function openDocsModal(booking: Booking) {
+    setDocsModal(booking);
+    setDocsList([]);
+    setDocsLoading(true);
+    setDocsError("");
+    setDocType(""); setDocFile(null); setDocNote(""); setDocUploadError("");
+    try {
+      const docs = await getDocuments(booking.id);
+      setDocsList(docs);
+    } catch (err) {
+      // Surface the full error message from the service (includes Supabase details)
+      const msg = err instanceof Error ? err.message : String(err);
+      setDocsError(msg || "Could not load documents.");
+    } finally {
+      setDocsLoading(false);
+    }
+  }
+
+  function closeDocsModal() {
+    setDocsModal(null);
+    setDocsList([]);
+    setDocsLoading(false);
+    setDocsError("");
+    setDocType(""); setDocFile(null); setDocNote(""); setDocUploadError("");
+  }
+
+  async function handleDocUpload() {
+    if (!docsModal) return;
+    if (!docType) { setDocUploadError("Select a document type."); return; }
+    if (!docFile)  { setDocUploadError("Select a file to upload."); return; }
+
+    setDocUploading(true);
+    setDocUploadError("");
+    try {
+      const newDoc = await uploadDocument(
+        docsModal.id, docFile, docType, docNote || null, user?.id ?? null,
+      );
+      setDocsList(prev => [newDoc, ...prev]);
+      setDocType(""); setDocFile(null); setDocNote("");
+      setSuccessMsg(`Document uploaded for ${docsModal.guestName} · ${docsModal.id}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setDocUploadError(msg || "Upload failed. Please try again.");
+    } finally {
+      setDocUploading(false);
+    }
+  }
+
+  async function handleDocDelete(docId: string, storagePath: string) {
+    try {
+      await deleteDocument(docId, storagePath);
+      setDocsList(prev => prev.filter(d => d.id !== docId));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setDocsError(msg || "Could not delete document.");
+    }
+  }
+
+  function handleDocFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0] ?? null;
+    if (!file) { setDocFile(null); return; }
+    if (!ALLOWED_MIME_TYPES.includes(file.type)) {
+      setDocUploadError(`Unsupported file type. Allowed: ${ALLOWED_EXTENSIONS_LABEL}`);
+      e.target.value = "";
+      return;
+    }
+    setDocUploadError("");
+    setDocFile(file);
+  }
+
+  // ── Payment modal handlers ──────────────────────────────────
 
   function handlePaySubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!payModal) return;
 
+    // ── Hard payment guard ────────────────────────────────────────
+    // Always look up the booking from the LIVE state — never trust the
+    // modal snapshot which may have been opened before a status change.
+    const liveBooking   = bookings.find(b => b.id === payModal.id);
+    const liveStatus    = liveBooking?.status ?? payModal.status;
+    const currentRole   = role;   // "admin" | "staff" | null — from useAuth()
+    const canAddPayment = currentRole === "admin" || liveStatus === "Checked In";
+
+    if (!canAddPayment) {
+      console.log("[recordPayment] blocked before check-in", {
+        bookingId: payModal.id,
+        liveStatus,
+        currentRole,
+      });
+      setPayError("Payment can only be added after check-in.");
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────
+
     const amount = parseFloat(payAmount);
-    const due    = payModal.totalAmount - payModal.amountPaid;
+    const due    = calcTrueDue(payModal);
 
     if (!payAmount.trim() || isNaN(amount) || amount <= 0) {
-      setPayError("Please enter a valid payment amount greater than $0.");
+      setPayError("Please enter a valid payment amount greater than ৳0.");
       return;
     }
     if (amount > due) {
       setPayError(
-        `Amount cannot exceed the outstanding balance of $${due.toLocaleString()}. ` +
-        `Enter $${due.toLocaleString()} or less.`
+        `Amount cannot exceed the outstanding balance of ৳${due.toLocaleString()}. ` +
+        `Enter ৳${due.toLocaleString()} or less.`
       );
       return;
     }
 
-    recordPayment(payModal.id, amount);
+    recordPayment(payModal.id, amount, currentRole ?? "staff");
     setSuccessMsg(
-      `Payment of $${amount.toLocaleString()} recorded for booking ${payModal.id} · ` +
-      `$${(payModal.amountPaid + amount).toLocaleString()} now paid of $${payModal.totalAmount.toLocaleString()}`
+      `Payment of ৳${amount.toLocaleString()} recorded for booking ${payModal.id} · ` +
+      `৳${(payModal.amountPaid + amount).toLocaleString()} now paid of ৳${payModal.totalAmount.toLocaleString()}`
     );
     closePayModal();
   }
@@ -744,6 +1427,43 @@ export default function BookingsClient({ initialRoom }: Props) {
                   <option value="Checked In">Checked In</option>
                 </select>
               </div>
+
+              {/* ── Stay duration summary (hotel timing policy) ── */}
+              {form.checkIn && form.checkOut && nights > 0 && (
+                <div className="col-span-full flex items-center gap-3 bg-sky-50 border border-sky-200 rounded-lg px-4 py-2.5">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-sky-500 flex-shrink-0">
+                    <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                  </svg>
+                  <p className="text-[13px] leading-relaxed">
+                    <span className="font-bold text-sky-800">{dayName(form.checkIn)}</span>
+                    {" "}<span className="text-sky-700">{formatDateShort(form.checkIn)}</span>
+                    {" "}<span className="text-sky-400 mx-0.5">→</span>{" "}
+                    <span className="font-bold text-sky-800">{dayName(form.checkOut)}</span>
+                    {" "}<span className="text-sky-700">{formatDateShort(form.checkOut)}</span>
+                    {" = "}
+                    <span className="font-bold text-sky-900">{nights} night{nights !== 1 ? "s" : ""}</span>
+                    <span className="text-sky-500 text-[11.5px] ml-2">· Check-in 12:00 PM · Check-out 11:59 AM</span>
+                  </p>
+                </div>
+              )}
+
+              {/* ── Room availability warning (Layer A — live feedback) ── */}
+              {roomConflict && (
+                <div className="col-span-full flex items-start gap-2.5 bg-rose-50 border border-rose-200 rounded-lg px-4 py-3">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                    <path d="M12 9v4M12 17h.01"/>
+                  </svg>
+                  <p className="text-[12px] text-rose-700 leading-relaxed">
+                    <span className="font-semibold">Room unavailable.</span>{" "}
+                    Room {form.room} is already booked{" "}
+                    <span className="font-medium">{roomConflict.checkIn} – {roomConflict.checkOut}</span>{" "}
+                    (booking <span className="font-mono">{roomConflict.id}</span>,{" "}
+                    status: {roomConflict.status}).{" "}
+                    Please select another room or different dates.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* ── Section 2: Guests ── */}
@@ -870,6 +1590,117 @@ export default function BookingsClient({ initialRoom }: Props) {
               </div>
             </div>
 
+            {/* ── Section 2b: Guest Documents ── */}
+            <div className="px-6 pb-5">
+
+              {/* Section separator */}
+              <div className="flex items-center gap-3 mb-4">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-widest whitespace-nowrap">
+                  Guest Documents
+                </span>
+                <div className="flex-1 h-px bg-slate-100" />
+                <span className="text-[11px] text-slate-400 italic">Optional</span>
+              </div>
+
+              {/* Helper hint */}
+              <p className="text-[12px] text-slate-400 mb-4">
+                Upload guest ID, passport, or other documents now. You can also upload them later from the Documents button on any booking.
+              </p>
+
+              {/* Pending doc entries */}
+              {pendingDocs.length > 0 && (
+                <div className="space-y-3 mb-4">
+                  {pendingDocs.map((pd, i) => (
+                    <div key={pd.id} className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+
+                      {/* Row header */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wide">
+                          Document {i + 1}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removePendingDoc(pd.id)}
+                          className="w-7 h-7 flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                          title="Remove document"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5">
+                            <path d="M18 6L6 18M6 6l12 12"/>
+                          </svg>
+                        </button>
+                      </div>
+
+                      {/* Document type */}
+                      <div>
+                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">
+                          Document Type <span className="text-rose-400">*</span>
+                        </label>
+                        <select
+                          value={pd.docType}
+                          onChange={e => updatePendingDoc(pd.id, "docType", e.target.value)}
+                          className="w-full px-3 py-2 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
+                        >
+                          <option value="">Select type…</option>
+                          {DOCUMENT_TYPES.map(t => (
+                            <option key={t} value={t}>{t}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* File */}
+                      <div>
+                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">
+                          File <span className="text-rose-400">*</span>
+                        </label>
+                        <input
+                          type="file"
+                          accept={ALLOWED_MIME_TYPES.join(",")}
+                          onChange={e => handlePendingFileChange(pd.id, e)}
+                          className="w-full text-[12.5px] text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0
+                            file:text-[12px] file:font-semibold file:bg-amber-50 file:text-amber-700 hover:file:bg-amber-100
+                            cursor-pointer transition"
+                        />
+                        <p className="text-[11px] text-slate-400 mt-1">{ALLOWED_EXTENSIONS_LABEL} — max 10 MB</p>
+                      </div>
+
+                      {/* Note */}
+                      <div>
+                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">
+                          Note <span className="text-slate-400 font-normal normal-case">(optional)</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Front side of ID"
+                          value={pd.note}
+                          onChange={e => updatePendingDoc(pd.id, "note", e.target.value)}
+                          className="w-full px-3 py-2 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                            placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Add document button */}
+              <button
+                type="button"
+                onClick={addPendingDoc}
+                className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-violet-600 hover:text-violet-800 transition-colors"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                  <circle cx="12" cy="12" r="10"/>
+                  <path d="M12 8v8M8 12h8"/>
+                </svg>
+                Add Document
+              </button>
+
+              {/* Pre-submit error (e.g. missing type or file) */}
+              {pendingDocError && (
+                <p className="mt-2 text-[12px] text-rose-500 font-medium">{pendingDocError}</p>
+              )}
+            </div>
+
             {/* ── Section 3: Payment ── */}
             <div className="px-6 pb-5">
 
@@ -881,16 +1712,97 @@ export default function BookingsClient({ initialRoom }: Props) {
                 <div className="flex-1 h-px bg-slate-100" />
               </div>
 
+              {/* ── Rate fields ── */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-5">
+
+                {/* Fixed Room Rate */}
+                <div>
+                  <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
+                    Fixed Room Rate <span className="text-slate-400 font-normal normal-case">(per night)</span>
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">৳</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      placeholder="Standard published rate"
+                      value={form.fixedRate}
+                      onChange={e => setField("fixedRate", e.target.value)}
+                      onWheel={e => (e.target as HTMLInputElement).blur()}
+                      className="w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-slate-50 border border-slate-200 rounded-lg
+                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                        [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                  </div>
+                  <p className="mt-1 text-[11.5px] text-slate-400">Published rate. Auto-filled from room price.</p>
+                </div>
+
+                {/* Booking Rate / Discounted Rate */}
+                <div>
+                  <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
+                    Booking Rate <span className="text-slate-400 font-normal normal-case">(per night)</span>
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">৳</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      placeholder="Actual negotiated rate"
+                      value={form.bookingRate}
+                      onChange={e => setField("bookingRate", e.target.value)}
+                      onWheel={e => (e.target as HTMLInputElement).blur()}
+                      className="w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                        [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                  </div>
+                  <p className="mt-1 text-[11.5px] text-slate-400">Lower than fixed rate for discounts. Sets the total.</p>
+                </div>
+
+                {/* Discount / Rate Info Strip */}
+                {fixedRateNum > 0 && bookingRateNum > 0 && fixedRateNum !== bookingRateNum && (
+                  <div className={`sm:col-span-2 flex items-center gap-4 px-4 py-2.5 rounded-lg border text-[12px] font-medium ${
+                    discountPerNight > 0
+                      ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                      : "bg-amber-50 border-amber-200 text-amber-800"
+                  }`}>
+                    {discountPerNight > 0 ? (
+                      <>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 flex-shrink-0">
+                          <path d="M20 12V22H4V12"/><path d="M22 7H2v5h20V7z"/><path d="M12 22V7"/><path d="M12 7H7.5a2.5 2.5 0 010-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 000-5C13 2 12 7 12 7z"/>
+                        </svg>
+                        <span>
+                          <span className="font-bold">{discountPct}% discount</span>
+                          {" · "}৳{discountPerNight.toLocaleString()}/night off
+                          {nights > 0 && <span className="font-bold"> · Total saving: ৳{totalSaving.toLocaleString()}</span>}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 flex-shrink-0">
+                          <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
+                        </svg>
+                        <span>
+                          <span className="font-bold">Custom rate</span> — ${(bookingRateNum - fixedRateNum).toLocaleString()}/night above standard published rate
+                        </span>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
 
                 {/* Total Amount */}
                 <div>
                   <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                    Total Amount (USD)
+                    Total Amount (BDT)
                   </label>
                   <div className="relative">
                     <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">
-                      $
+                      ৳
                     </span>
                     <input
                       type="number"
@@ -899,12 +1811,14 @@ export default function BookingsClient({ initialRoom }: Props) {
                       placeholder="0.00"
                       value={form.totalAmount}
                       onChange={e => setField("totalAmount", e.target.value)}
+                      onWheel={e => (e.target as HTMLInputElement).blur()}
                       className="w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
-                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
+                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                        [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                     />
                   </div>
                   <p className="mt-1 text-[11.5px] text-slate-400">
-                    Auto-filled from room rate × nights. Adjust for packages or discounts.
+                    Auto-computed from booking rate × nights. Override for flat-rate packages.
                   </p>
                 </div>
 
@@ -915,7 +1829,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </label>
                   <div className="relative">
                     <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">
-                      $
+                      ৳
                     </span>
                     <input
                       type="number"
@@ -924,8 +1838,10 @@ export default function BookingsClient({ initialRoom }: Props) {
                       placeholder="0.00"
                       value={form.amountPaid}
                       onChange={e => setField("amountPaid", e.target.value)}
+                      onWheel={e => (e.target as HTMLInputElement).blur()}
                       className="w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
-                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
+                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                        [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                     />
                   </div>
                   <p className="mt-1 text-[11.5px] text-slate-400">
@@ -942,7 +1858,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                       Due Amount
                     </p>
                     <p className={`text-[18px] font-bold ${dueAmount > 0 ? "text-rose-600" : "text-emerald-600"}`}>
-                      ${dueAmount.toLocaleString()}
+                      ৳{dueAmount.toLocaleString()}
                     </p>
                   </div>
 
@@ -985,7 +1901,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     <div className="h-8 w-px bg-slate-200" />
                     <div className="text-center">
                       <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Rate / Night</p>
-                      <p className="text-[18px] font-bold text-slate-800">${roomInfo.price}</p>
+                      <p className="text-[18px] font-bold text-slate-800">৳{roomInfo.price}</p>
                     </div>
                   </>
                 )}
@@ -994,18 +1910,18 @@ export default function BookingsClient({ initialRoom }: Props) {
                     <div className="h-8 w-px bg-slate-200" />
                     <div className="text-center">
                       <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Total</p>
-                      <p className="text-[18px] font-bold text-slate-800">${totalAmountNum > 0 ? totalAmountNum.toLocaleString() : estimatedTotal.toLocaleString()}</p>
+                      <p className="text-[18px] font-bold text-slate-800">৳{totalAmountNum > 0 ? totalAmountNum.toLocaleString() : estimatedTotal.toLocaleString()}</p>
                     </div>
                     <div className="h-8 w-px bg-slate-200" />
                     <div className="text-center">
                       <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Paid</p>
-                      <p className="text-[18px] font-bold text-emerald-600">${amountPaidNum.toLocaleString()}</p>
+                      <p className="text-[18px] font-bold text-emerald-600">৳{amountPaidNum.toLocaleString()}</p>
                     </div>
                     <div className="h-8 w-px bg-slate-200" />
                     <div className="text-center">
                       <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Due</p>
                       <p className={`text-[18px] font-bold ${dueAmount > 0 ? "text-rose-600" : "text-emerald-600"}`}>
-                        ${dueAmount.toLocaleString()}
+                        ৳{dueAmount.toLocaleString()}
                       </p>
                     </div>
                   </>
@@ -1086,7 +2002,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 </tr>
               ) : filteredBookings.map((b) => {
                 const action  = nextAction(b.status);
-                const due     = b.totalAmount - b.amountPaid;
+                const due     = calcTrueDue(b);
                 return (
                   <tr
                     key={b.id}
@@ -1201,20 +2117,20 @@ export default function BookingsClient({ initialRoom }: Props) {
 
                     {/* Total Amount */}
                     <td className="px-5 py-3.5 font-semibold text-slate-800 whitespace-nowrap">
-                      ${b.totalAmount.toLocaleString()}
+                      ৳{b.totalAmount.toLocaleString()}
                     </td>
 
                     {/* Amount Paid */}
                     <td className="px-5 py-3.5 whitespace-nowrap">
                       <span className={`font-semibold ${b.amountPaid > 0 ? "text-emerald-700" : "text-slate-400"}`}>
-                        {b.amountPaid > 0 ? `$${b.amountPaid.toLocaleString()}` : "—"}
+                        {b.amountPaid > 0 ? `৳${b.amountPaid.toLocaleString()}` : "—"}
                       </span>
                     </td>
 
                     {/* Due Amount */}
                     <td className="px-5 py-3.5 whitespace-nowrap">
                       {due > 0 ? (
-                        <span className="font-semibold text-rose-600">${due.toLocaleString()}</span>
+                        <span className="font-semibold text-rose-600">৳{due.toLocaleString()}</span>
                       ) : (
                         <span className="text-slate-400 text-[12px]">—</span>
                       )}
@@ -1228,12 +2144,11 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </span>
                     </td>
 
-                    {/* Action — workflow step + payment collection */}
+                    {/* Action — workflow, payment, documents, timeline */}
                     <td className="px-5 py-3.5">
                       <div className="flex flex-col gap-1.5 items-start">
-                        {/* Booking workflow: Check In → Check Out
-                            Check Out is intercepted by handleWorkflowAction
-                            when there is an outstanding balance. */}
+
+                        {/* ── Booking workflow: Check In → Check Out ── */}
                         {action && (
                           <button
                             onClick={() => handleWorkflowAction(b, action.next)}
@@ -1242,28 +2157,63 @@ export default function BookingsClient({ initialRoom }: Props) {
                             {action.label}
                           </button>
                         )}
-                        {/* Payment collection — visible whenever there is an outstanding balance */}
-                        {due > 0 && (
-                          <button
-                            onClick={() => openPayModal(b)}
-                            className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
-                              <path d="M12 5v14M5 12h14"/>
-                            </svg>
-                            Add Payment
-                          </button>
-                        )}
-                        {/* Timeline — always available for every booking */}
+
+                        {/* ── Add Payment
+                             Rule: staff can only pay when guest is Checked In.
+                             Admin can always pay but sees a warning if not checked in yet. */}
+                        {due > 0 && b.status !== "Checked Out" && (() => {
+                          const checkedIn = b.status === "Checked In";
+                          if (!isAdmin && !checkedIn) {
+                            // Staff: guest not yet checked in — show locked message
+                            return (
+                              <p className="text-[10.5px] text-slate-400 italic leading-tight">
+                                Payment available<br/>after check-in
+                              </p>
+                            );
+                          }
+                          // Admin (any status) or Staff (checked-in only)
+                          const warnAdmin = isAdmin && !checkedIn;
+                          return (
+                            <button
+                              onClick={() => openPayModal(b)}
+                              title={warnAdmin ? "Guest not yet checked in — verify before recording" : undefined}
+                              className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
+                                warnAdmin
+                                  ? "text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100"
+                                  : "text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100"
+                              }`}
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
+                                <path d="M12 5v14M5 12h14"/>
+                              </svg>
+                              Add Payment
+                            </button>
+                          );
+                        })()}
+
+                        {/* ── Documents ── */}
+                        <button
+                          onClick={() => openDocsModal(b)}
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-violet-600 transition-colors"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
+                            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                            <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>
+                          </svg>
+                          Documents
+                        </button>
+
+                        {/* ── Timeline ── */}
                         <button
                           onClick={() => setTimelineModal(b)}
-                          className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-amber-600 transition-colors mt-0.5"
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-amber-600 transition-colors"
                         >
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
                             <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
                           </svg>
                           Timeline
                         </button>
+
                       </div>
                     </td>
                   </tr>
@@ -1303,7 +2253,7 @@ export default function BookingsClient({ initialRoom }: Props) {
               </svg>
               <p className="text-[13px] font-medium text-rose-800">
                 <span className="font-bold">{dueBookings.length} booking{dueBookings.length !== 1 ? "s" : ""}</span> have outstanding balances totalling{" "}
-                <span className="font-bold">${totalOutstanding.toLocaleString()}</span>. Use "Add Payment" on each row to record payments received.
+                <span className="font-bold">৳{totalOutstanding.toLocaleString()}</span>. Use "Add Payment" on each row to record payments received.
               </p>
             </div>
           )}
@@ -1314,7 +2264,7 @@ export default function BookingsClient({ initialRoom }: Props) {
             {/* Total Outstanding */}
             <div className="bg-white border border-rose-200 rounded-xl px-5 py-4 shadow-sm">
               <p className="text-[11px] font-semibold text-rose-400 uppercase tracking-wider mb-1.5">Total Outstanding</p>
-              <p className="text-[26px] font-bold text-rose-600 leading-none">${totalOutstanding.toLocaleString()}</p>
+              <p className="text-[26px] font-bold text-rose-600 leading-none">৳{totalOutstanding.toLocaleString()}</p>
               <p className="text-[11.5px] text-slate-400 mt-1.5">across {dueBookings.length} booking{dueBookings.length !== 1 ? "s" : ""}</p>
             </div>
 
@@ -1397,7 +2347,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </td>
                     </tr>
                   ) : filteredDueBookings.map(b => {
-                    const due       = b.totalAmount - b.amountPaid;
+                    const due       = calcTrueDue(b);
                     const isHighDue = due >= HIGH_DUE_THRESHOLD;
                     return (
                       <tr
@@ -1460,13 +2410,13 @@ export default function BookingsClient({ initialRoom }: Props) {
 
                         {/* Total */}
                         <td className="px-5 py-3.5 font-semibold text-slate-800 whitespace-nowrap">
-                          ${b.totalAmount.toLocaleString()}
+                          ৳{b.totalAmount.toLocaleString()}
                         </td>
 
                         {/* Paid */}
                         <td className="px-5 py-3.5 whitespace-nowrap">
                           <span className={`font-semibold ${b.amountPaid > 0 ? "text-emerald-700" : "text-slate-400"}`}>
-                            {b.amountPaid > 0 ? `$${b.amountPaid.toLocaleString()}` : "—"}
+                            {b.amountPaid > 0 ? `৳${b.amountPaid.toLocaleString()}` : "—"}
                           </span>
                         </td>
 
@@ -1479,7 +2429,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                               </svg>
                             )}
                             <span className={`font-bold ${isHighDue ? "text-rose-600 text-[14px]" : "text-rose-500"}`}>
-                              ${due.toLocaleString()}
+                              ৳{due.toLocaleString()}
                             </span>
                           </div>
                         </td>
@@ -1510,17 +2460,35 @@ export default function BookingsClient({ initialRoom }: Props) {
                           )}
                         </td>
 
-                        {/* Add Payment */}
+                        {/* Add Payment — same rule as booking row: staff only when Checked In */}
                         <td className="px-5 py-3.5">
-                          <button
-                            onClick={() => openPayModal(b)}
-                            className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
-                              <path d="M12 5v14M5 12h14"/>
-                            </svg>
-                            Add Payment
-                          </button>
+                          {(() => {
+                            const checkedIn = b.status === "Checked In";
+                            if (!isAdmin && !checkedIn) {
+                              return (
+                                <p className="text-[10.5px] text-slate-400 italic leading-tight">
+                                  Payment after<br/>check-in
+                                </p>
+                              );
+                            }
+                            const warnAdmin = isAdmin && !checkedIn;
+                            return (
+                              <button
+                                onClick={() => openPayModal(b)}
+                                title={warnAdmin ? "Guest not yet checked in — verify before recording" : undefined}
+                                className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
+                                  warnAdmin
+                                    ? "text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100"
+                                    : "text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100"
+                                }`}
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
+                                  <path d="M12 5v14M5 12h14"/>
+                                </svg>
+                                Add Payment
+                              </button>
+                            );
+                          })()}
                         </td>
                       </tr>
                     );
@@ -1535,7 +2503,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 Showing {filteredDueBookings.length} of {dueBookings.length} bookings with outstanding dues
               </p>
               <p className="text-[12px] font-semibold text-rose-600">
-                ${filteredDueBookings.reduce((s, b) => s + (b.totalAmount - b.amountPaid), 0).toLocaleString()} outstanding in this view
+                ৳{filteredDueBookings.reduce((s, b) => s + calcTrueDue(b), 0).toLocaleString()} outstanding in this view
               </p>
             </div>
           </div>
@@ -1544,180 +2512,773 @@ export default function BookingsClient({ initialRoom }: Props) {
       )}
 
       {/* ══════════════════════════════════════════════════════
-          BLOCKED CHECKOUT MODAL
-          Fires when "Check Out" is clicked on a booking that still
-          has an outstanding balance (due > 0).
-          Staff → see the warning and can only cancel.
-          Admin → can enter a reason and force the checkout through
-                  via checkoutWithOverride() in HotelContext.
-          TODO: Replace the role check here with a real permission
-                guard once auth/RBAC is implemented.
+          CHECKOUT CONFIRMATION MODAL
+          Shown for EVERY checkout — no checkout can happen without
+          the operator reviewing the full billing summary.
+          • Shows: guest info, dates, billing summary (total/paid/due)
+          • Additional charge field for damage / extras
+          • Final payable = original due + additional charges
+          • If finalPayable = 0: "Confirm Check-out" button
+          • If finalPayable > 0: warning + admin override section
       ══════════════════════════════════════════════════════ */}
-      {checkoutBlock && (() => {
-        const due = checkoutBlock.totalAmount - checkoutBlock.amountPaid;
+      {checkoutConfirm && (() => {
+        const extraChargeAmt     = parseFloat(chargeAmount) || 0;
+        const moreDiscountAmtNum = parseFloat(moreDiscountAmt) || 0;
+        const { earlyDays, earlyAmt: earlyDeductionAmt } = calcEarlyDeduction(
+          checkoutConfirm.checkOut,
+          checkoutConfirm.bookingRate,
+          checkoutConfirm.totalAmount,
+          checkoutConfirm.nights,
+          checkoutOpenedAt ?? new Date(),
+        );
+        const finalTotal   = checkoutConfirm.totalAmount + extraChargeAmt;
+        const finalPayable = finalTotal - earlyDeductionAmt - moreDiscountAmtNum - liveAmountPaid;
+        const payStatus    = derivePaymentStatus(checkoutConfirm.totalAmount, liveAmountPaid);
         return (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
-            onClick={e => { if (e.target === e.currentTarget) closeCheckoutBlock(); }}
+            onClick={e => { if (e.target === e.currentTarget) closeCheckoutConfirm(); }}
           >
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden max-h-[90vh] flex flex-col">
 
-              {/* Modal header — amber warning tone */}
-              <div className="flex items-center justify-between px-6 py-4 border-b border-amber-200 bg-amber-50">
+              {/* ── Modal header ───────────────────────────────── */}
+              <div className={`flex items-center justify-between px-6 py-4 border-b flex-shrink-0 ${
+                finalPayable > 0 ? "bg-amber-50 border-amber-200" : "bg-slate-50 border-slate-200"
+              }`}>
                 <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-amber-500 flex items-center justify-center flex-shrink-0">
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                    finalPayable > 0 ? "bg-amber-500" : "bg-slate-700"
+                  }`}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-white">
-                      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-                      <path d="M12 9v4M12 17h.01"/>
+                      <path d="M19 12H5M12 5l7 7-7 7"/>
                     </svg>
                   </div>
                   <div>
-                    <h2 className="text-[14px] font-bold text-amber-900 leading-none">
-                      Checkout Blocked
+                    <h2 className={`text-[14px] font-bold leading-none ${finalPayable > 0 ? "text-amber-900" : "text-slate-800"}`}>
+                      Confirm Check-out
                     </h2>
-                    <p className="text-[11.5px] text-amber-700 mt-0.5 font-mono">
-                      {checkoutBlock.id}
+                    <p className={`text-[11.5px] mt-0.5 font-mono ${finalPayable > 0 ? "text-amber-700" : "text-slate-400"}`}>
+                      {checkoutConfirm.id}
                     </p>
                   </div>
                 </div>
-                <button
-                  onClick={closeCheckoutBlock}
-                  className="p-1.5 text-amber-500 hover:text-amber-800 hover:bg-amber-100 rounded-lg transition-colors"
-                >
+                <button onClick={closeCheckoutConfirm} className={`p-1.5 rounded-lg transition-colors ${
+                  finalPayable > 0 ? "text-amber-500 hover:text-amber-800 hover:bg-amber-100" : "text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                }`}>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
                     <path d="M18 6L6 18M6 6l12 12"/>
                   </svg>
                 </button>
               </div>
 
-              <div className="px-6 py-5">
+              {/* ── Scrollable body ─────────────────────────────── */}
+              <div className="px-6 py-5 overflow-y-auto flex-1 space-y-5">
 
-                {/* Guest summary */}
-                <div className="flex items-center gap-3 mb-5">
-                  <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 text-[11px] font-bold ${avatarColor(checkoutBlock.guestName)}`}>
-                    {initials(checkoutBlock.guestName)}
+                {/* Guest info */}
+                <div className="flex items-start gap-3">
+                  <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 text-[11px] font-bold mt-0.5 ${avatarColor(checkoutConfirm.guestName)}`}>
+                    {initials(checkoutConfirm.guestName)}
                   </div>
                   <div>
-                    <p className="text-[13.5px] font-semibold text-slate-800">{checkoutBlock.guestName}</p>
-                    <p className="text-[12px] text-slate-400">
-                      Room {checkoutBlock.roomNumber} · {checkoutBlock.roomCategory} · {checkoutBlock.nights} night{checkoutBlock.nights !== 1 ? "s" : ""}
-                    </p>
+                    <p className="text-[13.5px] font-semibold text-slate-800">{checkoutConfirm.guestName}</p>
+                    <p className="text-[12px] text-slate-500">Room {checkoutConfirm.roomNumber} · {checkoutConfirm.roomCategory} · {checkoutConfirm.nights} nt</p>
+                    <p className="text-[12px] text-slate-400">{checkoutConfirm.checkIn} → {checkoutConfirm.checkOut}</p>
                   </div>
-                </div>
-
-                {/* Outstanding balance tile */}
-                <div className="flex items-center gap-4 bg-rose-50 border border-rose-200 rounded-xl px-5 py-4 mb-5">
-                  <div className="flex-shrink-0 w-9 h-9 rounded-full bg-rose-100 flex items-center justify-center">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-600">
-                      <path d="M12 5v14M5 12h14"/>
-                    </svg>
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-[12px] font-semibold text-rose-700 uppercase tracking-wide">Outstanding Balance</p>
-                    <p className="text-[22px] font-bold text-rose-600 leading-none mt-0.5">${due.toLocaleString()}</p>
-                    <p className="text-[11.5px] text-rose-500 mt-0.5">
-                      ${checkoutBlock.amountPaid.toLocaleString()} paid of ${checkoutBlock.totalAmount.toLocaleString()} total
-                    </p>
-                  </div>
-                </div>
-
-                {/* Policy explanation */}
-                <div className="bg-slate-50 border border-slate-200 rounded-lg px-4 py-3.5 mb-5 space-y-2">
-                  <div className="flex items-start gap-2">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-slate-500 flex-shrink-0 mt-0.5">
-                      <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
-                    </svg>
-                    <p className="text-[12.5px] text-slate-700 font-medium leading-relaxed">
-                      This guest has an unpaid balance. Checkout cannot be completed until the account is settled.
-                    </p>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5">
-                      <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
-                    </svg>
-                    <p className="text-[12px] text-slate-500 leading-relaxed">
-                      <span className="font-semibold text-slate-700">Staff</span> cannot bypass this block.
-                      {" "}<span className="font-semibold text-slate-700">Admin</span> can override with a stated reason — the override will be logged on the booking.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Role indicator — real role from auth */}
-                <div className="flex items-center gap-2 mb-5">
-                  <span className="text-[12px] text-slate-500">You are signed in as:</span>
-                  <span className={`text-[12px] font-bold px-2.5 py-0.5 rounded-full capitalize ${
-                    isAdmin
-                      ? "bg-amber-100 text-amber-800 border border-amber-300"
-                      : "bg-slate-100 text-slate-600 border border-slate-200"
-                  }`}>
-                    {role ?? "staff"}
+                  <span className={`ml-auto flex-shrink-0 text-[11.5px] font-semibold px-2.5 py-0.5 rounded-full ${statusBadge(checkoutConfirm.status)}`}>
+                    {checkoutConfirm.status}
                   </span>
                 </div>
 
-                {/* Override form — only active for admin */}
-                <form onSubmit={handleAdminOverride}>
-                  <div className="mb-4">
-                    <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                      Override Reason
-                      <span className="ml-1 font-normal normal-case text-slate-400">(recommended)</span>
-                    </label>
-                    <textarea
-                      rows={2}
-                      placeholder={
-                        isAdmin
-                          ? "e.g. Guest settling balance via bank transfer on arrival, confirmed by manager."
-                          : "Only admins can use this override."
-                      }
-                      value={overrideReason}
-                      onChange={e => { setOverrideReason(e.target.value); setOverrideError(""); }}
-                      disabled={!isAdmin}
-                      className={`w-full px-3.5 py-2.5 text-[13px] text-slate-800 bg-white border rounded-lg resize-none
-                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                        ${!isAdmin ? "bg-slate-50 cursor-not-allowed text-slate-400" : "border-slate-200"}
-                      `}
-                    />
-                    {overrideError && (
-                      <div className="mt-1.5 flex items-start gap-1.5">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-rose-500 flex-shrink-0 mt-0.5">
+                {/* ── STAY TIMING ──────────────────────────────────── */}
+                {(() => {
+                  const t = calcCheckoutTiming(checkoutConfirm.checkOut, checkoutOpenedAt ?? new Date());
+                  const isEarly  = t.status === "early";
+                  const isOnTime = t.status === "on_time";
+                  const isLate   = t.status === "late";
+                  return (
+                    <div>
+                      <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Stay Timing</p>
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl overflow-hidden">
+                        <div className="divide-y divide-slate-100">
+                          <div className="flex items-center justify-between px-4 py-2">
+                            <span className="text-[12.5px] text-slate-500">Check-in</span>
+                            <span className="text-[12.5px] font-medium text-slate-700">{checkoutConfirm.checkIn} · 12:00 PM</span>
+                          </div>
+                          <div className="flex items-center justify-between px-4 py-2">
+                            <span className="text-[12.5px] text-slate-500">Scheduled checkout</span>
+                            <span className="text-[12.5px] font-medium text-slate-700">{checkoutConfirm.checkOut} · 11:59 AM</span>
+                          </div>
+                          <div className="flex items-center justify-between px-4 py-2">
+                            <span className="text-[12.5px] text-slate-500">Grace period until</span>
+                            <span className="text-[12.5px] text-slate-500">{fmtTime(t.graceDeadlineAt)}</span>
+                          </div>
+                          <div className="flex items-center justify-between px-4 py-2">
+                            <span className="text-[12.5px] text-slate-500">Actual checkout</span>
+                            <span className="text-[12.5px] font-semibold text-slate-800">
+                              {fmtShortDate(t.actualAt)} · {fmtTime(t.actualAt)}
+                            </span>
+                          </div>
+                        </div>
+                        <div className={`flex items-center justify-between px-4 py-2.5 border-t ${
+                          isEarly  ? "bg-emerald-50 border-emerald-100" :
+                          isOnTime ? "bg-sky-50 border-sky-100" :
+                                     "bg-amber-50 border-amber-100"
+                        }`}>
+                          <span className={`text-[12.5px] font-semibold flex items-center gap-1.5 ${
+                            isEarly  ? "text-emerald-700" :
+                            isOnTime ? "text-sky-700" :
+                                       "text-amber-700"
+                          }`}>
+                            {isEarly  && <><span>✓</span> Early checkout</>}
+                            {isOnTime && <><span>✓</span> On time <span className="font-normal text-[11.5px]">(within grace)</span></>}
+                            {isLate   && <><span>⚠</span> Late checkout</>}
+                          </span>
+                          <span className={`text-[12px] ${
+                            isEarly  ? "text-emerald-600" :
+                            isOnTime ? "text-sky-600" :
+                                       "text-amber-600"
+                          }`}>
+                            {t.minutesDiff > 0 && `+${t.minutesDiff} min past checkout`}
+                            {t.minutesDiff < 0 && `${Math.abs(t.minutesDiff)} min early`}
+                            {t.minutesDiff === 0 && "Exactly on time"}
+                          </span>
+                        </div>
+                      </div>
+                      <p className="mt-1.5 px-0.5 text-[11px] text-slate-400">
+                        Planned: <span className="font-semibold text-slate-600">{checkoutConfirm.nights} night{checkoutConfirm.nights !== 1 ? "s" : ""}</span>
+                        {" · "}Grace: <span className="font-semibold text-slate-600">30 min</span>
+                        {" · "}Late-checkout fees not yet applied.
+                      </p>
+                    </div>
+                  );
+                })()}
+
+                {/* ── BILLING SUMMARY ─────────────────────────────── */}
+                <div>
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Billing Summary</p>
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl overflow-hidden">
+                    <div className="divide-y divide-slate-100">
+                      <div className="flex items-center justify-between px-4 py-2.5">
+                        <span className="text-[13px] text-slate-600">Total Amount</span>
+                        <span className="text-[13.5px] font-semibold text-slate-800">৳{checkoutConfirm.totalAmount.toLocaleString()}</span>
+                      </div>
+                      {extraChargeAmt > 0 && (
+                        <div className="flex items-center justify-between px-4 py-2.5 bg-amber-50/50">
+                          <span className="text-[13px] text-amber-700">Extra Charges</span>
+                          <span className="text-[13.5px] font-semibold text-amber-700">+৳{extraChargeAmt.toLocaleString()}</span>
+                        </div>
+                      )}
+                      {earlyDeductionAmt > 0 && (
+                        <div className="flex items-center justify-between px-4 py-2.5 bg-emerald-50/50">
+                          <span className="text-[13px] text-emerald-700">
+                            Early Checkout
+                            <span className="ml-1.5 text-[11.5px] font-normal text-emerald-600">
+                              ({earlyDays} night{earlyDays !== 1 ? "s" : ""} deducted)
+                            </span>
+                          </span>
+                          <span className="text-[13.5px] font-semibold text-emerald-700">−৳{earlyDeductionAmt.toLocaleString()}</span>
+                        </div>
+                      )}
+                      {moreDiscountAmtNum > 0 && (
+                        <div className="flex items-center justify-between px-4 py-2.5 bg-violet-50/50">
+                          <span className="text-[13px] text-violet-700">Additional Discount</span>
+                          <span className="text-[13.5px] font-semibold text-violet-700">−৳{moreDiscountAmtNum.toLocaleString()}</span>
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between px-4 py-2.5">
+                        <span className="text-[13px] text-slate-600">Amount Paid</span>
+                        <span className={`text-[13.5px] font-semibold ${liveAmountPaid > 0 ? "text-emerald-700" : "text-slate-400"}`}>
+                          {liveAmountPaid > 0 ? `৳${liveAmountPaid.toLocaleString()}` : "—"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between px-4 py-3 bg-slate-100/60">
+                        <span className="text-[13px] font-bold text-slate-700">Final Payable</span>
+                        <span className={`text-[16px] font-bold ${finalPayable > 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                          {finalPayable > 0 ? `৳${finalPayable.toLocaleString()}` : "৳0 — Settled ✓"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  {/* Payment status badge */}
+                  <div className="flex items-center gap-1.5 mt-2 px-1">
+                    <span className={`inline-flex items-center gap-1.5 text-[12px] font-semibold px-2.5 py-0.5 rounded-full ${paymentBadge(payStatus)}`}>
+                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${paymentDot(payStatus)}`}/>
+                      {payStatus}
+                    </span>
+                    <span className="text-[11.5px] text-slate-400">payment status</span>
+                  </div>
+                </div>
+
+                {/* ── EXTRA CHARGES ───────────────────────────────── */}
+                <div>
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">
+                    Additional Charges
+                    <span className="ml-1.5 font-normal normal-case text-slate-400 text-[11px]">optional — damage, mini-bar, etc.</span>
+                  </p>
+                  <div className="space-y-3">
+                    {/* Charge type dropdown */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">Charge Type</label>
+                        <select
+                          value={chargeType}
+                          onChange={e => { setChargeType(e.target.value); setChargeError(""); }}
+                          className="w-full px-3 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                            focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition appearance-none cursor-pointer"
+                        >
+                          <option value="">— Select type —</option>
+                          {CHARGE_TYPES.map(t => (
+                            <option key={t} value={t}>{t}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">Amount (BDT)</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none text-[13px]">৳</span>
+                          <input
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            placeholder="0.00"
+                            value={chargeAmount}
+                            onChange={e => { setChargeAmount(e.target.value); setChargeError(""); }}
+                            onWheel={e => (e.target as HTMLInputElement).blur()}
+                            disabled={!chargeType}
+                            className="w-full pl-6 pr-3 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                              placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                              disabled:bg-slate-50 disabled:cursor-not-allowed
+                              [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    {/* Description / note */}
+                    <div>
+                      <label className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">
+                        Description
+                        {chargeType === "Other" && <span className="ml-1 text-rose-500">*</span>}
+                        {chargeType && chargeType !== "Other" && <span className="ml-1 font-normal normal-case text-slate-400">(optional)</span>}
+                      </label>
+                      <input
+                        type="text"
+                        placeholder={
+                          chargeType === "Mini-bar" ? "e.g. 3 soft drinks, 1 beer"
+                          : chargeType === "Room damage" ? "e.g. Broken lamp"
+                          : chargeType === "Other" ? "Required — describe the charge"
+                          : "Optional note"
+                        }
+                        value={chargeNote}
+                        onChange={e => { setChargeNote(e.target.value); setChargeError(""); }}
+                        disabled={!chargeType}
+                        className="w-full px-3.5 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                          placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                          disabled:bg-slate-50 disabled:cursor-not-allowed"
+                      />
+                    </div>
+                    {chargeError && (
+                      <p className="text-[11.5px] text-rose-600 flex items-center gap-1.5">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 flex-shrink-0">
                           <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
                         </svg>
-                        <p className="text-[11.5px] text-rose-600">{overrideError}</p>
+                        {chargeError}
+                      </p>
+                    )}
+                    {/* Formatted preview */}
+                    {chargeType && parseFloat(chargeAmount) > 0 && (
+                      <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3.5 py-2.5">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-amber-600 flex-shrink-0">
+                          <path d="M9 12l2 2 4-4M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <span className="text-[12px] text-amber-800 font-medium">
+                          {formatChargeReason(chargeType, chargeNote) ?? chargeType} — ৳{parseFloat(chargeAmount).toLocaleString()}
+                        </span>
                       </div>
                     )}
                   </div>
+                </div>
 
-                  {/* Actions */}
-                  <div className="flex items-center justify-end gap-3">
+                {/* ── MORE DISCOUNT ───────────────────────────────── */}
+                <div>
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">
+                    More Discount
+                    <span className="ml-1.5 font-normal normal-case text-slate-400 text-[11px]">optional — e.g. loyalty, manager approval</span>
+                  </p>
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">Amount (BDT)</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none text-[13px]">৳</span>
+                          <input
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            placeholder="0.00"
+                            value={moreDiscountAmt}
+                            onChange={e => { setMoreDiscountAmt(e.target.value); setDiscountError(""); }}
+                            onWheel={e => (e.target as HTMLInputElement).blur()}
+                            className="w-full pl-6 pr-3 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                              placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition
+                              [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">
+                          Reason <span className="ml-1 font-normal normal-case text-slate-400">(optional)</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Loyalty discount"
+                          value={moreDiscountReason}
+                          onChange={e => { setMoreDiscountReason(e.target.value); setDiscountError(""); }}
+                          className="w-full px-3.5 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                            placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
+                        />
+                      </div>
+                    </div>
+                    {discountError && (
+                      <p className="text-[11.5px] text-rose-600 flex items-center gap-1.5">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 flex-shrink-0">
+                          <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
+                        </svg>
+                        {discountError}
+                      </p>
+                    )}
+                    {parseFloat(moreDiscountAmt) > 0 && (
+                      <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded-lg px-3.5 py-2.5">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-violet-600 flex-shrink-0">
+                          <path d="M9 12l2 2 4-4M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <span className="text-[12px] text-violet-800 font-medium">
+                          Discount of ৳{parseFloat(moreDiscountAmt).toLocaleString()} will be applied
+                          {moreDiscountReason.trim() && ` — ${moreDiscountReason.trim()}`}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ── ADD PAYMENT ─────────────────────────────────── */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Add Payment</p>
                     <button
                       type="button"
-                      onClick={closeCheckoutBlock}
-                      className="px-4 py-2.5 text-[13px] font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors"
-                    >
-                      Cancel
-                    </button>
-
-                    <button
-                      type="submit"
-                      disabled={!isAdmin}
-                      title={!isAdmin ? "Only admins can use this override" : undefined}
-                      className={`flex items-center gap-2 px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-colors shadow-sm ${
-                        isAdmin
-                          ? "text-white bg-amber-500 hover:bg-amber-600"
-                          : "text-slate-400 bg-slate-100 border border-slate-200 cursor-not-allowed"
+                      onClick={() => { setShowModalPay(v => !v); setModalPayAmt(""); setModalPayError(""); }}
+                      className={`text-[12px] font-semibold px-3 py-1 rounded-lg border transition-colors ${
+                        showModalPay
+                          ? "bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200"
+                          : "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
                       }`}
                     >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
-                        <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
-                      </svg>
-                      Admin Override Checkout
+                      {showModalPay ? "Cancel" : "+ Add Payment"}
                     </button>
                   </div>
-                </form>
+                  {showModalPay && (
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-4 space-y-3">
+                      <p className="text-[12px] text-emerald-700 font-medium">
+                        Collect payment from guest and record it here to update the balance instantly.
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <div className="relative flex-1">
+                          <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">৳</span>
+                          <input
+                            type="number"
+                            min={0.01}
+                            step="0.01"
+                            placeholder="0.00"
+                            value={modalPayAmt}
+                            onChange={e => { setModalPayAmt(e.target.value); setModalPayError(""); }}
+                            onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); handleModalPayment(); } }}
+                            onWheel={e => (e.target as HTMLInputElement).blur()}
+                            className="w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-emerald-200 rounded-lg
+                              placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent transition
+                              [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                            autoFocus
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleModalPayment}
+                          className="flex items-center gap-1.5 px-4 py-2.5 text-[13px] font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors shadow-sm whitespace-nowrap"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3.5 h-3.5">
+                            <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
+                          </svg>
+                          Record
+                        </button>
+                      </div>
+                      {modalPayError && (
+                        <p className="text-[11.5px] text-rose-600">{modalPayError}</p>
+                      )}
+                      {finalPayable > 0 && (
+                        <p className="text-[11.5px] text-emerald-700">
+                          Max: <span className="font-bold">৳{finalPayable.toLocaleString()}</span> outstanding
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* ── OUTSTANDING BALANCE WARNING + ADMIN OVERRIDE ── */}
+                {finalPayable > 0 && (
+                  <div>
+                    <div className="bg-rose-50 border border-rose-200 rounded-lg px-4 py-3 mb-4 flex items-start gap-2">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                        <path d="M12 9v4M12 17h.01"/>
+                      </svg>
+                      <div>
+                        <p className="text-[12.5px] font-semibold text-rose-800 leading-snug">Outstanding balance blocks checkout.</p>
+                        <p className="text-[12px] text-rose-600 mt-0.5">
+                          Collect <span className="font-bold">৳{finalPayable.toLocaleString()}</span> before checkout, or use Admin Override to proceed with reason.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 mb-3">
+                      <span className="text-[12px] text-slate-500">Signed in as:</span>
+                      <span className={`text-[12px] font-bold px-2.5 py-0.5 rounded-full capitalize ${
+                        isAdmin ? "bg-amber-100 text-amber-800 border border-amber-300" : "bg-slate-100 text-slate-600 border border-slate-200"
+                      }`}>
+                        {role ?? "staff"}
+                      </span>
+                    </div>
+
+                    <form onSubmit={handleAdminOverride}>
+                      <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
+                        Override Reason
+                        <span className="ml-1 font-normal normal-case text-slate-400">(required for audit log)</span>
+                      </label>
+                      <textarea
+                        rows={2}
+                        placeholder={isAdmin
+                          ? "e.g. Guest settling via bank transfer, confirmed by manager."
+                          : "Only admins can enter a reason and override checkout."}
+                        value={overrideReason}
+                        onChange={e => { setOverrideReason(e.target.value); setOverrideError(""); }}
+                        disabled={!isAdmin}
+                        className={`w-full px-3.5 py-2.5 text-[13px] text-slate-800 bg-white border rounded-lg resize-none mb-3
+                          placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                          ${!isAdmin ? "bg-slate-50 cursor-not-allowed text-slate-400" : "border-slate-200"}`}
+                      />
+                      {overrideError && <p className="mb-3 text-[11.5px] text-rose-600">{overrideError}</p>}
+                      <div className="flex items-center justify-end gap-3">
+                        <button type="button" onClick={closeCheckoutConfirm}
+                          className="px-4 py-2.5 text-[13px] font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors">
+                          Cancel
+                        </button>
+                        <button type="submit" disabled={!isAdmin}
+                          className={`flex items-center gap-2 px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-colors shadow-sm ${
+                            isAdmin ? "text-white bg-amber-500 hover:bg-amber-600" : "text-slate-400 bg-slate-100 border border-slate-200 cursor-not-allowed"
+                          }`}>
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
+                            <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
+                          </svg>
+                          Admin Override Checkout
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                )}
+
+                {/* ── CONFIRM CHECKOUT ────────────────────────────── */}
+                {finalPayable <= 0 && (
+                  <div className="flex items-center justify-end gap-3 pt-1">
+                    <button type="button" onClick={closeCheckoutConfirm}
+                      className="px-4 py-2.5 text-[13px] font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors">
+                      Cancel
+                    </button>
+                    <button type="button" onClick={handleConfirmCheckout}
+                      className="flex items-center gap-2 px-5 py-2.5 text-[13px] font-semibold text-white bg-slate-800 hover:bg-slate-900 rounded-lg transition-colors shadow-sm">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
+                        <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
+                      </svg>
+                      Confirm Check-out
+                    </button>
+                  </div>
+                )}
+
               </div>
             </div>
           </div>
         );
       })()}
+
+      {/* ══════════════════════════════════════════════════════
+          GUEST DOCUMENTS MODAL
+          Opens from "Documents" button in every booking row.
+          • Fetches documents for that booking on open.
+          • Allows uploading new documents (image/PDF).
+          • Admin can delete documents.
+      ══════════════════════════════════════════════════════ */}
+      {docsModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+          onClick={e => { if (e.target === e.currentTarget) closeDocsModal(); }}
+        >
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden max-h-[90vh] flex flex-col">
+
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50 flex-shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-7 h-7 rounded-lg bg-violet-600 flex items-center justify-center flex-shrink-0">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-white">
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                    <path d="M14 2v6h6"/>
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-[14px] font-semibold text-slate-800 leading-none">Guest Documents</h2>
+                  <p className="text-[11.5px] text-slate-400 mt-0.5">
+                    {docsModal.guestName} · <span className="font-mono">{docsModal.id}</span>
+                  </p>
+                </div>
+              </div>
+              <button onClick={closeDocsModal} className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition-colors">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
+                  <path d="M18 6L6 18M6 6l12 12"/>
+                </svg>
+              </button>
+            </div>
+
+            {/* Scrollable body */}
+            <div className="overflow-y-auto flex-1 px-6 py-5 space-y-6">
+
+              {/* ── Document list ───────────────────────────────── */}
+              <div>
+                <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-3">
+                  Uploaded Documents
+                  {docsList.length > 0 && (
+                    <span className="ml-2 text-violet-700 bg-violet-50 border border-violet-200 px-2 py-0.5 rounded-full font-bold text-[10.5px]">
+                      {docsList.length}
+                    </span>
+                  )}
+                </p>
+
+                {docsLoading && (
+                  <div className="flex items-center gap-2 py-6 justify-center">
+                    <svg className="w-4 h-4 text-slate-400 animate-spin" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+                    </svg>
+                    <p className="text-[13px] text-slate-400">Loading documents…</p>
+                  </div>
+                )}
+
+                {!docsLoading && docsError && (
+                  <div className="bg-rose-50 border border-rose-200 rounded-lg px-4 py-3 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5">
+                        <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
+                      </svg>
+                      <p className="text-[12.5px] text-rose-700 leading-snug">{docsError}</p>
+                    </div>
+                    <button
+                      onClick={() => docsModal && openDocsModal(docsModal)}
+                      className="text-[11.5px] font-semibold text-rose-600 hover:text-rose-800 hover:underline ml-6"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+
+                {!docsLoading && !docsError && docsList.length === 0 && (
+                  <div className="flex flex-col items-center py-8 text-center">
+                    <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center mb-2">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="w-5 h-5 text-slate-300">
+                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                        <path d="M14 2v6h6"/>
+                      </svg>
+                    </div>
+                    <p className="text-[13px] text-slate-400">No documents uploaded yet.</p>
+                    <p className="text-[12px] text-slate-300 mt-0.5">Use the form below to add the first document.</p>
+                  </div>
+                )}
+
+                {!docsLoading && docsList.length > 0 && (
+                  <div className="space-y-2">
+                    {docsList.map(doc => {
+                      const isImage = doc.fileType.startsWith("image/");
+                      return (
+                        <div key={doc.id} className="flex items-start gap-3 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 group">
+                          {/* File type icon */}
+                          <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            {isImage ? (
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-violet-500">
+                                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                                <circle cx="8.5" cy="8.5" r="1.5"/>
+                                <path d="M21 15l-5-5L5 21"/>
+                              </svg>
+                            ) : (
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-rose-500">
+                                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                                <path d="M14 2v6h6M9 13h6M9 17h6"/>
+                              </svg>
+                            )}
+                          </div>
+                          {/* Info */}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[11px] font-bold text-violet-700 bg-violet-50 border border-violet-200 px-2 py-0.5 rounded-full">
+                                {doc.documentType}
+                              </span>
+                              <p className="text-[12.5px] font-medium text-slate-700 truncate max-w-[200px]">
+                                {doc.fileName}
+                              </p>
+                            </div>
+                            {doc.note && (
+                              <p className="text-[11.5px] text-slate-500 mt-0.5 truncate">{doc.note}</p>
+                            )}
+                            <p className="text-[10.5px] text-slate-400 mt-0.5">
+                              {new Date(doc.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}
+                            </p>
+                          </div>
+                          {/* Actions */}
+                          <div className="flex items-center gap-1.5 flex-shrink-0">
+                            <a
+                              href={doc.fileUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[11px] font-semibold text-violet-600 hover:text-violet-700 hover:underline"
+                            >
+                              View
+                            </a>
+                            {isAdmin && (
+                              <button
+                                onClick={() => handleDocDelete(doc.id, doc.storagePath)}
+                                className="text-[11px] font-semibold text-rose-400 hover:text-rose-600 transition-colors px-1.5 py-0.5 rounded hover:bg-rose-50"
+                                title="Delete document"
+                              >
+                                Delete
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* ── Upload new document ─────────────────────────── */}
+              <div className="border-t border-slate-100 pt-5">
+                <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-3">Add Document</p>
+
+                <div className="space-y-3">
+                  {/* Type + file on the same row */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">
+                        Document Type <span className="text-rose-500">*</span>
+                      </label>
+                      <select
+                        value={docType}
+                        onChange={e => { setDocType(e.target.value); setDocUploadError(""); }}
+                        className="w-full px-3 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                          focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition appearance-none cursor-pointer"
+                      >
+                        <option value="">— Select type —</option>
+                        {DOCUMENT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">
+                        File <span className="text-rose-500">*</span>
+                        <span className="ml-1 font-normal normal-case text-slate-400">({ALLOWED_EXTENSIONS_LABEL})</span>
+                      </label>
+                      <input
+                        type="file"
+                        accept={ALLOWED_MIME_TYPES.join(",")}
+                        onChange={handleDocFileChange}
+                        className="w-full text-[12px] text-slate-700 bg-white border border-slate-200 rounded-lg px-2.5 py-2
+                          file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:text-[11px] file:font-semibold
+                          file:bg-violet-50 file:text-violet-700 hover:file:bg-violet-100 cursor-pointer"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Optional note */}
+                  <div>
+                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">
+                      Note <span className="font-normal normal-case text-slate-400">(optional)</span>
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Passport valid until 2028, visibly worn"
+                      value={docNote}
+                      onChange={e => setDocNote(e.target.value)}
+                      className="w-full px-3.5 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
+                    />
+                  </div>
+
+                  {/* Selected file preview */}
+                  {docFile && (
+                    <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded-lg px-3.5 py-2.5">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-violet-600 flex-shrink-0">
+                        <path d="M9 12l2 2 4-4M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                      </svg>
+                      <span className="text-[12px] text-violet-800 font-medium truncate">{docFile.name}</span>
+                      <span className="text-[11px] text-violet-500 ml-auto flex-shrink-0">
+                        {(docFile.size / 1024).toFixed(0)} KB
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Error */}
+                  {docUploadError && (
+                    <p className="text-[11.5px] text-rose-600 flex items-center gap-1.5">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 flex-shrink-0">
+                        <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
+                      </svg>
+                      {docUploadError}
+                    </p>
+                  )}
+
+                  {/* Submit */}
+                  <div className="flex items-center justify-end gap-3 pt-1">
+                    <button type="button" onClick={closeDocsModal}
+                      className="px-4 py-2 text-[13px] font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors">
+                      Close
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDocUpload}
+                      disabled={docUploading || !docType || !docFile}
+                      className={`flex items-center gap-2 px-5 py-2 text-[13px] font-semibold rounded-lg transition-colors shadow-sm ${
+                        docUploading || !docType || !docFile
+                          ? "text-slate-400 bg-slate-100 border border-slate-200 cursor-not-allowed"
+                          : "text-white bg-violet-600 hover:bg-violet-700"
+                      }`}
+                    >
+                      {docUploading ? (
+                        <>
+                          <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+                          </svg>
+                          Uploading…
+                        </>
+                      ) : (
+                        <>
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
+                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+                          </svg>
+                          Upload Document
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ══════════════════════════════════════════════════════
           ADD PAYMENT MODAL
@@ -1777,48 +3338,78 @@ export default function BookingsClient({ initialRoom }: Props) {
                 </div>
               </div>
 
+              {/* Not-checked-in warning / block */}
+              {payModal.status !== "Checked In" && (
+                isAdmin ? (
+                  /* Admin: show warning but allow proceeding */
+                  <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3.5 py-3 mb-4">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                      <path d="M12 9v4M12 17h.01"/>
+                    </svg>
+                    <p className="text-[12px] text-amber-800">
+                      <span className="font-semibold">This booking is not checked in yet.</span>{" "}
+                      Recording a payment now is allowed for admins — confirm the guest is present before proceeding.
+                    </p>
+                  </div>
+                ) : (
+                  /* Staff: block entirely — this path shouldn't normally be reachable */
+                  <div className="flex items-start gap-2 bg-rose-50 border border-rose-200 rounded-lg px-3.5 py-3 mb-4">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5">
+                      <circle cx="12" cy="12" r="10"/><path d="M4.93 4.93l14.14 14.14"/>
+                    </svg>
+                    <p className="text-[12px] text-rose-700">
+                      <span className="font-semibold">Payment unavailable.</span>{" "}
+                      This booking is not checked in yet. Please complete check-in first.
+                    </p>
+                  </div>
+                )
+              )}
+
               {/* Amount breakdown */}
               <div className="grid grid-cols-3 gap-3 mb-5">
                 <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-center">
                   <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Total</p>
-                  <p className="text-[15px] font-bold text-slate-800">${payModal.totalAmount.toLocaleString()}</p>
+                  <p className="text-[15px] font-bold text-slate-800">৳{payModal.totalAmount.toLocaleString()}</p>
                 </div>
                 <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2.5 text-center">
                   <p className="text-[10px] font-semibold text-emerald-600 uppercase tracking-wider mb-1">Paid</p>
-                  <p className="text-[15px] font-bold text-emerald-700">${payModal.amountPaid.toLocaleString()}</p>
+                  <p className="text-[15px] font-bold text-emerald-700">৳{payModal.amountPaid.toLocaleString()}</p>
                 </div>
                 <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-2.5 text-center">
                   <p className="text-[10px] font-semibold text-rose-500 uppercase tracking-wider mb-1">Due</p>
                   <p className="text-[15px] font-bold text-rose-600">
-                    ${(payModal.totalAmount - payModal.amountPaid).toLocaleString()}
+                    ৳{calcTrueDue(payModal).toLocaleString()}
                   </p>
                 </div>
               </div>
 
-              {/* Payment form */}
-              <form onSubmit={handlePaySubmit} noValidate>
+              {/* Payment form — hidden for staff when not checked in */}
+              {!isAdmin && payModal.status !== "Checked In" ? null : <form onSubmit={handlePaySubmit} noValidate>
                 <div className="mb-4">
                   <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                    Payment Amount (USD) <span className="text-rose-500">*</span>
+                    Payment Amount (BDT) <span className="text-rose-500">*</span>
                   </label>
                   <div className="relative">
                     <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">
-                      $
+                      ৳
                     </span>
                     <input
                       type="number"
                       min={0.01}
                       step="0.01"
-                      max={payModal.totalAmount - payModal.amountPaid}
+                      max={calcTrueDue(payModal)}
                       placeholder="0.00"
                       value={payAmount}
                       onChange={e => {
                         setPayAmount(e.target.value);
                         if (payError) setPayError("");
                       }}
+                      onWheel={e => (e.target as HTMLInputElement).blur()}
                       autoFocus
                       className={`w-full pl-7 pr-3.5 py-2.5 text-[14px] font-semibold text-slate-800 bg-white border rounded-lg
                         placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent transition
+                        [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none
                         ${payError ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
                     />
                   </div>
@@ -1832,26 +3423,26 @@ export default function BookingsClient({ initialRoom }: Props) {
                     </div>
                   )}
                   {/* Quick-fill "pay full balance" helper */}
-                  {payModal.totalAmount - payModal.amountPaid > 0 && (
+                  {calcTrueDue(payModal) > 0 && (
                     <button
                       type="button"
                       onClick={() => {
-                        setPayAmount(String(payModal.totalAmount - payModal.amountPaid));
+                        setPayAmount(String(calcTrueDue(payModal)));
                         setPayError("");
                       }}
                       className="mt-2 text-[11.5px] font-medium text-emerald-600 hover:text-emerald-700 hover:underline transition-colors"
                     >
-                      Pay full balance (${(payModal.totalAmount - payModal.amountPaid).toLocaleString()})
+                      Pay full balance (৳{calcTrueDue(payModal).toLocaleString()})
                     </button>
                   )}
                 </div>
 
                 {/* Live preview of new status */}
-                {payAmount && parseFloat(payAmount) > 0 && parseFloat(payAmount) <= (payModal.totalAmount - payModal.amountPaid) && (
+                {payAmount && parseFloat(payAmount) > 0 && parseFloat(payAmount) <= calcTrueDue(payModal) && (
                   <div className="mb-4 flex items-center gap-3 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5">
                     <p className="text-[12px] text-slate-500 flex-1">After this payment:</p>
                     <p className="text-[12px] font-semibold text-emerald-700">
-                      ${(payModal.amountPaid + parseFloat(payAmount)).toLocaleString()} paid
+                      ৳{(payModal.amountPaid + parseFloat(payAmount)).toLocaleString()} paid
                     </p>
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${
                       paymentBadge(derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount)))
@@ -1883,7 +3474,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     Record Payment
                   </button>
                 </div>
-              </form>
+              </form>}
             </div>
           </div>
         </div>
@@ -1892,7 +3483,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       {/* ── TIMELINE MODAL ─────────────────────────────────────── */}
       {timelineModal && (() => {
         const b = timelineModal;
-        const due = b.totalAmount - b.amountPaid;
+        const due = calcTrueDue(b);
         const isCancelled = b.status === "Cancelled";
 
         // Node helper: filled circle when timestamp present, hollow when pending
@@ -2077,16 +3668,16 @@ export default function BookingsClient({ initialRoom }: Props) {
                   <div className="grid grid-cols-3 gap-2 mb-3">
                     <div className="bg-slate-50 rounded-lg px-3 py-2.5 text-center">
                       <p className="text-[10.5px] text-slate-400 mb-1">Total</p>
-                      <p className="text-[13px] font-bold text-slate-700">${b.totalAmount.toLocaleString()}</p>
+                      <p className="text-[13px] font-bold text-slate-700">৳{b.totalAmount.toLocaleString()}</p>
                     </div>
                     <div className="bg-emerald-50 rounded-lg px-3 py-2.5 text-center">
                       <p className="text-[10.5px] text-emerald-500 mb-1">Paid</p>
-                      <p className="text-[13px] font-bold text-emerald-700">${b.amountPaid.toLocaleString()}</p>
+                      <p className="text-[13px] font-bold text-emerald-700">৳{b.amountPaid.toLocaleString()}</p>
                     </div>
                     <div className={`rounded-lg px-3 py-2.5 text-center ${due > 0 ? "bg-rose-50" : "bg-slate-50"}`}>
                       <p className={`text-[10.5px] mb-1 ${due > 0 ? "text-rose-400" : "text-slate-400"}`}>Due</p>
                       <p className={`text-[13px] font-bold ${due > 0 ? "text-rose-600" : "text-slate-400"}`}>
-                        ${due.toLocaleString()}
+                        ৳{due.toLocaleString()}
                       </p>
                     </div>
                   </div>

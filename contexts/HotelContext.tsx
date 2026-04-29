@@ -57,8 +57,30 @@ type HotelContextType = {
   addRoom:             (room: MockRoom)                                            => void;
   updateRoom:          (id: string, updates: Partial<Omit<MockRoom, "id"|"status">>) => void;
   deleteRoom:          (id: string)                                                => void;
-  recordPayment:       (id: string, additionalAmount: number)                     => void;
-  checkoutWithOverride:(id: string, overrideReason: string)                       => void;
+  recordPayment:       (id: string, additionalAmount: number, callerRole?: string) => void;
+  /** Normal checkout — no outstanding balance. Stores extra charges, early deduction, and additional discount. */
+  checkoutNormal: (
+    id: string,
+    extraChargeAmount: number,
+    extraChargeReason: string | null,
+    actualCheckoutDate: string,
+    earlyNightsDeducted: number,
+    earlyDeductionAmount: number,
+    additionalDiscountAmount: number,
+    additionalDiscountReason: string | null,
+  ) => void;
+  /** Admin override — checkout despite outstanding balance. Stores override audit, extra charges, early deduction, and additional discount. */
+  checkoutWithOverride: (
+    id: string,
+    overrideReason: string,
+    extraChargeAmount?: number,
+    extraChargeReason?: string | null,
+    actualCheckoutDate?: string,
+    earlyNightsDeducted?: number,
+    earlyDeductionAmount?: number,
+    additionalDiscountAmount?: number,
+    additionalDiscountReason?: string | null,
+  ) => void;
 };
 
 const HotelContext = createContext<HotelContextType | null>(null);
@@ -112,6 +134,10 @@ export function HotelProvider({ children }: { children: ReactNode }) {
   // ── Booking actions ─────────────────────────────────────────
 
   function createBooking(booking: MockBooking) {
+    // Capture current room status before the optimistic update so we can
+    // restore it if the service layer rejects (e.g. overlap race condition).
+    const prevRoomStatus = rooms.find(r => r.roomNumber === booking.roomNumber)?.status;
+
     // 1. Optimistic: show in UI immediately
     setBookings(prev => [booking, ...prev]);
     setNextBookingId(n => n + 1);
@@ -120,11 +146,27 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         r.roomNumber === booking.roomNumber ? { ...r, status: "Reserved" as RoomStatus } : r
       )
     );
-    // 2. Persist to Supabase in the background
-    // bookingsService.createBooking() logs each step individually before
-    // throwing a real Error — so the message here is always readable.
+
+    // 2. Persist to Supabase in the background.
+    // bookingsService.createBooking() runs a DB-level overlap check (Layer C)
+    // before the INSERT.  On any failure (including double-booking), we roll
+    // back the optimistic update so the phantom booking never stays in the UI.
     bookingsService.createBooking(booking).catch(err => {
-      console.error("[HotelContext createBooking] failed:", err instanceof Error ? err.message : err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[HotelContext createBooking] failed — rolling back optimistic update:", msg);
+
+      // Roll back: remove the booking and restore the room status
+      setBookings(prev => prev.filter(b => b.id !== booking.id));
+      setNextBookingId(n => n - 1);
+      if (prevRoomStatus !== undefined) {
+        setRooms(prev =>
+          prev.map(r =>
+            r.roomNumber === booking.roomNumber
+              ? { ...r, status: prevRoomStatus }
+              : r
+          )
+        );
+      }
     });
   }
 
@@ -157,12 +199,43 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     );
   }
 
-  function recordPayment(id: string, additionalAmount: number) {
-    // 1. Optimistic: update paid amount + re-derive payment status
+  function recordPayment(id: string, additionalAmount: number, callerRole?: string) {
+    // ── Final hard wall — cannot be bypassed regardless of UI state ──
+    //
+    // Pseudo logic (matches component-level guard):
+    //   const canAddPayment = callerRole === "admin" || booking.status === "Checked In"
+    //   if (!canAddPayment) block and log
+    //
+    // This runs on the LIVE bookings state inside the context, so it always
+    // reflects the true current status — no stale snapshot can fool it.
+    const targetBooking = bookings.find(b => b.id === id);
+    if (targetBooking) {
+      const canAddPayment = callerRole === "admin" || targetBooking.status === "Checked In";
+      if (!canAddPayment) {
+        console.log("[recordPayment] blocked before check-in", {
+          bookingId: id,
+          liveStatus: targetBooking.status,
+          callerRole: callerRole ?? "unknown",
+        });
+        return;   // hard stop — no optimistic update, no Supabase write
+      }
+      // Admin paying before check-in: allowed, audit log only
+      if (callerRole === "admin" && targetBooking.status !== "Checked In") {
+        console.warn(
+          `[recordPayment] admin payment before check-in — booking ${id}` +
+          ` (status: "${targetBooking.status}") — proceeding as admin override`
+        );
+      }
+    }
+
+    // 1. Optimistic: update paid amount + re-derive payment status.
+    //    No artificial cap — UI validation ensures amount ≤ finalPayable.
+    //    Extra charges can push the total above totalAmount, so capping here
+    //    would incorrectly prevent full payment during the checkout flow.
     setBookings(prev =>
       prev.map(b => {
         if (b.id !== id) return b;
-        const newPaid   = Math.min(b.amountPaid + additionalAmount, b.totalAmount);
+        const newPaid   = b.amountPaid + additionalAmount;
         const newStatus = bookingsService.derivePaymentStatus(b.totalAmount, newPaid);
         return { ...b, amountPaid: newPaid, payment: newStatus };
       })
@@ -173,31 +246,42 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     });
   }
 
-  function checkoutWithOverride(id: string, overrideReason: string) {
+  function checkoutNormal(
+    id: string,
+    extraChargeAmount: number,
+    extraChargeReason: string | null,
+    actualCheckoutDate: string,
+    earlyNightsDeducted: number,
+    earlyDeductionAmount: number,
+    additionalDiscountAmount: number,
+    additionalDiscountReason: string | null,
+  ) {
     const target = bookings.find(b => b.id === id);
     if (!target) return;
 
-    // Require a real auth user — never send null as the auditor.
-    // AppShell guarantees HotelProvider only mounts when user is signed in,
-    // so this guard is a safety net rather than an expected path.
-    const overrideBy = user?.id;
-    if (!overrideBy) {
-      console.error("[HotelContext checkoutWithOverride] blocked — no authenticated user id available.");
-      return;
-    }
+    // Capture current state so we can roll back if the DB write fails.
+    const previousBookings = bookings;
+    const previousRooms    = rooms;
 
-    // 1. Optimistic: stamp override record + update statuses
-    const now = new Date().toISOString();
-    const override: CheckoutOverride = {
-      used:           true,
-      reason:         overrideReason.trim() || "No reason provided",
-      by:             overrideBy,   // real auth UUID (not hardcoded "Admin")
-      overrideUsedAt: now,
-    };
+    const now        = new Date().toISOString();
+    const discountBy = user?.id ?? null;
     setBookings(prev =>
       prev.map(b =>
         b.id === id
-          ? { ...b, status: "Checked Out" as BookingStatus, checkedOutAt: now, checkoutOverride: override }
+          ? {
+              ...b,
+              status:       "Checked Out" as BookingStatus,
+              checkedOutAt: now,
+              extraChargeAmount:        extraChargeAmount > 0        ? extraChargeAmount        : undefined,
+              extraChargeReason:        extraChargeReason            || undefined,
+              actualCheckoutDate:       actualCheckoutDate           || undefined,
+              earlyNightsDeducted:      earlyNightsDeducted  > 0     ? earlyNightsDeducted      : undefined,
+              earlyDeductionAmount:     earlyDeductionAmount > 0     ? earlyDeductionAmount     : undefined,
+              additionalDiscountAmount: additionalDiscountAmount > 0 ? additionalDiscountAmount : undefined,
+              additionalDiscountReason: additionalDiscountReason     || undefined,
+              additionalDiscountBy:     discountBy                   ?? undefined,
+              additionalDiscountAt:     now,
+            }
           : b
       )
     );
@@ -206,9 +290,98 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         r.roomNumber === target.roomNumber ? { ...r, status: "Cleaning" as RoomStatus } : r
       )
     );
-    // 2. Persist to Supabase in the background
-    bookingsService.checkoutWithOverride(id, overrideReason, overrideBy).catch(err => {
-      console.error("[HotelContext checkoutWithOverride] failed:", err instanceof Error ? err.message : err);
+    bookingsService.checkoutNormal(
+      id,
+      extraChargeAmount,
+      extraChargeReason,
+      actualCheckoutDate,
+      earlyNightsDeducted,
+      earlyDeductionAmount,
+      additionalDiscountAmount,
+      additionalDiscountReason,
+      discountBy,
+    ).catch(err => {
+      setBookings(previousBookings);
+      setRooms(previousRooms);
+      console.error("[HotelContext checkoutNormal] failed — rolled back:", err instanceof Error ? err.message : err);
+    });
+  }
+
+  function checkoutWithOverride(
+    id: string,
+    overrideReason: string,
+    extraChargeAmount?: number,
+    extraChargeReason?: string | null,
+    actualCheckoutDate?: string,
+    earlyNightsDeducted?: number,
+    earlyDeductionAmount?: number,
+    additionalDiscountAmount?: number,
+    additionalDiscountReason?: string | null,
+  ) {
+    const target = bookings.find(b => b.id === id);
+    if (!target) return;
+
+    // Require a real auth user — never send null as the auditor.
+    const overrideBy = user?.id;
+    if (!overrideBy) {
+      console.error("[HotelContext checkoutWithOverride] blocked — no authenticated user id available.");
+      return;
+    }
+
+    // Capture current state so we can roll back if the DB write fails.
+    const previousBookings = bookings;
+    const previousRooms    = rooms;
+
+    const now        = new Date().toISOString();
+    const discountBy = user?.id ?? null;
+    const override: CheckoutOverride = {
+      used:           true,
+      reason:         overrideReason.trim() || "No reason provided",
+      by:             overrideBy,
+      overrideUsedAt: now,
+    };
+    setBookings(prev =>
+      prev.map(b =>
+        b.id === id
+          ? {
+              ...b,
+              status:       "Checked Out" as BookingStatus,
+              checkedOutAt: now,
+              checkoutOverride: override,
+              extraChargeAmount:        extraChargeAmount && extraChargeAmount > 0                             ? extraChargeAmount        : undefined,
+              extraChargeReason:        extraChargeReason                                                      || undefined,
+              actualCheckoutDate:       actualCheckoutDate                                                     ?? undefined,
+              earlyNightsDeducted:      earlyNightsDeducted  !== undefined && earlyNightsDeducted  > 0         ? earlyNightsDeducted      : undefined,
+              earlyDeductionAmount:     earlyDeductionAmount !== undefined && earlyDeductionAmount > 0         ? earlyDeductionAmount     : undefined,
+              additionalDiscountAmount: additionalDiscountAmount !== undefined && additionalDiscountAmount > 0 ? additionalDiscountAmount : undefined,
+              additionalDiscountReason: additionalDiscountReason                                               ?? undefined,
+              additionalDiscountBy:     discountBy                                                             ?? undefined,
+              additionalDiscountAt:     now,
+            }
+          : b
+      )
+    );
+    setRooms(prev =>
+      prev.map(r =>
+        r.roomNumber === target.roomNumber ? { ...r, status: "Cleaning" as RoomStatus } : r
+      )
+    );
+    bookingsService.checkoutWithOverride(
+      id,
+      overrideReason,
+      overrideBy,
+      extraChargeAmount,
+      extraChargeReason,
+      actualCheckoutDate,
+      earlyNightsDeducted,
+      earlyDeductionAmount,
+      additionalDiscountAmount,
+      additionalDiscountReason,
+      discountBy,
+    ).catch(err => {
+      setBookings(previousBookings);
+      setRooms(previousRooms);
+      console.error("[HotelContext checkoutWithOverride] failed — rolled back:", err instanceof Error ? err.message : err);
     });
   }
 
@@ -277,6 +450,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       nextRoomId,
       createBooking,
       changeBookingStatus,
+      checkoutNormal,
       checkoutWithOverride,
       addRoom,
       updateRoom,
