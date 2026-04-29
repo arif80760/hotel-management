@@ -1,5 +1,7 @@
 # CLAUDE.md — Hotel Management System
 
+Last updated: 2026-04-30 (rev 2)
+
 Comprehensive reference for AI assistants and developers working on this codebase.
 
 ---
@@ -61,7 +63,8 @@ hotel-management/
 ├── sql/                         # Manual migration SQL files (run once in Supabase SQL Editor)
 │   ├── add_booking_rate_columns.sql
 │   ├── add_extra_charge_columns.sql
-│   └── create_booking_documents_table.sql
+│   ├── create_booking_documents_table.sql
+│   └── add_early_checkout_and_discount_columns.sql   # Step 2: early deduction + additional discount
 │
 ├── public/                      # Static assets
 ├── components/                  # (shared UI components, if any)
@@ -128,6 +131,13 @@ hotel-management/
 | checked_in_at | TIMESTAMPTZ | stamped by trigger when status → checked_in |
 | checked_out_at | TIMESTAMPTZ | stamped by trigger when status → checked_out |
 | cancelled_at | TIMESTAMPTZ | stamped by trigger when status → cancelled |
+| actual_checkout_date | DATE | calendar date guest actually vacated (may be before check_out_date) |
+| early_nights_deducted | INTEGER | max(0, check_out_date − actual_checkout_date) — 0 for on-time/late |
+| early_deduction_amount | NUMERIC(10,2) | early_nights_deducted × booking_rate — credited back to guest |
+| additional_discount_amount | NUMERIC(10,2) | ad-hoc discount applied at checkout (no role restriction) |
+| additional_discount_reason | TEXT | optional plain-text reason for the discount (nullable) |
+| additional_discount_by | UUID | auth.users UUID of who applied the discount (nullable) |
+| additional_discount_at | TIMESTAMPTZ | when the discount was applied (nullable) |
 | created_at | TIMESTAMPTZ | default NOW() |
 | updated_at | TIMESTAMPTZ | default NOW() |
 
@@ -233,6 +243,7 @@ booking_documents links to bookings via TEXT booking_ref (loose coupling — no 
 | Discount / rate logic | ✅ Complete | `fixedRate` / `bookingRate` fields on bookings |
 | Admin override checkout | ✅ Complete | `HotelContext.checkoutWithOverride()` |
 | Stay Timing Step 1 (display) | ✅ Complete | `BookingsClient.tsx`, `FrontDeskClient.tsx` |
+| Stay Timing Step 2 (billing) | ✅ Complete | `BookingsClient.tsx`, `FrontDeskClient.tsx`, `HotelContext.tsx`, `bookingsService.ts` |
 
 ---
 
@@ -255,8 +266,8 @@ export const HOTEL_POLICY = {
   - `early` — actual checkout before 11:59 AM
   - `on_time` — between 11:59 AM and 12:29 PM (within grace)
   - `late` — after 12:29 PM (past grace period)
-- **Step 1 (current)**: Display only — no billing adjustment yet
-- **Step 2 (planned)**: Auto-charge late checkout fee based on `lateCheckoutMinutes`
+- **Step 1** ✅: Display only — shows timing classification in checkout modal; no billing effect
+- **Step 2** ✅: Early checkout deduction + additional discount at checkout (see rules below)
 
 ### Booking Workflow
 ```
@@ -268,7 +279,10 @@ Confirmed → Checked In → Checked Out
 
 ### Checkout Gate Formula
 ```
-finalPayable = (totalAmount + extraChargeAmount) - amountPaid
+finalPayable = (totalAmount + extraChargeAmount)
+             - earlyDeductionAmount
+             - additionalDiscountAmount
+             - amountPaid
 
 if finalPayable > 0:
   → staff sees "Add Payment" button (cannot checkout)
@@ -276,6 +290,21 @@ if finalPayable > 0:
 else:
   → all roles see normal "Checkout" button
 ```
+
+### Early Checkout Deduction (Stay Timing Step 2)
+- `earlyNightsDeducted = max(0, plannedCheckoutDate − actualCheckoutDate)` — calendar days only
+- `earlyDeductionAmount = earlyNightsDeducted × bookingRate`  (rate fallback: `totalAmount / nights`)
+- Computed by `calcEarlyDeduction()` in both `BookingsClient.tsx` and `FrontDeskClient.tsx`
+- Auto-calculated and read-only — shown as a deduction line in the billing summary (emerald colour)
+- Written to DB at checkout: `actual_checkout_date`, `early_nights_deducted`, `early_deduction_amount`
+
+### Additional Discount at Checkout (Stay Timing Step 2)
+- Optional ad-hoc discount entered by staff or admin in the "More Discount" section of the checkout modal
+- No role restriction — any authenticated user can apply it
+- Validated: `amt ≤ (totalAmount + extraChargeAmount − earlyDeductionAmount − amountPaid)` — cannot create phantom refund
+- Has an optional free-text reason (stored in `additional_discount_reason`)
+- `additional_discount_by` is derived from `user?.id` in HotelContext — not passed from the UI
+- Written to DB at checkout: `additional_discount_amount`, `additional_discount_reason`, `additional_discount_by`, `additional_discount_at`
 
 ### Three-Layer Payment Enforcement
 1. **Layer A (UI)** — "Add Payment" button is hidden if `booking.status !== "Checked In"` and role is not admin
@@ -300,12 +329,38 @@ else:
 | Manage employees | ❌ | ✅ |
 | Provision new user accounts | ❌ | ✅ |
 
-### Discount Logic
+### Booking Discount Logic (set at booking creation time)
 - `fixedRate` = standard published room rate per night
 - `bookingRate` = actual negotiated rate per night (set at booking time)
-- When `bookingRate < fixedRate` → a discount was applied
+- When `bookingRate < fixedRate` → a discount was applied at booking
 - `totalAmount = bookingRate × nights`
-- `finalPayable = (totalAmount + extraChargeAmount) - amountPaid`
+
+### Checkout Discount Logic (set at checkout time)
+- `earlyDeductionAmount` — auto-deducted for early checkout (see Early Checkout Deduction above)
+- `additionalDiscountAmount` — ad-hoc "More Discount" entered in checkout modal (see Additional Discount above)
+- Currency: all amounts are BDT (৳), displayed as `` `৳${amount.toLocaleString()}` `` — no helper function
+
+### `calcTrueDue()` — Canonical Due-Amount Formula
+```typescript
+function calcTrueDue(b: {
+  totalAmount:               number;
+  amountPaid:                number;
+  extraChargeAmount?:        number;
+  earlyDeductionAmount?:     number;
+  additionalDiscountAmount?: number;
+}): number {
+  return b.totalAmount
+    + (b.extraChargeAmount          ?? 0)
+    - (b.earlyDeductionAmount       ?? 0)
+    - (b.additionalDiscountAmount   ?? 0)
+    - b.amountPaid;
+}
+```
+**⚠️ CRITICAL GOTCHA:** Every payment cap, due-amount display, and dues-filter MUST use `calcTrueDue()`.
+Never use the naive `totalAmount − amountPaid` — it ignores extra charges, early-checkout deductions,
+and additional discounts, causing phantom dues and wrong payment caps.
+- Defined as a module-level pure function in both `BookingsClient.tsx` and `FrontDeskClient.tsx`
+- Used by: `handlePaySubmit` (payment cap), standalone pay modal (max attr + preview), all panel `due` vars, `dueBookings` filter, `totalOutstanding` reducer, booking-detail drawer payment summary
 
 ### Guest Find-or-Create
 When creating a booking, the service looks up guests by phone number:
@@ -424,20 +479,17 @@ Use `tabular-nums` class on all currency/number display elements for aligned dec
   - Actual checkout time captured when modal opens (`checkoutOpenedAt`)
   - Classification: Early / On Time (within grace) / Late
   - Stay duration strip in booking form (e.g., "Thu Apr 22 → Sat Apr 25 = 3 nights · Check-in 12:00 PM · Check-out 11:59 AM")
-
-### Stay Timing Step 2 (Planned)
-When implementing late-checkout billing:
-- Read `lateCheckoutMinutes` from the booking (set by checkout flow)
-- Define a fee schedule (e.g., 1–60 min = $30, 60+ min = full extra night)
-- Auto-populate `extraChargeAmount` and `extraChargeReason` in the checkout modal
-- Staff can accept or adjust before confirming
-- `HOTEL_POLICY` is already the single source of truth — just extend it with fee tiers
+- **Stay Timing Step 2**: Billing adjustments at checkout
+  - **Early checkout auto-deduction**: `calcEarlyDeduction()` computes unused nights (calendar-date diff) × `bookingRate`; shown as emerald deduction row in billing summary; written to `actual_checkout_date`, `early_nights_deducted`, `early_deduction_amount` in DB
+  - **Additional discount**: "More Discount" section in checkout modal — optional amount + reason; violet colour; validated to not exceed `(total + extraCharge − earlyDeduction − amountPaid)`; no role restriction; written to `additional_discount_amount`, `additional_discount_reason`, `additional_discount_by`, `additional_discount_at` in DB
+  - **Updated finalPayable formula**: `(total + extra) − earlyDeduction − additionalDiscount − amountPaid`
+  - **Currency**: all `$` USD symbols replaced with `৳` BDT throughout the app — booking form, pay modal, panels, dues monitor, booking-detail drawer, rooms form, checkout modal
 
 ### Future Planned
 - Housekeeping module (room cleaning queue)
 - Reporting / analytics dashboard
 - Online booking widget (guest-facing)
-- Late-checkout billing (Step 2 of stay timing)
+- Late-checkout billing (fee schedule for overdue guests)
 
 ---
 
