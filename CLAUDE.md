@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-04-30 (rev 2)
+Last updated: 2026-04-30 (rev 3)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -64,7 +64,8 @@ hotel-management/
 │   ├── add_booking_rate_columns.sql
 │   ├── add_extra_charge_columns.sql
 │   ├── create_booking_documents_table.sql
-│   └── add_early_checkout_and_discount_columns.sql   # Step 2: early deduction + additional discount
+│   ├── add_early_checkout_and_discount_columns.sql   # Step 2: early deduction + additional discount
+│   └── add_payment_method_extras.sql                 # Adds bkash/nagad enum values + last_payment_method column + sync trigger
 │
 ├── public/                      # Static assets
 ├── components/                  # (shared UI components, if any)
@@ -138,6 +139,7 @@ hotel-management/
 | additional_discount_reason | TEXT | optional plain-text reason for the discount (nullable) |
 | additional_discount_by | UUID | auth.users UUID of who applied the discount (nullable) |
 | additional_discount_at | TIMESTAMPTZ | when the discount was applied (nullable) |
+| last_payment_method | payment_method | nullable — denormalized from most recent payments row; synced by fn_sync_last_payment_method trigger |
 | created_at | TIMESTAMPTZ | default NOW() |
 | updated_at | TIMESTAMPTZ | default NOW() |
 
@@ -156,9 +158,12 @@ hotel-management/
 | id | UUID PK | |
 | booking_id | UUID FK → bookings.id | |
 | amount | NUMERIC(10,2) | must be > 0 |
+| method | payment_method enum | NOT NULL — which of the 5 user-selectable methods was used |
+| recorded_by | UUID | nullable — auth.users UUID of staff who recorded the payment |
+| notes | TEXT | nullable — optional staff note |
 | created_at | TIMESTAMPTZ | default NOW() |
 
-DB triggers on INSERT automatically update `bookings.paid_amount` and re-derive `bookings.payment_status`.
+DB triggers on INSERT automatically update `bookings.paid_amount`, re-derive `bookings.payment_status`, and sync `bookings.last_payment_method`.
 
 ### `profiles`
 | Column | Type | Notes |
@@ -208,6 +213,17 @@ DB triggers on INSERT automatically update `bookings.paid_amount` and re-derive 
 | fn_sync_room_status | bookings | Updates rooms.status when booking status changes |
 | fn_sync_paid_amount | payments | Adds payment.amount to bookings.paid_amount on INSERT |
 | fn_sync_payment_status | bookings | Re-derives payment_status from paid_amount vs total_amount |
+| fn_sync_last_payment_method | payments | On INSERT: copies payments.method to bookings.last_payment_method |
+
+### Enums
+
+#### `payment_method`
+7 values total: `cash`, `card`, `bank_transfer`, `bkash`, `nagad`, `online`, `other`
+
+- **5 user-selectable** (shown in all payment dropdowns): `cash`, `card`, `bank_transfer`, `bkash`, `nagad`
+- **2 legacy / system values**: `online`, `other` — may exist in older payments rows; never shown as options in the UI
+- Defined in `PAYMENT_METHODS` array and `PAYMENT_METHOD_LABELS` map in `lib/mockData.ts`
+- Use `formatPaymentMethod(value)` for safe display of any value including legacy ones
 
 ### RLS Policies (general pattern)
 - All tables: `authenticated` role can SELECT, INSERT, UPDATE, DELETE.
@@ -244,6 +260,7 @@ booking_documents links to bookings via TEXT booking_ref (loose coupling — no 
 | Admin override checkout | ✅ Complete | `HotelContext.checkoutWithOverride()` |
 | Stay Timing Step 1 (display) | ✅ Complete | `BookingsClient.tsx`, `FrontDeskClient.tsx` |
 | Stay Timing Step 2 (billing) | ✅ Complete | `BookingsClient.tsx`, `FrontDeskClient.tsx`, `HotelContext.tsx`, `bookingsService.ts` |
+| Payment Method Tracking | ✅ Complete | `lib/mockData.ts`, `services/bookingsService.ts`, `HotelContext.tsx`, `BookingsClient.tsx`, `FrontDeskClient.tsx` |
 
 ---
 
@@ -305,6 +322,16 @@ else:
 - Has an optional free-text reason (stored in `additional_discount_reason`)
 - `additional_discount_by` is derived from `user?.id` in HotelContext — not passed from the UI
 - Written to DB at checkout: `additional_discount_amount`, `additional_discount_reason`, `additional_discount_by`, `additional_discount_at`
+
+### Payment Methods
+- Every payment (booking creation + standalone + checkout) requires a `PaymentMethod` value
+- **5 user-selectable methods**: `cash`, `card`, `bank_transfer`, `bkash`, `nagad`
+- UI state defaults to `"cash"` — never an empty placeholder — so a method is always captured
+- Selector resets to `"cash"` on modal close / form cancel (6 explicit reset sites in `BookingsClient.tsx`, 4 in `FrontDeskClient.tsx`)
+- `PAYMENT_METHODS` — `readonly` tuple of the 5 selectable values; use to render `<option>` elements
+- `PAYMENT_METHOD_LABELS` — `Record<PaymentMethod, string>` display map; use **only** for `<option>` labels and user-facing select rendering
+- `formatPaymentMethod(value)` — safe display formatter for **any** `method` value including legacy `"online"` / `"other"`; returns `"—"` for null/undefined; **always use this** when reading `lastPaymentMethod` from a booking, never `PAYMENT_METHOD_LABELS` directly
+- `last_payment_method` on bookings — denormalized column updated by trigger on payments INSERT; avoids N+1 queries for the dues monitor; also set optimistically in context on every payment action
 
 ### Three-Layer Payment Enforcement
 1. **Layer A (UI)** — "Add Payment" button is hidden if `booking.status !== "Checked In"` and role is not admin
@@ -388,6 +415,7 @@ All three are done atomically with rollback on failure. This route must never ru
 - All entity types defined in `lib/mockData.ts` (re-exported from `HotelContext.tsx` for convenience)
 - Services define a `*Row` type (DB shape) + `map*()` function (DB→frontend) + `to*Payload()` function (frontend→DB)
 - Enum fields: DB stores lowercase (`confirmed`), frontend uses Title Case (`"Confirmed"`) — mapped via `DB_TO_*` and `*_TO_DB` record constants
+- **`PaymentMethod`** type: `"cash" | "card" | "bank_transfer" | "bkash" | "nagad"` — the 5 user-selectable values. Defined in `lib/mockData.ts`. Use `formatPaymentMethod()` (not a cast) when displaying `lastPaymentMethod` from a booking, since the DB may contain legacy values (`"online"`, `"other"`) not in this union.
 
 ### DB ↔ Frontend Field Mapping
 | DB column | Frontend field |
@@ -457,6 +485,9 @@ Use `tabular-nums` class on all currency/number display elements for aligned dec
 ### ROOM_CATALOG Still From mockData
 - `ROOM_CATALOG` is still exported from `lib/mockData.ts` and used by the booking form for price hints
 - When Supabase rooms data is stable, replace with a derived map from live `rooms` state
+
+### Known Issues / Technical Debt
+- **`services/bookingsService.ts` — `recordPayment()` cap uses naive formula**: The `Math.min` clamp on line ~610 uses `total_amount − paid_amount`, which is incorrect when the booking has `extra_charge_amount`, `early_deduction_amount`, or `additional_discount_amount`. Should be replaced with the true-due formula matching `calcTrueDue()` in the UI layer. Tracked as a separate fix; do not roll into payment method tracking.
 
 ---
 
