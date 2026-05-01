@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-04-30 (rev 3)
+Last updated: 2026-05-02 (rev 4)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -491,7 +491,21 @@ Use `tabular-nums` class on all currency/number display elements for aligned dec
 
 ---
 
-## 8. Current State
+## 8. Workflow Notes
+
+### Workflow that works for me
+
+1. New major feature → start a new chat with Claude.ai, paste this CLAUDE.md as the first message
+2. Always: ask Claude.ai to plan before Claude Code writes any code
+3. Always: review diffs before approving each step
+4. Always: test in browser before committing
+5. Always: split commits by concern, write professional messages, no "Co-Authored-By: Claude" trailer
+6. After a feature ships: update CLAUDE.md, commit docs separately
+7. When the chat starts feeling slow or off-topic, start a fresh chat. Paste CLAUDE.md at the start of every new chat to preserve context.
+
+---
+
+## 9. Current State
 
 ### Complete
 - Auth with role-based access (admin / staff)
@@ -524,7 +538,7 @@ Use `tabular-nums` class on all currency/number display elements for aligned dec
 
 ---
 
-## 9. Common Commands
+## 10. Common Commands
 
 ```bash
 # Development
@@ -555,7 +569,7 @@ There is no automated migration runner. Apply schema changes manually:
 
 ---
 
-## 10. Quick Reference — Feature → File to Edit
+## 11. Quick Reference — Feature → File to Edit
 
 | Want to change… | Edit… |
 |---|---|
