@@ -399,6 +399,7 @@ export default function BookingsClient({ initialRoom }: Props) {
   const [errors,       setErrors]       = useState<Partial<Record<keyof FormData, string>>>({});
   const [successMsg,   setSuccessMsg]   = useState<string>("");
   const [activeFilter, setActiveFilter] = useState<string>("All");
+  const [searchQuery,  setSearchQuery]  = useState<string>("");
 
   // ── Payment modal state ─────────────────────────────────────
   // payModal holds the booking being paid against; null = modal closed.
@@ -507,8 +508,18 @@ export default function BookingsClient({ initialRoom }: Props) {
   const dueAmount       = Math.max(0, totalAmountNum - amountPaidNum);
   const formPayStatus   = derivePaymentStatus(totalAmountNum, amountPaidNum);
 
-  const filteredBookings =
+  const tabFilteredBookings =
     activeFilter === "All" ? bookings : bookings.filter(b => b.status === activeFilter);
+
+  const filteredBookings = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return tabFilteredBookings;
+    return tabFilteredBookings.filter(b =>
+      b.id.toLowerCase().includes(q) ||
+      b.guestName.toLowerCase().includes(q) ||
+      (b.phone ?? "").toLowerCase().includes(q)
+    );
+  }, [tabFilteredBookings, searchQuery]);
 
   const counts: Record<string, number> = {
     All:           bookings.length,
@@ -807,6 +818,7 @@ export default function BookingsClient({ initialRoom }: Props) {
     setBookingPayMethod("cash");
     setFormOpen(false);
     setActiveFilter("All");
+    setSearchQuery("");
   }
 
   function handleCancel() {
@@ -2017,6 +2029,38 @@ export default function BookingsClient({ initialRoom }: Props) {
         ))}
       </div>
 
+      {/* ── Search ─────────────────────────────────────────── */}
+      <div className="relative w-full max-w-sm">
+        <svg
+          viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          strokeWidth="2" strokeLinecap="round"
+          className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none"
+        >
+          <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+        </svg>
+        <input
+          type="text"
+          placeholder="Search by booking ID, phone, or guest name…"
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          className="w-full pl-9 pr-8 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-xl
+            placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent
+            shadow-sm transition"
+        />
+        {searchQuery && (
+          <button
+            onClick={() => setSearchQuery("")}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center
+              text-slate-400 hover:text-slate-700 rounded-full hover:bg-slate-100 transition-colors"
+            aria-label="Clear search"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
+              <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+          </button>
+        )}
+      </div>
+
       {/* ══════════════════════════════════════════════════════
           BOOKINGS TABLE
       ══════════════════════════════════════════════════════ */}
@@ -2036,7 +2080,9 @@ export default function BookingsClient({ initialRoom }: Props) {
               {filteredBookings.length === 0 ? (
                 <tr>
                   <td colSpan={13} className="px-5 py-10 text-center text-[13px] text-slate-400">
-                    No bookings match this filter.
+                    {searchQuery.trim()
+                      ? "No bookings match your search."
+                      : "No bookings match this filter."}
                   </td>
                 </tr>
               ) : filteredBookings.map((b) => {
