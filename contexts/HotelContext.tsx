@@ -29,6 +29,7 @@ import type {
   RoomStatus,
   BookingStatus,
   PaymentStatus,
+  PaymentMethod,
   CheckoutOverride,
 } from "@/lib/mockData";
 
@@ -52,12 +53,12 @@ type HotelContextType = {
   loading:             boolean;           // true while initial data is being fetched
   nextBookingId:       number;
   nextRoomId:          number;
-  createBooking:       (b: MockBooking)                                            => void;
+  createBooking:       (b: MockBooking, initialPaymentMethod?: PaymentMethod)      => void;
   changeBookingStatus: (id: string, status: BookingStatus)                        => void;
   addRoom:             (room: MockRoom)                                            => void;
   updateRoom:          (id: string, updates: Partial<Omit<MockRoom, "id"|"status">>) => void;
   deleteRoom:          (id: string)                                                => void;
-  recordPayment:       (id: string, additionalAmount: number, callerRole?: string) => void;
+  recordPayment:       (id: string, additionalAmount: number, method: PaymentMethod, callerRole?: string) => void;
   /** Normal checkout — no outstanding balance. Stores extra charges, early deduction, and additional discount. */
   checkoutNormal: (
     id: string,
@@ -68,6 +69,7 @@ type HotelContextType = {
     earlyDeductionAmount: number,
     additionalDiscountAmount: number,
     additionalDiscountReason: string | null,
+    paymentMethod?: PaymentMethod,
   ) => void;
   /** Admin override — checkout despite outstanding balance. Stores override audit, extra charges, early deduction, and additional discount. */
   checkoutWithOverride: (
@@ -80,6 +82,7 @@ type HotelContextType = {
     earlyDeductionAmount?: number,
     additionalDiscountAmount?: number,
     additionalDiscountReason?: string | null,
+    paymentMethod?: PaymentMethod,
   ) => void;
 };
 
@@ -133,13 +136,20 @@ export function HotelProvider({ children }: { children: ReactNode }) {
 
   // ── Booking actions ─────────────────────────────────────────
 
-  function createBooking(booking: MockBooking) {
+  function createBooking(booking: MockBooking, initialPaymentMethod: PaymentMethod = "cash") {
     // Capture current room status before the optimistic update so we can
     // restore it if the service layer rejects (e.g. overlap race condition).
     const prevRoomStatus = rooms.find(r => r.roomNumber === booking.roomNumber)?.status;
 
-    // 1. Optimistic: show in UI immediately
-    setBookings(prev => [booking, ...prev]);
+    // 1. Optimistic: show in UI immediately.
+    //    Include lastPaymentMethod when there is an initial payment so the
+    //    booking drawer reflects it without waiting for the DB trigger to fire.
+    setBookings(prev => [
+      booking.amountPaid > 0
+        ? { ...booking, lastPaymentMethod: initialPaymentMethod }
+        : booking,
+      ...prev,
+    ]);
     setNextBookingId(n => n + 1);
     setRooms(prev =>
       prev.map(r =>
@@ -151,7 +161,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     // bookingsService.createBooking() runs a DB-level overlap check (Layer C)
     // before the INSERT.  On any failure (including double-booking), we roll
     // back the optimistic update so the phantom booking never stays in the UI.
-    bookingsService.createBooking(booking).catch(err => {
+    bookingsService.createBooking(booking, initialPaymentMethod).catch(err => {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[HotelContext createBooking] failed — rolling back optimistic update:", msg);
 
@@ -199,7 +209,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     );
   }
 
-  function recordPayment(id: string, additionalAmount: number, callerRole?: string) {
+  function recordPayment(id: string, additionalAmount: number, method: PaymentMethod, callerRole?: string) {
     // ── Final hard wall — cannot be bypassed regardless of UI state ──
     //
     // Pseudo logic (matches component-level guard):
@@ -208,6 +218,9 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     //
     // This runs on the LIVE bookings state inside the context, so it always
     // reflects the true current status — no stale snapshot can fool it.
+    //
+    // NOTE: These guards run BEFORE prevBookings is captured so the early-return
+    // path never creates a snapshot that could interfere with other state updates.
     const targetBooking = bookings.find(b => b.id === id);
     if (targetBooking) {
       const canAddPayment = callerRole === "admin" || targetBooking.status === "Checked In";
@@ -228,7 +241,12 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    // 1. Optimistic: update paid amount + re-derive payment status.
+    // Capture state for rollback — after guards so early-returns don't snapshot.
+    const prevBookings = bookings;
+
+    // 1. Optimistic: update paid amount, re-derive payment status, and set
+    //    lastPaymentMethod immediately so the UI reflects the new method without
+    //    waiting for the fn_sync_last_payment_method DB trigger to fire.
     //    No artificial cap — UI validation ensures amount ≤ finalPayable.
     //    Extra charges can push the total above totalAmount, so capping here
     //    would incorrectly prevent full payment during the checkout flow.
@@ -237,12 +255,14 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         if (b.id !== id) return b;
         const newPaid   = b.amountPaid + additionalAmount;
         const newStatus = bookingsService.derivePaymentStatus(b.totalAmount, newPaid);
-        return { ...b, amountPaid: newPaid, payment: newStatus };
+        return { ...b, amountPaid: newPaid, payment: newStatus, lastPaymentMethod: method };
       })
     );
-    // 2. Persist to Supabase in the background
-    bookingsService.recordPayment(id, additionalAmount).catch(err => {
-      console.error("[HotelContext recordPayment] failed:", err instanceof Error ? err.message : err);
+    // 2. Persist to Supabase in the background. Roll back if persist fails —
+    //    prevBookings restores amountPaid, payment status, AND lastPaymentMethod.
+    bookingsService.recordPayment(id, additionalAmount, method).catch(err => {
+      setBookings(prevBookings);
+      console.error("[HotelContext recordPayment] failed — rolled back:", err instanceof Error ? err.message : err);
     });
   }
 
@@ -255,6 +275,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     earlyDeductionAmount: number,
     additionalDiscountAmount: number,
     additionalDiscountReason: string | null,
+    paymentMethod?: PaymentMethod,
   ) {
     const target = bookings.find(b => b.id === id);
     if (!target) return;
@@ -281,6 +302,9 @@ export function HotelProvider({ children }: { children: ReactNode }) {
               additionalDiscountReason: additionalDiscountReason     || undefined,
               additionalDiscountBy:     discountBy                   ?? undefined,
               additionalDiscountAt:     now,
+              // Set lastPaymentMethod immediately if a modal payment was made at checkout,
+              // so the drawer reflects it without waiting for the DB trigger.
+              ...(paymentMethod !== undefined && { lastPaymentMethod: paymentMethod }),
             }
           : b
       )
@@ -317,6 +341,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     earlyDeductionAmount?: number,
     additionalDiscountAmount?: number,
     additionalDiscountReason?: string | null,
+    paymentMethod?: PaymentMethod,
   ) {
     const target = bookings.find(b => b.id === id);
     if (!target) return;
@@ -357,6 +382,9 @@ export function HotelProvider({ children }: { children: ReactNode }) {
               additionalDiscountReason: additionalDiscountReason                                               ?? undefined,
               additionalDiscountBy:     discountBy                                                             ?? undefined,
               additionalDiscountAt:     now,
+              // Set lastPaymentMethod immediately if a modal payment was made at checkout,
+              // so the drawer reflects it without waiting for the DB trigger.
+              ...(paymentMethod !== undefined && { lastPaymentMethod: paymentMethod }),
             }
           : b
       )

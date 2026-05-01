@@ -42,6 +42,38 @@ export type BookingStatus =
 export type PaymentStatus = "Paid" | "Partial" | "Unpaid";
 
 /**
+ * Payment method — mirrors the PostgreSQL payment_method enum.
+ * Only the 5 user-selectable values are listed here.
+ * Legacy DB values ("online", "other") are handled by formatPaymentMethod.
+ */
+export const PAYMENT_METHODS = [
+  "cash", "card", "bkash", "nagad", "bank_transfer",
+] as const;
+export type PaymentMethod = typeof PAYMENT_METHODS[number];
+
+/** Display labels for the 5 user-selectable payment methods. */
+export const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
+  cash:          "Cash",
+  card:          "Card",
+  bkash:         "Bkash",
+  nagad:         "Nagad",
+  bank_transfer: "Bank Transfer",
+};
+
+/**
+ * Format any DB payment_method value for display — including legacy
+ * values ("online", "other") that are not user-selectable but may
+ * exist on older rows.
+ */
+export function formatPaymentMethod(method: string | null | undefined): string {
+  if (!method) return "—";
+  const known = PAYMENT_METHOD_LABELS[method as PaymentMethod];
+  if (known) return known;
+  // Legacy / unknown value — capitalize each word, replace underscores
+  return method.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/**
  * A secondary guest sharing the room.
  * The primary/responsible guest is stored directly on MockBooking.
  * Additional guests are listed here — name + nationality for hotel records.
@@ -160,6 +192,11 @@ export type MockBooking = {
   additionalDiscountReason?: string;   // optional plain-text reason, e.g. "Loyalty discount"
   additionalDiscountBy?:     string;   // auth.users UUID of who applied the discount
   additionalDiscountAt?:     string;   // ISO 8601 timestamp when discount was applied
+  // ── Payment method (most recent payment) ─────────────────────────────────
+  // Denormalized from the payments table via DB trigger fn_sync_last_payment_method.
+  // Undefined when the booking has no payment rows yet.
+  // Legacy DB values "online" and "other" are allowed so existing rows don't break types.
+  lastPaymentMethod?: PaymentMethod | "online" | "other";
 };
 
 // ─────────────────────────────────────────────────────────────

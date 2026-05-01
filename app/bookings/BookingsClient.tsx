@@ -24,10 +24,14 @@ import { useAuth } from "@/contexts/AuthContext";
 import {
   type BookingStatus,
   type PaymentStatus,
+  type PaymentMethod,
   type MockBooking as Booking,
   type AdditionalGuest,
   type BookingDocument,
   HOTEL_POLICY,
+  PAYMENT_METHODS,
+  PAYMENT_METHOD_LABELS,
+  formatPaymentMethod,
 } from "@/lib/mockData";
 import {
   DOCUMENT_TYPES,
@@ -421,6 +425,10 @@ export default function BookingsClient({ initialRoom }: Props) {
   const [moreDiscountReason, setMoreDiscountReason] = useState<string>("");
   const [discountError,      setDiscountError]      = useState<string>("");
 
+  const [bookingPayMethod,  setBookingPayMethod]  = useState<PaymentMethod>("cash");
+  const [payMethod,         setPayMethod]         = useState<PaymentMethod>("cash");
+  const [checkoutPayMethod, setCheckoutPayMethod] = useState<PaymentMethod>("cash");
+
   // ── Checkout timing — time captured when modal opens ────────
   // Used as the "actual checkout time" in the timing analysis panel.
   const [checkoutOpenedAt, setCheckoutOpenedAt] = useState<Date | null>(null);
@@ -739,7 +747,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       isNew:            true,
     };
 
-    createBooking(newBooking);
+    createBooking(newBooking, bookingPayMethod);
 
     const guestSummary = cleanedExtras.length > 0
       ? ` · ${newBooking.totalGuests} guests total`
@@ -796,12 +804,14 @@ export default function BookingsClient({ initialRoom }: Props) {
     setPendingDocs([]);
     setPendingDocError("");
     setForm(EMPTY_FORM);
+    setBookingPayMethod("cash");
     setFormOpen(false);
     setActiveFilter("All");
   }
 
   function handleCancel() {
     setForm({ ...EMPTY_FORM, room: initialRoom ?? "" });
+    setBookingPayMethod("cash");
     setErrors({});
     setPendingDocs([]);
     setPendingDocError("");
@@ -853,12 +863,14 @@ export default function BookingsClient({ initialRoom }: Props) {
     setPayModal(booking);
     setPayAmount("");
     setPayError("");
+    setPayMethod("cash");
   }
 
   function closePayModal() {
     setPayModal(null);
     setPayAmount("");
     setPayError("");
+    setPayMethod("cash");
   }
 
   // ── Workflow action handler ─────────────────────────────────
@@ -876,6 +888,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
       setOverrideReason(""); setOverrideError("");
       setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
+      setCheckoutPayMethod("cash");
     } else {
       changeBookingStatus(booking.id, nextStatus);
     }
@@ -889,6 +902,7 @@ export default function BookingsClient({ initialRoom }: Props) {
     setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
     setOverrideReason(""); setOverrideError("");
     setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
+    setCheckoutPayMethod("cash");
   }
 
   /** Records a payment entered inside the checkout confirmation modal. */
@@ -933,7 +947,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       setModalPayError(`Cannot exceed outstanding balance of ৳${maxPay.toLocaleString()}.`);
       return;
     }
-    recordPayment(checkoutConfirm.id, amt, currentRole ?? "staff");
+    recordPayment(checkoutConfirm.id, amt, checkoutPayMethod, currentRole ?? "staff");
     setShowModalPay(false);
     setModalPayAmt("");
     setModalPayError("");
@@ -1011,6 +1025,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       earlyDeductionAmt,
       discount.amount,
       moreDiscountReason.trim() || null,
+      checkoutPayMethod,
     );
     setSuccessMsg(
       `${checkoutConfirm.guestName} checked out · Room ${checkoutConfirm.roomNumber} is now Cleaning.`
@@ -1049,6 +1064,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       earlyDeductionAmt,
       discount.amount,
       moreDiscountReason.trim() || null,
+      checkoutPayMethod,
     );
     setSuccessMsg(
       `Admin override: ${checkoutConfirm.guestName} checked out with ৳${finalPayable.toLocaleString()} still outstanding.`
@@ -1168,7 +1184,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       return;
     }
 
-    recordPayment(payModal.id, amount, currentRole ?? "staff");
+    recordPayment(payModal.id, amount, payMethod, currentRole ?? "staff");
     setSuccessMsg(
       `Payment of ৳${amount.toLocaleString()} recorded for booking ${payModal.id} · ` +
       `৳${(payModal.amountPaid + amount).toLocaleString()} now paid of ৳${payModal.totalAmount.toLocaleString()}`
@@ -1849,6 +1865,29 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </p>
                 </div>
 
+                {/* Payment Method — shown only when an initial payment is being collected */}
+                {amountPaidNum > 0 && (
+                  <div>
+                    <label
+                      htmlFor="bookingPayMethod"
+                      className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide"
+                    >
+                      Payment Method
+                    </label>
+                    <select
+                      id="bookingPayMethod"
+                      value={bookingPayMethod}
+                      onChange={e => setBookingPayMethod(e.target.value as PaymentMethod)}
+                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                        focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
+                    >
+                      {PAYMENT_METHODS.map(m => (
+                        <option key={m} value={m}>{PAYMENT_METHOD_LABELS[m]}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
                 {/* Due Amount + Payment Status — read-only, auto-computed */}
                 <div className="sm:col-span-2 flex flex-wrap items-center gap-6 bg-slate-50 border border-slate-200 rounded-lg px-5 py-3.5">
 
@@ -2326,7 +2365,7 @@ export default function BookingsClient({ initialRoom }: Props) {
               <table className="w-full text-[13px]">
                 <thead>
                   <tr className="bg-rose-50 border-b border-rose-100">
-                    {["ID", "Primary Guest", "Room", "Check-in", "Check-out", "Booking Status", "Total", "Paid", "Due", "Payment", "Override", "Action"].map(h => (
+                    {["ID", "Primary Guest", "Room", "Check-in", "Check-out", "Booking Status", "Total", "Paid", "Method", "Due", "Payment", "Override", "Action"].map(h => (
                       <th key={h} className="text-left px-5 py-3 text-[11px] font-semibold text-rose-400 uppercase tracking-wider whitespace-nowrap">
                         {h}
                       </th>
@@ -2336,7 +2375,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 <tbody className="divide-y divide-slate-100">
                   {filteredDueBookings.length === 0 ? (
                     <tr>
-                      <td colSpan={12} className="px-5 py-14 text-center">
+                      <td colSpan={13} className="px-5 py-14 text-center">
                         <div className="flex flex-col items-center gap-2">
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="w-10 h-10 text-slate-200">
                             <path d="M9 12l2 2 4-4M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
@@ -2417,6 +2456,13 @@ export default function BookingsClient({ initialRoom }: Props) {
                         <td className="px-5 py-3.5 whitespace-nowrap">
                           <span className={`font-semibold ${b.amountPaid > 0 ? "text-emerald-700" : "text-slate-400"}`}>
                             {b.amountPaid > 0 ? `৳${b.amountPaid.toLocaleString()}` : "—"}
+                          </span>
+                        </td>
+
+                        {/* Last Payment Method */}
+                        <td className="px-5 py-3.5 whitespace-nowrap">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-600">
+                            {formatPaymentMethod(b.lastPaymentMethod)}
                           </span>
                         </td>
 
@@ -2881,6 +2927,25 @@ export default function BookingsClient({ initialRoom }: Props) {
                       <p className="text-[12px] text-emerald-700 font-medium">
                         Collect payment from guest and record it here to update the balance instantly.
                       </p>
+                      <div>
+                        <label
+                          htmlFor="checkoutPayMethod"
+                          className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide"
+                        >
+                          Payment Method
+                        </label>
+                        <select
+                          id="checkoutPayMethod"
+                          value={checkoutPayMethod}
+                          onChange={e => setCheckoutPayMethod(e.target.value as PaymentMethod)}
+                          className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-emerald-200 rounded-lg
+                            focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent transition"
+                        >
+                          {PAYMENT_METHODS.map(m => (
+                            <option key={m} value={m}>{PAYMENT_METHOD_LABELS[m]}</option>
+                          ))}
+                        </select>
+                      </div>
                       <div className="flex items-center gap-2">
                         <div className="relative flex-1">
                           <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">৳</span>
@@ -3387,6 +3452,25 @@ export default function BookingsClient({ initialRoom }: Props) {
               {/* Payment form — hidden for staff when not checked in */}
               {!isAdmin && payModal.status !== "Checked In" ? null : <form onSubmit={handlePaySubmit} noValidate>
                 <div className="mb-4">
+                  <label
+                    htmlFor="payMethod"
+                    className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide"
+                  >
+                    Payment Method
+                  </label>
+                  <select
+                    id="payMethod"
+                    value={payMethod}
+                    onChange={e => setPayMethod(e.target.value as PaymentMethod)}
+                    className="w-full px-3.5 py-2.5 text-[14px] font-semibold text-slate-800 bg-white border border-slate-200 rounded-lg
+                      focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent transition"
+                  >
+                    {PAYMENT_METHODS.map(m => (
+                      <option key={m} value={m}>{PAYMENT_METHOD_LABELS[m]}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="mb-4">
                   <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
                     Payment Amount (BDT) <span className="text-rose-500">*</span>
                   </label>
@@ -3681,6 +3765,14 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </p>
                     </div>
                   </div>
+                  {b.lastPaymentMethod && (
+                    <p className="text-[11.5px] text-slate-500 mt-1 mb-2">
+                      Last payment via{" "}
+                      <span className="font-medium text-slate-700">
+                        {formatPaymentMethod(b.lastPaymentMethod)}
+                      </span>
+                    </p>
+                  )}
                   <div className="flex items-center justify-between px-3 py-2 bg-slate-50 rounded-lg">
                     <p className="text-[11.5px] text-slate-500">Payment status</p>
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${paymentBadge(b.payment)}`}>

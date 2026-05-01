@@ -24,6 +24,7 @@ import type {
   MockBooking,
   BookingStatus,
   PaymentStatus,
+  PaymentMethod,
   RoomStatus,
   CheckoutOverride,
 } from "@/lib/mockData";
@@ -63,6 +64,7 @@ type BookingRow = {
   additional_discount_reason: string | null;
   additional_discount_by:     string | null;
   additional_discount_at:     string | null;
+  last_payment_method:        string | null;
   created_at:               string;
   updated_at:               string;
   // Joined relations
@@ -180,6 +182,8 @@ function mapBooking(row: BookingRow): MockBooking {
     additionalDiscountReason: row.additional_discount_reason ?? undefined,
     additionalDiscountBy:     row.additional_discount_by     ?? undefined,
     additionalDiscountAt:     row.additional_discount_at     ?? undefined,
+    lastPaymentMethod: (row.last_payment_method ?? undefined) as
+      MockBooking["lastPaymentMethod"],
   };
 }
 
@@ -347,7 +351,10 @@ async function findOrCreateGuest(
  *   4. Insert any additional guests into booking_guests.
  *   5. Return the full booking (re-fetched with joins).
  */
-export async function createBooking(booking: MockBooking): Promise<MockBooking> {
+export async function createBooking(
+  booking: MockBooking,
+  initialPaymentMethod: PaymentMethod = "cash",
+): Promise<MockBooking> {
   console.log("[createBooking] Starting — booking ref will be assigned by DB, guest:", booking.guestName, "room:", booking.roomNumber);
 
   // ── Step 1 — Resolve primary guest UUID ───────────────────
@@ -448,7 +455,9 @@ export async function createBooking(booking: MockBooking): Promise<MockBooking> 
     total_guests:             booking.totalGuests,
     status:                   "confirmed",
     total_amount:             booking.totalAmount,
-    paid_amount:              booking.amountPaid,
+    // paid_amount is intentionally omitted here — if amountPaid > 0 a payments
+    // row is inserted in Step 4.5 and the fn_sync_paid_amount trigger keeps
+    // bookings.paid_amount in sync automatically.
     fixed_rate:               booking.fixedRate   ?? null,
     booking_rate:             booking.bookingRate ?? null,
   };
@@ -498,6 +507,69 @@ export async function createBooking(booking: MockBooking): Promise<MockBooking> 
     console.log("[createBooking] Step 4 — additional guests inserted:", guestRows.length);
   } else {
     console.log("[createBooking] Step 4 — no additional guests, skipping booking_guests insert");
+  }
+
+  // ── Step 4.5 — Insert initial payment row (if any) ────────
+  //
+  // Previously, amountPaid was written directly to bookings.paid_amount
+  // with no corresponding payments row — a silent gap in the audit trail.
+  // This step fixes that: all payments, including the one at booking
+  // creation, are now proper rows in the payments table. The DB trigger
+  // fn_sync_paid_amount updates bookings.paid_amount automatically.
+  //
+  // If the insert fails after the booking already exists, we throw a
+  // descriptive error so the caller surfaces it immediately. The booking
+  // will exist with paid_amount = 0; staff can use Add Payment to reconcile.
+  if (booking.amountPaid > 0) {
+    const initPaymentPayload = {
+      booking_id: inserted!.id,
+      amount:     booking.amountPaid,
+      method:     initialPaymentMethod,
+    };
+
+    console.log(
+      "[createBooking] Step 4.5 — INSERT initial payment, payload:",
+      initPaymentPayload,
+    );
+
+    const {
+      error:      pmtErr,
+      status:     pmtStatus,
+      statusText: pmtStatusText,
+    } = await supabase
+      .from("payments")
+      .insert(initPaymentPayload);
+
+    if (pmtErr) {
+      console.error("──────────── [createBooking] Step 4.5 — INSERT payments FAILED ────────────");
+      console.error("  message    :", pmtErr.message);
+      console.error("  details    :", pmtErr.details);
+      console.error("  hint       :", pmtErr.hint);
+      console.error("  code       :", pmtErr.code);
+      console.error("  HTTP status:", pmtStatus, pmtStatusText);
+      console.error("  payload    :", initPaymentPayload);
+      console.error("  NOTE       : Booking was created but initial payment was NOT recorded.");
+      console.error("               booking_ref:", inserted!.booking_ref, "| amount:", booking.amountPaid);
+      console.error("────────────────────────────────────────────────────────────────────────────");
+      throw new Error(
+        `[createBooking] Booking ${inserted!.booking_ref} was created, ` +
+        `but the initial payment of ৳${booking.amountPaid} failed to record. ` +
+        `Manual reconciliation required. Cause: ${pmtErr.message}` +
+        (pmtErr.code    ? ` (code: ${pmtErr.code})`       : "") +
+        (pmtErr.hint    ? ` | hint: ${pmtErr.hint}`        : "") +
+        (pmtErr.details ? ` | details: ${pmtErr.details}`  : ""),
+      );
+    }
+
+    console.log(
+      "[createBooking] Step 4.5 — initial payment inserted successfully, amount:",
+      booking.amountPaid,
+    );
+    // DB trigger fn_sync_paid_amount        → updates bookings.paid_amount
+    // DB trigger fn_sync_last_payment_method → updates bookings.last_payment_method
+    // Both are reflected in the Step 5 re-fetch.
+  } else {
+    console.log("[createBooking] Step 4.5 — amountPaid is 0, skipping initial payment insert");
   }
 
   // ── Step 5 — Re-fetch with all joins ───────────────────────
@@ -560,7 +632,8 @@ export async function updateBookingStatus(
  */
 export async function recordPayment(
   id: string,
-  amount: number
+  amount: number,
+  method: PaymentMethod,
 ): Promise<void> {
   // ── Step 1: Resolve booking UUID from booking_ref ─────────────
   console.log("[recordPayment] Step 1 — looking up booking_ref:", id);
@@ -602,13 +675,17 @@ export async function recordPayment(
     "| paid:", booking.paid_amount, "/ total:", booking.total_amount);
 
   // ── Step 2: Clamp amount and insert into payments ─────────────
+  // TODO: This cap uses the naive formula and is incorrect when the booking has
+  //       extra_charge_amount, early_deduction_amount, or additional_discount_amount.
+  //       Replace with the true-due formula (matching calcTrueDue in the UI layer).
+  //       Tracked as a separate fix; do not roll into payment method tracking.
   const safeAmount = Math.min(amount, booking.total_amount - booking.paid_amount);
   if (safeAmount <= 0) {
     console.log("[recordPayment] safeAmount is 0 or negative — nothing to insert, returning.");
     return;
   }
 
-  const paymentPayload = { booking_id: booking.id, amount: safeAmount };
+  const paymentPayload = { booking_id: booking.id, amount: safeAmount, method };
   console.log("[recordPayment] Step 2 — INSERT into payments, payload:", paymentPayload);
 
   const {

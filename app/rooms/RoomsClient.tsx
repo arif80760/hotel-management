@@ -499,7 +499,7 @@ export default function RoomsClient() {
 
                     {/* Price */}
                     <td className="px-5 py-3.5 font-semibold text-slate-800 whitespace-nowrap">
-                      ${room.price}
+                      ৳{room.price}
                     </td>
 
                     {/* Actions — admin only; staff sees an empty cell */}

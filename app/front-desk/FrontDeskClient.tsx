@@ -23,8 +23,11 @@ import { useAuth } from "@/contexts/AuthContext";
 import {
   type BookingStatus,
   type PaymentStatus,
+  type PaymentMethod,
   type MockBooking as Booking,
   HOTEL_POLICY,
+  PAYMENT_METHODS,
+  PAYMENT_METHOD_LABELS,
 } from "@/lib/mockData";
 
 // ─────────────────────────────────────────────────────────────
@@ -261,6 +264,10 @@ export default function FrontDeskClient() {
   const [payAmount, setPayAmount] = useState<string>("");
   const [payError,  setPayError]  = useState<string>("");
 
+  // ── Payment method selectors ─────────────────────────────────
+  const [payMethod,         setPayMethod]         = useState<PaymentMethod>("cash");
+  const [checkoutPayMethod, setCheckoutPayMethod] = useState<PaymentMethod>("cash");
+
   // ── Live amount paid for the booking being checked out ───────
   // Reads from live bookings state so recording a payment inside
   // the modal instantly re-calculates the Final Payable.
@@ -337,6 +344,7 @@ export default function FrontDeskClient() {
     setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
     setOverrideReason(""); setOverrideError("");
     setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
+    setCheckoutPayMethod("cash");
   }
 
   function closeCheckoutConfirm() {
@@ -346,6 +354,7 @@ export default function FrontDeskClient() {
     setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
     setOverrideReason(""); setOverrideError("");
     setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
+    setCheckoutPayMethod("cash");
   }
 
   /** Records a payment entered inside the checkout confirmation modal. */
@@ -388,7 +397,7 @@ export default function FrontDeskClient() {
       setModalPayError(`Cannot exceed outstanding balance of ৳${maxPay.toLocaleString()}.`);
       return;
     }
-    recordPayment(checkoutConfirm.id, amt, currentRole ?? "staff");
+    recordPayment(checkoutConfirm.id, amt, checkoutPayMethod, currentRole ?? "staff");
     setShowModalPay(false);
     setModalPayAmt("");
     setModalPayError("");
@@ -461,6 +470,7 @@ export default function FrontDeskClient() {
       earlyDeductionAmt,
       discount.amount,
       moreDiscountReason.trim() || null,
+      checkoutPayMethod,
     );
     setSuccessMsg(
       `${checkoutConfirm.guestName} checked out · Room ${checkoutConfirm.roomNumber} is now Cleaning.`
@@ -501,6 +511,7 @@ export default function FrontDeskClient() {
       earlyDeductionAmt,
       discount.amount,
       moreDiscountReason.trim() || null,
+      checkoutPayMethod,
     );
     setSuccessMsg(
       `Admin override: ${checkoutConfirm.guestName} checked out with ৳${finalPayable.toLocaleString()} still outstanding.`
@@ -525,12 +536,14 @@ export default function FrontDeskClient() {
     setPayModal(booking);
     setPayAmount("");
     setPayError("");
+    setPayMethod("cash");
   }
 
   function closePayModal() {
     setPayModal(null);
     setPayAmount("");
     setPayError("");
+    setPayMethod("cash");
   }
 
   function handlePaySubmit(e: React.FormEvent) {
@@ -564,7 +577,7 @@ export default function FrontDeskClient() {
       setPayError(`Cannot exceed outstanding balance of ৳${due.toLocaleString()}.`);
       return;
     }
-    recordPayment(payModal.id, amount, currentRole ?? "staff");
+    recordPayment(payModal.id, amount, payMethod, currentRole ?? "staff");
     setSuccessMsg(
       `৳${amount.toLocaleString()} recorded for ${payModal.guestName} · ${payModal.id}.`
     );
@@ -1380,6 +1393,22 @@ export default function FrontDeskClient() {
                       <p className="text-[12px] text-emerald-700 font-medium">
                         Collect payment from guest and record it here to update the balance instantly.
                       </p>
+                      <div>
+                        <label htmlFor="checkoutPayMethod" className="block text-[11.5px] font-semibold text-slate-500 mb-1 uppercase tracking-wide">
+                          Payment Method
+                        </label>
+                        <select
+                          id="checkoutPayMethod"
+                          value={checkoutPayMethod}
+                          onChange={e => setCheckoutPayMethod(e.target.value as PaymentMethod)}
+                          className="w-full px-3 py-2.5 text-[13.5px] text-slate-800 bg-white border border-emerald-200 rounded-lg
+                            focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent transition appearance-none cursor-pointer"
+                        >
+                          {PAYMENT_METHODS.map(m => (
+                            <option key={m} value={m}>{PAYMENT_METHOD_LABELS[m]}</option>
+                          ))}
+                        </select>
+                      </div>
                       <div className="flex items-center gap-2">
                         <div className="relative flex-1">
                           <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">৳</span>
@@ -1607,6 +1636,22 @@ export default function FrontDeskClient() {
 
               {/* Payment form — hidden for staff when not checked in */}
               {!isAdmin && payModal.status !== "Checked In" ? null : <form onSubmit={handlePaySubmit} noValidate>
+                <div className="mb-4">
+                  <label htmlFor="payMethod" className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
+                    Payment Method
+                  </label>
+                  <select
+                    id="payMethod"
+                    value={payMethod}
+                    onChange={e => setPayMethod(e.target.value as PaymentMethod)}
+                    className="w-full px-3 py-2.5 text-[14px] font-semibold text-slate-800 bg-white border border-slate-200 rounded-lg
+                      focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent transition appearance-none cursor-pointer"
+                  >
+                    {PAYMENT_METHODS.map(m => (
+                      <option key={m} value={m}>{PAYMENT_METHOD_LABELS[m]}</option>
+                    ))}
+                  </select>
+                </div>
                 <div className="mb-4">
                   <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
                     Payment Amount (BDT) <span className="text-rose-500">*</span>
