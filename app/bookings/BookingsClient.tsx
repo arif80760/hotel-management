@@ -1413,7 +1413,6 @@ export default function BookingsClient({ initialRoom }: Props) {
                 </label>
                 <input
                   type="date"
-                  min={TODAY}
                   value={form.checkIn}
                   onChange={e => setField("checkIn", e.target.value)}
                   className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
@@ -1421,6 +1420,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     ${errors.checkIn ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
                 />
                 {errors.checkIn && <p className="mt-1 text-[11.5px] text-rose-600">{errors.checkIn}</p>}
+                <p className="mt-1 text-[11.5px] text-slate-500">Past dates allowed for backdated entries.</p>
               </div>
 
               {/* Check-out */}
