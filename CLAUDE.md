@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-05-02 (rev 4)
+Last updated: 2026-05-05 (rev 5)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -585,3 +585,35 @@ There is no automated migration runner. Apply schema changes manually:
 | DB ↔ UI field mapping (rooms) | `services/roomsService.ts` `mapRoom()` + `toRoomPayload()` |
 | DB ↔ UI field mapping (bookings) | `services/bookingsService.ts` `mapBooking()` |
 | Supabase client setup | `lib/supabase.ts` (browser) / `lib/supabaseAdmin.ts` (server) |
+
+---
+
+## 12. Work in Progress (as of 2026-05-05)
+
+### Booking Edit (Feature B) — partially shipped
+
+**Completed sub-steps:**
+- B1: `guestId?: string` added to `MockBooking`, populated from `guests!primary_guest_id ( id, ... )` join in `mapBooking()`
+- B2: `updateBooking()` service function in `bookingsService.ts`:
+  - Re-runs overlap check excluding the current booking (`.neq("booking_ref", bookingRef)`)
+  - Manually re-derives `payment_status` when `total_amount` changes (`fn_sync_payment_status` only fires on `paid_amount` changes, not `total_amount`)
+  - Manually cascades room status when `room_id` changes (`fn_sync_room_status` only fires on `status` column changes, not `room_id` changes); old room status determined by checking for other active bookings on that room
+  - Direct `UPDATE` on `guests` table by `guestId` (NOT `findOrCreateGuest`, which would create a duplicate)
+  - `23505` on email collision throws user-readable error (`"The email X is already registered to another guest..."`)
+  - Empty email field on edit = "leave unchanged" (no placeholder regeneration; placeholder is creation-only)
+  - TODO: Wrap booking UPDATE + room cascade in a Postgres transaction RPC function for true atomicity
+
+**Remaining sub-steps for next session:**
+- B3: `HotelContext updateBooking()` with optimistic updates and rollback for both bookings AND rooms (room change requires snapshotting both old and new room states)
+- B4: Edit modal UI in `BookingsClient.tsx` with status-based field gating:
+  - Confirmed: all fields editable (guest info, room, dates, rate, total guests, additional guests)
+  - Checked-In: only contact + guest info (name, phone, email, additional guests, total guests, notes); other fields visually disabled with banner "✏️ Editing checked-in booking — contact and guest info only"
+  - Checked-Out / Cancelled: no edit button visible
+- B5: Pencil icon in row + Edit button in detail drawer; both open the same modal
+- B6: Confirmation modal for "risky" changes (`bookingRate`, `fixedRate`, `roomNumber`, `checkInISO`, `checkOutISO` differ from original); shows old → new diff list before save
+- B7 (deferred): FrontDeskClient parity — skipped this session
+
+**Decisions locked:**
+- Both staff and admin can edit (no role restrictions on edit access)
+- Status-based field gating only
+- Smoke test of B2 deferred until B3 makes context-level calling natural
