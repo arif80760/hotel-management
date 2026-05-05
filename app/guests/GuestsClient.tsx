@@ -17,7 +17,7 @@
 // then persists to Supabase in the background.
 
 import { useState, useEffect } from "react";
-import type { MockGuest } from "@/lib/mockData";
+import { type MockGuest, displayEmail } from "@/lib/mockData";
 import * as guestsService from "@/services/guestsService";
 
 // ─────────────────────────────────────────────────────────────
@@ -382,7 +382,7 @@ export default function GuestsClient() {
 
                     {/* ── Contact: email + phone ── */}
                     <td className="px-5 py-3.5">
-                      <p className="text-slate-700">{guest.email}</p>
+                      <p className="text-slate-700">{displayEmail(guest.email)}</p>
                       <p className="text-[12px] text-slate-400 mt-0.5">{guest.phone}</p>
                     </td>
 

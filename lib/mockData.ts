@@ -61,6 +61,23 @@ export const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
 };
 
 /**
+ * Returns true if the email is null/undefined or is a system-generated
+ * placeholder of the form "<digits>.noemail@hotel.local".
+ */
+export function isPlaceholderEmail(email: string | null | undefined): boolean {
+  if (!email) return true;
+  return email.endsWith(".noemail@hotel.local");
+}
+
+/**
+ * Returns the email string for display — empty string if it is a placeholder.
+ * Use this anywhere you want to show an email to the user but suppress noise.
+ */
+export function displayEmail(email: string | null | undefined): string {
+  return isPlaceholderEmail(email) ? "" : (email ?? "");
+}
+
+/**
  * Format any DB payment_method value for display — including legacy
  * values ("online", "other") that are not user-selectable but may
  * exist on older rows.
@@ -197,6 +214,11 @@ export type MockBooking = {
   // Undefined when the booking has no payment rows yet.
   // Legacy DB values "online" and "other" are allowed so existing rows don't break types.
   lastPaymentMethod?: PaymentMethod | "online" | "other";
+  // ── Guest contact ─────────────────────────────────────────────────────────
+  email?:        string;   // real email if captured; absent / placeholder → hide in UI
+  // ── ISO dates (used for date-range filtering — no display-string parsing) ─
+  checkInISO?:   string;   // "YYYY-MM-DD" from DB check_in_date
+  checkOutISO?:  string;   // "YYYY-MM-DD" from DB check_out_date
 };
 
 // ─────────────────────────────────────────────────────────────

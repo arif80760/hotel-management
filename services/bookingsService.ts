@@ -20,13 +20,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { supabase } from "@/lib/supabase";
-import type {
-  MockBooking,
-  BookingStatus,
-  PaymentStatus,
-  PaymentMethod,
-  RoomStatus,
-  CheckoutOverride,
+import {
+  type MockBooking,
+  type BookingStatus,
+  type PaymentStatus,
+  type PaymentMethod,
+  type RoomStatus,
+  type CheckoutOverride,
+  isPlaceholderEmail,
 } from "@/lib/mockData";
 
 // ─────────────────────────────────────────────────────────────
@@ -69,7 +70,7 @@ type BookingRow = {
   updated_at:               string;
   // Joined relations
   rooms: { room_number: string; category: string } | null;
-  guests: { name: string; phone: string } | null;
+  guests: { name: string; phone: string; email: string } | null;
   booking_guests: Array<{
     name:        string;
     nationality: string | null;
@@ -153,10 +154,15 @@ function mapBooking(row: BookingRow): MockBooking {
     id:           row.booking_ref,
     guestName:    row.guests?.name    ?? "",
     phone:        row.guests?.phone   ?? "",
+    email:        row.guests?.email && !isPlaceholderEmail(row.guests.email)
+                    ? row.guests.email
+                    : undefined,
     roomNumber:   row.rooms?.room_number ?? "",
     roomCategory: cap(row.room_category_at_booking),
     checkIn:      formatDateForDisplay(row.check_in_date),
     checkOut:     formatDateForDisplay(row.check_out_date),
+    checkInISO:   row.check_in_date  ?? undefined,
+    checkOutISO:  row.check_out_date ?? undefined,
     nights:       row.nights,
     status:       DB_TO_BOOKING_STATUS[row.status] ?? "Confirmed",
     payment:      DB_TO_PAYMENT_STATUS[row.payment_status] ?? "Unpaid",
@@ -193,7 +199,7 @@ function mapBooking(row: BookingRow): MockBooking {
 const BOOKING_SELECT = `
   *,
   rooms!room_id ( room_number, category ),
-  guests!primary_guest_id ( name, phone ),
+  guests!primary_guest_id ( name, phone, email ),
   booking_guests ( name, nationality, sort_order )
 `;
 
@@ -303,35 +309,88 @@ function logSupabaseError(
  */
 async function findOrCreateGuest(
   name: string,
-  phone: string
+  phone: string,
+  email?: string,
 ): Promise<string> {
-  // 1. Try to find an existing guest by phone
+  const trimmedPhone = phone.trim();
+  const trimmedEmail = email?.trim() || undefined;
+
+  // ── 1. Look up by phone ───────────────────────────────────────
   const { data: existing } = await supabase
     .from("guests")
-    .select("id")
-    .eq("phone", phone.trim())
+    .select("id, email")
+    .eq("phone", trimmedPhone)
     .maybeSingle();
 
   if (existing) {
     console.log("[createBooking] Step 1 — found existing guest:", existing.id);
+
+    // ── 1a. Upgrade placeholder email if caller supplied a real one ──
+    if (trimmedEmail && isPlaceholderEmail(existing.email)) {
+      try {
+        const { error: upErr, status: upStatus, statusText: upST } = await supabase
+          .from("guests")
+          .update({ email: trimmedEmail })
+          .eq("id", existing.id);
+
+        if (upErr) {
+          if (upErr.code === "23505") {
+            // Another guest already owns this email — skip silently
+            console.warn(
+              "[createBooking] Step 1 — email already in use, skipping upgrade:",
+              trimmedEmail,
+            );
+          } else {
+            logSupabaseError("Step 1 — UPDATE guests email", upErr, upStatus, upST, { id: existing.id, email: trimmedEmail });
+            throw upErr;
+          }
+        } else {
+          console.log("[createBooking] Step 1 — upgraded placeholder email for guest:", existing.id);
+        }
+      } catch (err: unknown) {
+        // Re-throw unless it was already handled above (23505 unique violation)
+        const pgErr = err as { code?: string };
+        if (pgErr?.code !== "23505") throw err;
+      }
+    }
+
     return existing.id;
   }
 
-  // 2. Not found — create a minimal profile.
-  //    Email is a placeholder; it can be updated when the guest
-  //    completes their profile. Using phone ensures uniqueness.
-  const placeholderEmail = `${phone.replace(/\W/g, "")}.noemail@hotel.local`;
-  const guestPayload = { name: name.trim(), phone: phone.trim(), email: placeholderEmail };
+  // ── 2. Not found — create a minimal profile ───────────────────
+  //    Email: use the real email if provided; otherwise placeholder.
+  //    On 23505 collision (real email already owned by another guest),
+  //    fall back to placeholder and retry — booking must not crash.
+  const placeholderEmail = `${trimmedPhone.replace(/\W/g, "")}.noemail@hotel.local`;
+  let emailToUse = trimmedEmail ?? placeholderEmail;
 
-  console.log("[createBooking] Step 1 — creating new guest, payload:", guestPayload);
+  console.log("[createBooking] Step 1 — creating new guest, email:", emailToUse);
 
-  const { data: created, error, status, statusText } = await supabase
+  let { data: created, error, status, statusText } = await supabase
     .from("guests")
-    .insert(guestPayload)
+    .insert({ name: name.trim(), phone: trimmedPhone, email: emailToUse })
     .select("id")
     .single();
 
-  if (error) logSupabaseError("Step 1 — INSERT guests", error, status, statusText, guestPayload);
+  // If the provided real email collides with another guest, retry with placeholder
+  if (error?.code === "23505" && emailToUse !== placeholderEmail) {
+    console.warn(
+      `[findOrCreateGuest] Email '${emailToUse}' already in use by another guest.` +
+      ` Falling back to placeholder for this booking.`,
+    );
+    emailToUse = placeholderEmail;
+    ({ data: created, error, status, statusText } = await supabase
+      .from("guests")
+      .insert({ name: name.trim(), phone: trimmedPhone, email: emailToUse })
+      .select("id")
+      .single());
+  }
+
+  if (error) {
+    logSupabaseError("Step 1 — INSERT guests", error, status, statusText,
+      { name: name.trim(), phone: trimmedPhone, email: emailToUse });
+    throw error;
+  }
 
   console.log("[createBooking] Step 1 — guest created:", created!.id);
   return created!.id;
@@ -358,7 +417,7 @@ export async function createBooking(
   console.log("[createBooking] Starting — booking ref will be assigned by DB, guest:", booking.guestName, "room:", booking.roomNumber);
 
   // ── Step 1 — Resolve primary guest UUID ───────────────────
-  const guestId = await findOrCreateGuest(booking.guestName, booking.phone);
+  const guestId = await findOrCreateGuest(booking.guestName, booking.phone, booking.email);
 
   // ── Step 2 — Resolve room UUID ─────────────────────────────
   console.log("[createBooking] Step 2 — looking up room_number:", booking.roomNumber);

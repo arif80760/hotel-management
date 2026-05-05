@@ -32,6 +32,7 @@ import {
   PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
   formatPaymentMethod,
+  displayEmail,
 } from "@/lib/mockData";
 import {
   DOCUMENT_TYPES,
@@ -58,6 +59,7 @@ type PendingDoc = {
 type FormData = {
   guest:            string;
   phone:            string;
+  email:            string;
   room:             string;
   checkIn:          string;
   checkOut:         string;
@@ -285,7 +287,7 @@ function calcEarlyDeduction(
 }
 
 const EMPTY_FORM: FormData = {
-  guest: "", phone: "", room: "", checkIn: "", checkOut: "",
+  guest: "", phone: "", email: "", room: "", checkIn: "", checkOut: "",
   status: "Confirmed", totalGuests: 1, additionalGuests: [],
   fixedRate: "", bookingRate: "",
   totalAmount: "", amountPaid: "0",
@@ -680,6 +682,13 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (!form.checkOut)     e.checkOut = "Check-out date is required.";
     if (form.checkIn && form.checkOut && calcNights(form.checkIn, form.checkOut) <= 0)
       e.checkOut = "Check-out must be after check-in.";
+    if (form.email.trim()) {
+      const em = form.email.trim();
+      const at = em.indexOf("@");
+      const dot = em.lastIndexOf(".");
+      if (at < 1 || dot < at + 2 || dot === em.length - 1)
+        e.email = "Invalid email format.";
+    }
     setErrors(e);
     return Object.keys(e).length === 0;
   }
@@ -740,6 +749,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       id:               `BK-${nextBookingId}`,
       guestName:        form.guest.trim(),
       phone:            form.phone.trim() || "—",
+      email:            form.email.trim() || undefined,
       roomNumber:       form.room.trim(),
       roomCategory:     info?.category ?? "Unknown",
       checkIn:          formatDate(form.checkIn),
@@ -1380,6 +1390,25 @@ export default function BookingsClient({ initialRoom }: Props) {
                   className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
                     placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
                 />
+              </div>
+
+              {/* Email (optional) */}
+              <div>
+                <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
+                  Email <span className="text-slate-400 font-normal normal-case">(optional)</span>
+                </label>
+                <input
+                  type="email"
+                  placeholder="e.g. guest@example.com"
+                  value={form.email}
+                  onChange={e => setField("email", e.target.value)}
+                  className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
+                    placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                    ${errors.email ? "border-rose-400 bg-rose-50" : "border-slate-200"}`}
+                />
+                {errors.email && (
+                  <p className="mt-1 text-[11.5px] text-rose-500">{errors.email}</p>
+                )}
               </div>
 
               {/* Room Number */}
@@ -3666,6 +3695,9 @@ export default function BookingsClient({ initialRoom }: Props) {
                     <p className="text-[11.5px] text-slate-500">
                       Room {b.roomNumber} · {b.checkIn} → {b.checkOut}
                     </p>
+                    {displayEmail(b.email) && (
+                      <p className="text-[11px] text-slate-400 truncate">{displayEmail(b.email)}</p>
+                    )}
                   </div>
                   <div className="ml-auto flex-shrink-0">
                     <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold ${statusBadge(b.status)}`}>
