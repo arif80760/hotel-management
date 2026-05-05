@@ -383,6 +383,13 @@ function nextAction(status: BookingStatus): ActionDef {
   return null;
 }
 
+/** Returns true if the booking's check-in date is today or in the past. */
+function canCheckInToday(checkInISO: string | undefined): boolean {
+  if (!checkInISO) return true;   // no ISO date → don't block (safe fallback)
+  const today = new Date().toISOString().slice(0, 10);
+  return checkInISO <= today;
+}
+
 // ─────────────────────────────────────────────────────────────
 // ROLE SIMULATION
 // ─────────────────────────────────────────────────────────────
@@ -794,6 +801,8 @@ export default function BookingsClient({ initialRoom }: Props) {
       roomCategory:     info?.category ?? "Unknown",
       checkIn:          formatDate(form.checkIn),
       checkOut:         formatDate(form.checkOut),
+      checkInISO:       form.checkIn,    // already YYYY-MM-DD from <input type="date">
+      checkOutISO:      form.checkOut,
       nights:           n,
       status:           form.status,
       payment:          derivePaymentStatus(resolvedTotal, resolvedPaid),
@@ -2212,6 +2221,7 @@ export default function BookingsClient({ initialRoom }: Props) {
               ) : pagedBookings.map((b) => {
                 const action  = nextAction(b.status);
                 const due     = calcTrueDue(b);
+                const isFutureCheckIn = action?.next === "Checked In" && !canCheckInToday(b.checkInISO);
                 return (
                   <tr
                     key={b.id}
@@ -2360,8 +2370,11 @@ export default function BookingsClient({ initialRoom }: Props) {
                         {/* ── Booking workflow: Check In → Check Out ── */}
                         {action && (
                           <button
-                            onClick={() => handleWorkflowAction(b, action.next)}
-                            className={`text-[11.5px] font-semibold border px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap ${action.style}`}
+                            onClick={isFutureCheckIn ? undefined : () => handleWorkflowAction(b, action.next)}
+                            disabled={isFutureCheckIn}
+                            title={isFutureCheckIn ? `Check-in available on ${b.checkIn}` : undefined}
+                            className={`text-[11.5px] font-semibold border px-3 py-1.5 rounded-lg whitespace-nowrap
+                              ${isFutureCheckIn ? "opacity-50 cursor-not-allowed" : "transition-colors"} ${action.style}`}
                           >
                             {action.label}
                           </button>

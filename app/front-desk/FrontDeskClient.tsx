@@ -84,6 +84,13 @@ function derivePaymentStatus(total: number, paid: number): PaymentStatus {
   return "Partial";
 }
 
+/** Returns true if the booking's check-in date is today or in the past. */
+function canCheckInToday(checkInISO: string | undefined): boolean {
+  if (!checkInISO) return true;   // no ISO date → don't block (safe fallback)
+  const today = new Date().toISOString().slice(0, 10);
+  return checkInISO <= today;
+}
+
 // Format today's date in exactly the same format used in MockBooking.checkIn/checkOut:
 //   "Apr 22, 2026"
 // This allows direct string comparison — no date parsing needed.
@@ -750,15 +757,23 @@ export default function FrontDeskClient() {
 
                     {/* Actions */}
                     <div className="flex flex-col gap-1.5 items-end flex-shrink-0">
-                      <button
-                        onClick={() => handleCheckIn(b)}
-                        className="flex items-center gap-1.5 text-[12px] font-semibold text-white bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shadow-sm"
-                      >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
-                          <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
-                        </svg>
-                        Check In
-                      </button>
+                      {(() => {
+                        const gated = !canCheckInToday(b.checkInISO);
+                        return (
+                          <button
+                            onClick={gated ? undefined : () => handleCheckIn(b)}
+                            disabled={gated}
+                            title={gated ? `Check-in available on ${b.checkIn}` : undefined}
+                            className={`flex items-center gap-1.5 text-[12px] font-semibold text-white px-3 py-1.5 rounded-lg whitespace-nowrap shadow-sm
+                              ${gated ? "bg-blue-300 cursor-not-allowed opacity-60" : "bg-blue-600 hover:bg-blue-700 transition-colors"}`}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
+                              <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
+                            </svg>
+                            Check In
+                          </button>
+                        );
+                      })()}
                       {/* Collect Payment — admin only before check-in; staff must check in first */}
                       {due > 0 && (
                         isAdmin ? (
