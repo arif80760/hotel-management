@@ -219,6 +219,14 @@ export type MockBooking = {
   // ── ISO dates (used for date-range filtering — no display-string parsing) ─
   checkInISO?:   string;   // "YYYY-MM-DD" from DB check_in_date
   checkOutISO?:  string;   // "YYYY-MM-DD" from DB check_out_date
+  /**
+   * UUID of the primary guest record in the `guests` table.
+   * Populated from the JOIN in mapBooking(). Used during booking edit
+   * to UPDATE the guest row directly (name/phone/email) without going
+   * through findOrCreateGuest — which would create a new record instead
+   * of modifying the existing one.
+   */
+  guestId?:      string;
 };
 
 // ─────────────────────────────────────────────────────────────
