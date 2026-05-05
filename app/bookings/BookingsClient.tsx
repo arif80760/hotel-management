@@ -286,6 +286,8 @@ function calcEarlyDeduction(
   return { earlyDays, earlyAmt, actualDateISO };
 }
 
+const PAGE_SIZE = 20;
+
 const EMPTY_FORM: FormData = {
   guest: "", phone: "", email: "", room: "", checkIn: "", checkOut: "",
   status: "Confirmed", totalGuests: 1, additionalGuests: [],
@@ -402,6 +404,7 @@ export default function BookingsClient({ initialRoom }: Props) {
   const [successMsg,   setSuccessMsg]   = useState<string>("");
   const [activeFilter, setActiveFilter] = useState<string>("All");
   const [searchQuery,  setSearchQuery]  = useState<string>("");
+  const [currentPage,  setCurrentPage]  = useState<number>(1);
 
   // ── Payment modal state ─────────────────────────────────────
   // payModal holds the booking being paid against; null = modal closed.
@@ -522,6 +525,17 @@ export default function BookingsClient({ initialRoom }: Props) {
       (b.phone ?? "").toLowerCase().includes(q)
     );
   }, [tabFilteredBookings, searchQuery]);
+
+  // Reset to page 1 whenever the filter set changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [activeFilter, searchQuery]);
+
+  const pagedBookings = filteredBookings.slice(
+    (currentPage - 1) * PAGE_SIZE,
+    currentPage * PAGE_SIZE,
+  );
+  const totalPages = Math.ceil(filteredBookings.length / PAGE_SIZE);
 
   const counts: Record<string, number> = {
     All:           bookings.length,
@@ -2114,7 +2128,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                       : "No bookings match this filter."}
                   </td>
                 </tr>
-              ) : filteredBookings.map((b) => {
+              ) : pagedBookings.map((b) => {
                 const action  = nextAction(b.status);
                 const due     = calcTrueDue(b);
                 return (
@@ -2337,14 +2351,70 @@ export default function BookingsClient({ initialRoom }: Props) {
           </table>
         </div>
 
-        <div className="px-5 py-3 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
-          <p className="text-[12px] text-slate-400">
-            Showing {filteredBookings.length} of {bookings.length} bookings
-          </p>
-          <p className="text-[12px] font-semibold text-slate-600">
-            {activeFilter === "All" ? `${bookings.length} total` : `${filteredBookings.length} ${activeFilter}`}
-          </p>
-        </div>
+        {filteredBookings.length > 0 && (
+          <div className="px-5 py-3 border-t border-slate-100 bg-slate-50 flex items-center justify-between gap-4 flex-wrap">
+            {/* Left — count summary */}
+            <p className="text-[12px] text-slate-400 shrink-0">
+              Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredBookings.length)} of {filteredBookings.length} booking{filteredBookings.length !== 1 ? "s" : ""}
+            </p>
+
+            {/* Right — page controls (hidden when only 1 page) */}
+            {totalPages > 1 && (
+              <div className="flex items-center gap-1">
+                {/* Prev */}
+                <button
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className="px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-slate-200 text-slate-600
+                    hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  ← Prev
+                </button>
+
+                {/* Page number buttons with ellipsis for >7 pages */}
+                {(() => {
+                  const pages: (number | "…")[] = [];
+                  if (totalPages <= 7) {
+                    for (let i = 1; i <= totalPages; i++) pages.push(i);
+                  } else {
+                    pages.push(1);
+                    if (currentPage > 3) pages.push("…");
+                    for (let i = Math.max(2, currentPage - 1); i <= Math.min(totalPages - 1, currentPage + 1); i++)
+                      pages.push(i);
+                    if (currentPage < totalPages - 2) pages.push("…");
+                    pages.push(totalPages);
+                  }
+                  return pages.map((p, i) =>
+                    p === "…" ? (
+                      <span key={`ellipsis-${i}`} className="px-1.5 text-[12px] text-slate-400 select-none">…</span>
+                    ) : (
+                      <button
+                        key={p}
+                        onClick={() => setCurrentPage(p as number)}
+                        className={`min-w-[30px] px-2 py-1.5 text-[12px] font-medium rounded-md border transition
+                          ${currentPage === p
+                            ? "bg-amber-500 border-amber-500 text-white"
+                            : "border-slate-200 text-slate-600 hover:bg-slate-100"}`}
+                      >
+                        {p}
+                      </button>
+                    )
+                  );
+                })()}
+
+                {/* Next */}
+                <button
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                  className="px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-slate-200 text-slate-600
+                    hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  Next →
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* close BOOKINGS VIEW wrapper */}
