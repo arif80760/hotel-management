@@ -4352,10 +4352,19 @@ export default function BookingsClient({ initialRoom }: Props) {
 
       {/* ══════════════════════════════════════════════════════
           RISKY-EDIT CONFIRMATION MODAL
+          z-[60] is INTENTIONAL — this dialog must sit above the
+          Edit Booking modal (z-50) so the confirmation is visible
+          when triggered by a risky save attempt.
+
+          Modal z-index hierarchy:
+            z-40  : Toasts, dropdowns
+            z-50  : Primary modals (Edit Booking, Timeline, etc.)
+            z-[60]: Confirmation dialogs over primary modals
+            z-[70]: Critical alerts (reserved for future use)
           ══════════════════════════════════════════════════════ */}
       {confirmDiffs !== null && editTarget && (
         <div
-          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center px-4"
+          className="fixed inset-0 z-[60] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center px-4"
           onClick={handleConfirmCancel}
         >
           <div
