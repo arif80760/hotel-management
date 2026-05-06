@@ -7,9 +7,9 @@
 // card updates instantly when a booking changes a room's status.
 // Clicking a card navigates to /bookings?room=<number>.
 
-import { useState, useRef } from "react";
+import { useState, useMemo, useRef } from "react";
 import Link from "next/link";
-import { useHotel, type RoomStatus } from "@/contexts/HotelContext";
+import { useHotel, type RoomStatus, type Room, type Booking } from "@/contexts/HotelContext";
 
 // ── Status colour config — single source of truth ────────────
 const STATUS: Record<RoomStatus, {
@@ -44,8 +44,68 @@ function localDateToISO(d: Date): string {
 }
 const TODAY_ISO = localDateToISO(new Date());
 
+// ── Status derivation helpers ─────────────────────────────────
+// Half-open interval [checkIn, checkOut): checkout date = room released.
+// Matches booking system overlap check semantics exactly.
+function bookingActiveOnDate(b: Booking, dateISO: string): boolean {
+  if (!b.checkInISO || !b.checkOutISO) return false;
+  return b.checkInISO <= dateISO && dateISO < b.checkOutISO;
+}
+
+function deriveRoomStatusForDate(
+  room: Room, dateISO: string, todayISO: string, bookings: Booking[],
+): RoomStatus {
+  // 1. Operational states are point-in-time — only override on today
+  if (dateISO === todayISO) {
+    if (room.status === "Cleaning" || room.status === "Maintenance") {
+      return room.status;
+    }
+  }
+  // 2. SPECIAL CASE: today is checkout date and guest is still Checked In —
+  //    physically present until staff confirms. Half-open would say "released"
+  //    but guest hasn't left yet.
+  if (dateISO === todayISO) {
+    const stillCheckedIn = bookings.find(
+      b =>
+        b.roomNumber === room.roomNumber &&
+        b.status === "Checked In" &&
+        b.checkOutISO === todayISO,
+    );
+    if (stillCheckedIn) return "Occupied";
+  }
+  // 3. Standard active booking check (half-open — checkout day is released)
+  const activeBooking = bookings.find(
+    b =>
+      b.roomNumber === room.roomNumber &&
+      b.status !== "Cancelled" &&
+      bookingActiveOnDate(b, dateISO),
+  );
+  if (activeBooking) {
+    if (activeBooking.status === "Checked In")                          return "Occupied";
+    if (activeBooking.status === "Checked Out" && dateISO < todayISO)  return "Occupied";
+    if (activeBooking.status === "Confirmed"   && dateISO >= todayISO) return "Reserved";
+    // Stale Confirmed on past dates → fall through to Available
+  }
+  // 4. Default
+  return "Available";
+}
+
+function getBookingForRoomOnDate(
+  room: Room, dateISO: string, todayISO: string, bookings: Booking[],
+): Booking | undefined {
+  if (dateISO === todayISO) return undefined;
+  return bookings.find(
+    b =>
+      b.roomNumber === room.roomNumber &&
+      b.status !== "Cancelled" &&
+      ((dateISO > todayISO && (b.status === "Confirmed" || b.status === "Checked In")) ||
+       (dateISO < todayISO && (b.status === "Checked In" || b.status === "Checked Out"))) &&
+      bookingActiveOnDate(b, dateISO),
+  );
+}
+
 export default function RoomBoard() {
-  const { rooms } = useHotel();
+  const { rooms, bookings } = useHotel();
 
   const [selectedDate, setSelectedDate] = useState<string>(TODAY_ISO);
   const isToday = selectedDate === TODAY_ISO;
@@ -74,11 +134,21 @@ export default function RoomBoard() {
     if (picked) setSelectedDate(picked);
   }
 
+  // Derive display status for every room on the selected date
+  const roomsWithDerivedStatus = useMemo(
+    () => rooms.map(r => ({
+      ...r,
+      displayStatus: deriveRoomStatusForDate(r, selectedDate, TODAY_ISO, bookings),
+      displayBooking: getBookingForRoomOnDate(r, selectedDate, TODAY_ISO, bookings),
+    })),
+    [rooms, bookings, selectedDate],
+  );
+
   // Group rooms by floor — order matches "Floor 1" → "Floor 4"
   const floorOrder = ["Floor 1", "Floor 2", "Floor 3", "Floor 4"];
-  const roomsByFloor = floorOrder.reduce<Record<string, typeof rooms>>(
+  const roomsByFloor = floorOrder.reduce<Record<string, typeof roomsWithDerivedStatus>>(
     (acc, floor) => {
-      acc[floor] = rooms.filter(r => r.floor === floor);
+      acc[floor] = roomsWithDerivedStatus.filter(r => r.floor === floor);
       return acc;
     },
     {}
@@ -180,7 +250,7 @@ export default function RoomBoard() {
       <div className="p-6 space-y-7">
         {floorOrder.map((floorLabel) => {
           const floorRooms = roomsByFloor[floorLabel] ?? [];
-          const avail = floorRooms.filter(r => r.status === "Available").length;
+          const avail = floorRooms.filter(r => r.displayStatus === "Available").length;
           return (
             <div key={floorLabel}>
 
@@ -201,7 +271,7 @@ export default function RoomBoard() {
                 style={{ gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))" }}
               >
                 {floorRooms.map((room) => {
-                  const cfg = STATUS[room.status];
+                  const cfg = STATUS[room.displayStatus];
                   return (
                     <Link
                       key={room.roomNumber}
