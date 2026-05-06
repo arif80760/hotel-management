@@ -35,6 +35,7 @@ import type {
 
 import * as roomsService    from "@/services/roomsService";
 import * as bookingsService from "@/services/bookingsService";
+import type { UpdateBookingPayload } from "@/services/bookingsService";
 
 // Re-export types and ROOM_CATALOG so other files keep working unchanged.
 export type { MockRoom as Room, MockBooking as Booking, RoomStatus, BookingStatus };
@@ -83,6 +84,12 @@ type HotelContextType = {
     additionalDiscountAmount?: number,
     additionalDiscountReason?: string | null,
     paymentMethod?: PaymentMethod,
+  ) => void;
+  /** Edit a booking's fields. Optimistic update + rollback on service failure. */
+  updateBooking: (
+    bookingRef: string,
+    changes: UpdateBookingPayload,
+    original: MockBooking,
   ) => void;
 };
 
@@ -413,6 +420,79 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     });
   }
 
+  function updateBooking(
+    bookingRef: string,
+    changes: UpdateBookingPayload,
+    original: MockBooking,
+  ) {
+    const prevBookings = bookings;
+    const prevRooms    = rooms;
+    const roomChanged =
+      changes.roomNumber !== undefined &&
+      changes.roomNumber !== original.roomNumber;
+
+    setBookings(prev =>
+      prev.map(b => {
+        if (b.id !== bookingRef) return b;
+        const patch: Partial<MockBooking> = {};
+        if (changes.guestName    !== undefined) patch.guestName    = changes.guestName;
+        if (changes.phone        !== undefined) patch.phone        = changes.phone;
+        if (changes.email !== undefined && changes.email.trim() !== "")
+          patch.email = changes.email.trim();
+        if (changes.roomNumber   !== undefined) patch.roomNumber   = changes.roomNumber;
+        if (changes.roomCategory !== undefined)
+          patch.roomCategory =
+            changes.roomCategory.charAt(0).toUpperCase() + changes.roomCategory.slice(1);
+        if (changes.checkInISO !== undefined) {
+          patch.checkInISO = changes.checkInISO;
+          patch.checkIn    = new Date(`${changes.checkInISO}T12:00:00`)
+            .toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+        }
+        if (changes.checkOutISO !== undefined) {
+          patch.checkOutISO = changes.checkOutISO;
+          patch.checkOut    = new Date(`${changes.checkOutISO}T12:00:00`)
+            .toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+        }
+        if (changes.nights       !== undefined) patch.nights       = changes.nights;
+        if (changes.totalAmount  !== undefined) {
+          patch.totalAmount = changes.totalAmount;
+          patch.payment = bookingsService.derivePaymentStatus(changes.totalAmount, b.amountPaid);
+        }
+        if (changes.fixedRate    !== undefined) patch.fixedRate    = changes.fixedRate   ?? undefined;
+        if (changes.bookingRate  !== undefined) patch.bookingRate  = changes.bookingRate ?? undefined;
+        if (changes.totalGuests  !== undefined) patch.totalGuests  = changes.totalGuests;
+        return { ...b, ...patch };
+      })
+    );
+
+    if (roomChanged) {
+      setRooms(prev =>
+        prev.map(r => {
+          if (r.roomNumber === original.roomNumber) {
+            const hasOtherActive = bookings.some(
+              b => b.id !== bookingRef &&
+                   b.roomNumber === original.roomNumber &&
+                   (b.status === "Confirmed" || b.status === "Checked In")
+            );
+            return { ...r, status: (hasOtherActive ? "Reserved" : "Available") as RoomStatus };
+          }
+          if (r.roomNumber === changes.roomNumber) {
+            const newStatus = bookingsService.bookingToRoomStatus(original.status) ?? "Reserved";
+            return { ...r, status: newStatus };
+          }
+          return r;
+        })
+      );
+    }
+
+    bookingsService.updateBooking(bookingRef, changes, original.guestId).catch(err => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[HotelContext updateBooking] failed — rolling back:", msg);
+      setBookings(prevBookings);
+      setRooms(prevRooms);
+    });
+  }
+
   // ── Room actions ────────────────────────────────────────────
 
   function addRoom(room: MockRoom) {
@@ -480,6 +560,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       changeBookingStatus,
       checkoutNormal,
       checkoutWithOverride,
+      updateBooking,
       addRoom,
       updateRoom,
       deleteRoom,
