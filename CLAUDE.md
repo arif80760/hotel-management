@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-05-05 (rev 5)
+Last updated: 2026-05-06 (rev 6)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -113,7 +113,7 @@ hotel-management/
 | primary_guest_id | UUID FK → guests.id | |
 | check_in_date | DATE | ISO format: "2026-04-22" |
 | check_out_date | DATE | ISO format: "2026-04-25" |
-| nights | INTEGER | computed by DB trigger |
+| nights | INTEGER | **GENERATED column** — DB-computed from `check_in_date` and `check_out_date`; not directly writable |
 | room_category_at_booking | TEXT | lowercase enum — snapshot at booking time |
 | total_guests | INTEGER | |
 | status | TEXT | lowercase enum: confirmed/checked_in/checked_out/cancelled |
@@ -261,6 +261,7 @@ booking_documents links to bookings via TEXT booking_ref (loose coupling — no 
 | Stay Timing Step 1 (display) | ✅ Complete | `BookingsClient.tsx`, `FrontDeskClient.tsx` |
 | Stay Timing Step 2 (billing) | ✅ Complete | `BookingsClient.tsx`, `FrontDeskClient.tsx`, `HotelContext.tsx`, `bookingsService.ts` |
 | Payment Method Tracking | ✅ Complete | `lib/mockData.ts`, `services/bookingsService.ts`, `HotelContext.tsx`, `BookingsClient.tsx`, `FrontDeskClient.tsx` |
+| Booking Edit (Feature B) | ✅ Complete | `app/bookings/BookingsClient.tsx`, `contexts/HotelContext.tsx`, `services/bookingsService.ts` |
 
 ---
 
@@ -489,6 +490,8 @@ Use `tabular-nums` class on all currency/number display elements for aligned dec
 ### Known Issues / Technical Debt
 - **`services/bookingsService.ts` — `recordPayment()` cap uses naive formula**: The `Math.min` clamp on line ~610 uses `total_amount − paid_amount`, which is incorrect when the booking has `extra_charge_amount`, `early_deduction_amount`, or `additional_discount_amount`. Should be replaced with the true-due formula matching `calcTrueDue()` in the UI layer. Tracked as a separate fix; do not roll into payment method tracking.
 
+- **`createBooking` atomicity**: If the booking INSERT succeeds but the initial payment INSERT fails (e.g., 23514 `chk_paid_not_exceed_total` when paid > total), the booking row is left as a phantom with paid_amount=0. UI validation in the create form now prevents the most common cause (paid > total), but a true fix requires a Postgres RPC function wrapping booking + payment in a transaction. Tracked as future work.
+
 ---
 
 ## 8. Workflow Notes
@@ -529,6 +532,16 @@ Use `tabular-nums` class on all currency/number display elements for aligned dec
   - **Additional discount**: "More Discount" section in checkout modal — optional amount + reason; violet colour; validated to not exceed `(total + extraCharge − earlyDeduction − amountPaid)`; no role restriction; written to `additional_discount_amount`, `additional_discount_reason`, `additional_discount_by`, `additional_discount_at` in DB
   - **Updated finalPayable formula**: `(total + extra) − earlyDeduction − additionalDiscount − amountPaid`
   - **Currency**: all `$` USD symbols replaced with `৳` BDT throughout the app — booking form, pay modal, panels, dues monitor, booking-detail drawer, rooms form, checkout modal
+- **Booking Edit (Feature B)**: Full in-place edit of Confirmed and Checked-In bookings
+  - Fixed-overlay modal opened from: pencil icon in row action bar, "Edit Booking" button in timeline modal footer
+  - **Status-based field gating**: Confirmed → all fields editable; Checked In → contact/guest info only (amber banner, room/dates/rates disabled); Checked Out/Cancelled → edit button not shown
+  - **Risky-edit confirmation step**: room, dates, or rate changes show a rose-tinted diff modal (from→to table) before the save is dispatched
+  - **Optimistic update + rollback**: `HotelContext.updateBooking()` patches local state immediately; reverts `bookings` and `rooms` snapshots on service failure
+  - **Room status cascade**: when `roomNumber` changes, old room is freed (Available or Reserved if other active bookings remain) and new room gets Reserved/Occupied
+  - **booking_guests Step 7.5**: DELETE + re-INSERT `booking_guests` rows when `additionalGuests` changes
+  - **nights GENERATED fix**: `bookings.nights` is a PostgreSQL GENERATED column (error 23508 on write). The UI derives nights optimistically from date math; the service sends dates and lets the DB recompute. `UpdateBookingPayload` has no `nights` field.
+  - **Amount paid guard**: `validateEdit()` blocks submit when `amountPaid > totalAmount`. Service-side Step 4.5 throws `PHANTOM BOOKING WARNING` if `new totalAmount < current paid_amount`.
+  - **FrontDesk parity**: deferred to a future session
 
 ### Future Planned
 - Housekeeping module (room cleaning queue)
@@ -586,34 +599,3 @@ There is no automated migration runner. Apply schema changes manually:
 | DB ↔ UI field mapping (bookings) | `services/bookingsService.ts` `mapBooking()` |
 | Supabase client setup | `lib/supabase.ts` (browser) / `lib/supabaseAdmin.ts` (server) |
 
----
-
-## 12. Work in Progress (as of 2026-05-05)
-
-### Booking Edit (Feature B) — partially shipped
-
-**Completed sub-steps:**
-- B1: `guestId?: string` added to `MockBooking`, populated from `guests!primary_guest_id ( id, ... )` join in `mapBooking()`
-- B2: `updateBooking()` service function in `bookingsService.ts`:
-  - Re-runs overlap check excluding the current booking (`.neq("booking_ref", bookingRef)`)
-  - Manually re-derives `payment_status` when `total_amount` changes (`fn_sync_payment_status` only fires on `paid_amount` changes, not `total_amount`)
-  - Manually cascades room status when `room_id` changes (`fn_sync_room_status` only fires on `status` column changes, not `room_id` changes); old room status determined by checking for other active bookings on that room
-  - Direct `UPDATE` on `guests` table by `guestId` (NOT `findOrCreateGuest`, which would create a duplicate)
-  - `23505` on email collision throws user-readable error (`"The email X is already registered to another guest..."`)
-  - Empty email field on edit = "leave unchanged" (no placeholder regeneration; placeholder is creation-only)
-  - TODO: Wrap booking UPDATE + room cascade in a Postgres transaction RPC function for true atomicity
-
-**Remaining sub-steps for next session:**
-- B3: `HotelContext updateBooking()` with optimistic updates and rollback for both bookings AND rooms (room change requires snapshotting both old and new room states)
-- B4: Edit modal UI in `BookingsClient.tsx` with status-based field gating:
-  - Confirmed: all fields editable (guest info, room, dates, rate, total guests, additional guests)
-  - Checked-In: only contact + guest info (name, phone, email, additional guests, total guests, notes); other fields visually disabled with banner "✏️ Editing checked-in booking — contact and guest info only"
-  - Checked-Out / Cancelled: no edit button visible
-- B5: Pencil icon in row + Edit button in detail drawer; both open the same modal
-- B6: Confirmation modal for "risky" changes (`bookingRate`, `fixedRate`, `roomNumber`, `checkInISO`, `checkOutISO` differ from original); shows old → new diff list before save
-- B7 (deferred): FrontDeskClient parity — skipped this session
-
-**Decisions locked:**
-- Both staff and admin can edit (no role restrictions on edit access)
-- Status-based field gating only
-- Smoke test of B2 deferred until B3 makes context-level calling natural
