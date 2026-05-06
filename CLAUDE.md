@@ -541,9 +541,9 @@ and use `<PrintButtons />` + `<LetterHead />` from `components/invoice/`.
 
 - **Dual-writer for Cleaning status**: When staff checks out a guest, `HotelContext.checkoutNormal/checkoutWithOverride` sets room status to `"Cleaning"` optimistically AND the DB trigger `fn_sync_room_status` does the same. Both writers produce the same value, so there is no conflict today. Future: when the trigger is revised (e.g., to skip Cleaning for certain room types), the optimistic write in HotelContext must stay in sync.
 
-- **Maintenance flag does not block bookings**: `room.status === "Maintenance"` is a display-only flag today. The booking overlap check queries by `room_number` and ignores room status — a Maintenance room can still be booked. This is intentional for now (staff must manually avoid double-booking a Maintenance room). Day 3 housekeeping module will add a booking-block guard.
+- **Maintenance flag does not block bookings**: `room.status === "Maintenance"` is a display-only flag today. The booking overlap check queries by `room_number` and ignores room status — a Maintenance room can still be booked. Housekeeping UI is intentionally deferred (see Future Planned → Intentionally deferred).
 
-- **No "Mark Maintenance" button in UI**: Staff currently has no way to set a room to Maintenance from the Room Board. Only Cleaning → Available is exposed (`markRoomAvailable` in HotelContext). Full Cleaning/Maintenance management UI is deferred to Day 3 housekeeping module.
+- **No "Mark Maintenance" button in UI**: Staff currently has no way to set a room to Maintenance from the Room Board. Only Cleaning → Available is exposed (`markRoomAvailable` in HotelContext). Housekeeping UI intentionally deferred.
 
 ### Cleaning / Maintenance Lifecycle (as of Block 2)
 
@@ -556,7 +556,7 @@ and use `<PrintButtons />` + `<LetterHead />` from `components/invoice/`.
 - Set manually today: no UI button — must be set directly in Supabase or via a future admin panel.
 - Cleared manually: same — no UI today.
 - Does NOT block bookings at the service layer (known issue above).
-- Full Maintenance workflow (set/clear buttons, booking block, reason field) deferred to Day 3 housekeeping module.
+- Full Maintenance workflow (set/clear buttons, booking block, reason field) intentionally deferred (see Future Planned → Intentionally deferred).
 
 **Operational priority hierarchy in Room Board derivation:**
 ```
@@ -616,7 +616,7 @@ On non-today dates, Cleaning and Maintenance never appear (they are point-in-tim
   - Stale Confirmed bookings on past dates → "Available" (no `no_show` status yet — see Known Issues)
   - Guest first name display: non-today cards with active booking show guest name under status pill; honorific-aware (`"Md. Abdullah Hassan"` → `"Md. Abdullah"`)
   - Summary stats bar: above floor grid, shows breakdown of all 5 statuses for selected date; recomputes via `useMemo` on date change
-  - Mark Available button: Cleaning cards on today's view show a subtle one-click action to flip room to Available (`markRoomAvailable` context action); intentionally narrow API — Day 3 will expand
+  - Mark Available button: Cleaning cards on today's view show a subtle one-click action to flip room to Available (`markRoomAvailable` context action); intentionally narrow API — housekeeping UI deferred
   - Floor list derived dynamically from `rooms` data with natural sort (no hardcoded floor count)
   - Room form (Rooms page) expanded from Floors 1-4 to 1-10; subtitle derives distinct floor count from live `rooms` data
 
@@ -639,21 +639,60 @@ On non-today dates, Cleaning and Maintenance never appear (they are point-in-tim
   - **booking_guests Step 7.5**: DELETE + re-INSERT `booking_guests` rows when `additionalGuests` changes
   - **nights GENERATED fix**: `bookings.nights` is a PostgreSQL GENERATED column (error 23508 on write). The UI derives nights optimistically from date math; the service sends dates and lets the DB recompute. `UpdateBookingPayload` has no `nights` field.
   - **Amount paid guard**: `validateEdit()` blocks submit when `amountPaid > totalAmount`. Service-side Step 4.5 throws `PHANTOM BOOKING WARNING` if `new totalAmount < current paid_amount`.
-  - **FrontDesk parity**: deferred to a future session
+  - **FrontDesk parity**: deferred; subsumed by Day 4 Front Desk dashboard widgets
 
 ### Day 3 Priorities (most likely)
-- Housekeeping module: Cleaning queue, room-ready confirmation, Maintenance set/clear UI
-  (currently no buttons), booking-block for Maintenance rooms
-- No-show handling: add `no_show` status, `isStaleConfirmed()` helper, stale banner in
-  edit modal (see Known Issues for full spec)
+- Stay Extension (same-room): Allow extending checkout date by N nights when room is
+  available for the new period. Recalculate total amount, update payment due. Build on
+  existing booking edit pattern.
+- No-show handling: Add `no_show` status, `isStaleConfirmed()` helper, stale banner in
+  edit modal, "Mark as No-Show" action. Spec already in Known Issues.
 
-### Day 4+ (deferred)
-- Settings module: Make HOTEL_INFO (name, address, logo, footer text) DB-backed instead
-  of hardcoded in `lib/hotelInfo.ts`
-- FrontDeskClient parity: Booking Edit flow not yet ported from BookingsClient
-- Reporting / analytics dashboard
-- Online booking widget (guest-facing)
-- Late-checkout billing (fee schedule for overdue guests)
+### Day 4 (likely)
+- Front Desk dashboard widgets: today's check-ins/check-outs counts, currently in-house,
+  today's revenue collected, outstanding balances, available rooms by category, quick
+  actions (walk-in shortcut)
+- Walk-in booking flow: "Available now" view, quick check-in (skip Confirmed → straight
+  to Checked In), cash-first payment focus
+
+### Day 5-6 (planned — visual room showcase block)
+- Room section visual upgrade: high-value walk-in-friendly feature for Cox's Bazar
+  tourist hotel. Staff opens Room section → guest browses visual room cards (photo +
+  description + amenities + price) → staff clicks "Book This Room" → guest details
+  captured → check-in.
+
+  Components needed:
+  - Room photos: multiple per room (thumbnail + gallery). DB schema: `room_images` table
+    or images array column. Storage: Supabase Storage bucket.
+  - Room descriptions: paragraph text per room/category. `description` text field on
+    `rooms` table.
+  - Amenities list: Wi-Fi, AC, TV, Sea View, Balcony, bathroom type, etc. Text array or
+    many-to-many amenities table.
+  - Room features: bed type, max occupancy, sq footage, view direction. Text fields on
+    `rooms` table.
+  - Pricing display: leverages existing `bookingRate` / `fixedRate`.
+  - "Book This Room" quick action → opens new booking modal pre-filled with room.
+
+  Scope: 2-3 blocks of work:
+    Block A: DB schema + room edit form for photos/descriptions/amenities
+    Block B: Visual room cards display in Rooms page
+    Block C: "Book this room" walk-in flow integration
+
+### Day 7+ (later polish)
+- Stay Extension with room-shift: end current booking + create new booking for new room
+  when extending requires a room change
+- Guest history view: per-guest booking history, total spend, repeat-guest indicators,
+  last visit
+- Settings module: DB-backed HOTEL_INFO (name, address, logo, footer text) instead of
+  hardcoded in `lib/hotelInfo.ts`
+
+### Intentionally deferred (not for this app)
+- Housekeeping module: cleaning queue UI, Maintenance set/clear buttons. Not building
+  because mid-range hotel cleaning staff won't reliably operate the app. Auto-cleaning
+  lifecycle (Block 2) covers 95% of value without staff dependency. Reconsider if/when
+  this becomes a SaaS product.
+- Room analytics (revenue per room, occupancy heatmap): deferred. Visual showcase first,
+  analytics later if/when needed.
 
 ---
 
