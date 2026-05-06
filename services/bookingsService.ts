@@ -673,7 +673,8 @@ export type UpdateBookingPayload = {
   roomNumber?:   string;
   checkInISO?:   string;       // YYYY-MM-DD
   checkOutISO?:  string;       // YYYY-MM-DD
-  nights?:       number;
+  // nights is omitted — it is a PostgreSQL GENERATED column (check_out_date - check_in_date).
+  // Writing to it produces error 23508. Dates are sent instead; the DB recomputes nights.
   totalAmount?:  number;
   fixedRate?:    number | null;
   bookingRate?:  number | null;
@@ -795,7 +796,7 @@ export async function updateBooking(
   if (resolvedRoomId             !== undefined) bookingUpdate.room_id                  = resolvedRoomId;
   if (changes.checkInISO         !== undefined) bookingUpdate.check_in_date            = changes.checkInISO;
   if (changes.checkOutISO        !== undefined) bookingUpdate.check_out_date           = changes.checkOutISO;
-  if (changes.nights             !== undefined) bookingUpdate.nights                   = changes.nights;
+  // nights is GENERATED — never written (error 23508). DB recomputes from dates automatically.
   if (changes.totalAmount        !== undefined) bookingUpdate.total_amount             = changes.totalAmount;
   if (changes.fixedRate          !== undefined) bookingUpdate.fixed_rate               = changes.fixedRate;
   if (changes.bookingRate        !== undefined) bookingUpdate.booking_rate             = changes.bookingRate;

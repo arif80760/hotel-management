@@ -453,7 +453,17 @@ export function HotelProvider({ children }: { children: ReactNode }) {
           patch.checkOut    = new Date(`${changes.checkOutISO}T12:00:00`)
             .toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
         }
-        if (changes.nights       !== undefined) patch.nights       = changes.nights;
+        // nights is a DB GENERATED column — never written directly.
+        // Derive optimistically from the new dates for immediate UI feedback.
+        if (changes.checkInISO !== undefined || changes.checkOutISO !== undefined) {
+          const ci = changes.checkInISO  ?? b.checkInISO  ?? "";
+          const co = changes.checkOutISO ?? b.checkOutISO ?? "";
+          if (ci && co) {
+            patch.nights = Math.max(0, Math.round(
+              (new Date(co + "T12:00:00").getTime() - new Date(ci + "T12:00:00").getTime()) / 86400000
+            ));
+          }
+        }
         if (changes.totalAmount  !== undefined) {
           patch.totalAmount = changes.totalAmount;
           patch.payment = bookingsService.derivePaymentStatus(changes.totalAmount, b.amountPaid);

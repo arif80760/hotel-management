@@ -1497,16 +1497,19 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (editForm.checkIn  !== (editTarget.checkInISO  ?? "")) changes.checkInISO  = editForm.checkIn;
     if (editForm.checkOut !== (editTarget.checkOutISO ?? "")) changes.checkOutISO = editForm.checkOut;
 
-    // Derive nights from the final resolved dates (Commit 6 will remove this block)
+    // Auto-recompute totalAmount when dates or rate change.
+    // nights is a DB GENERATED column and cannot be written directly (error 23508).
+    // The manual override check below lets the user's explicit totalAmount value win.
     const ciISO = changes.checkInISO  ?? editTarget.checkInISO  ?? "";
     const coISO = changes.checkOutISO ?? editTarget.checkOutISO ?? "";
-    if (changes.checkInISO !== undefined || changes.checkOutISO !== undefined) {
-      changes.nights = calcNights(ciISO, coISO);
+    if (changes.checkInISO !== undefined || changes.checkOutISO !== undefined || changes.bookingRate !== undefined) {
+      const rateForCompute = changes.bookingRate ?? editTarget.bookingRate ?? 0;
+      const newNights      = calcNights(ciISO, coISO);
+      if (rateForCompute > 0 && newNights > 0) changes.totalAmount = rateForCompute * newNights;
     }
-
+    // Manual override: if user explicitly changed totalAmount, their value wins
     const newTotal = parseFloat(editForm.totalAmount);
-    if (!isNaN(newTotal) && newTotal !== editTarget.totalAmount)
-      changes.totalAmount = newTotal;
+    if (!isNaN(newTotal) && newTotal !== editTarget.totalAmount) changes.totalAmount = newTotal;
 
     const newFixed = parseFloat(editForm.fixedRate);
     if (!isNaN(newFixed) && newFixed !== (editTarget.fixedRate ?? 0))
