@@ -29,6 +29,7 @@ import {
   PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
 } from "@/lib/mockData";
+import { calcTrueDue } from "@/lib/invoiceUtils";
 
 // ─────────────────────────────────────────────────────────────
 // LOCAL TYPES
@@ -160,25 +161,6 @@ function fmtTime(d: Date): string {
 
 function fmtShortDate(d: Date): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
-
-/**
- * Canonical "true amount due" formula.
- * Accounts for extra charges, early-checkout deductions, and additional discounts.
- * Use this everywhere instead of the naive totalAmount − amountPaid.
- */
-function calcTrueDue(b: {
-  totalAmount:               number;
-  amountPaid:                number;
-  extraChargeAmount?:        number;
-  earlyDeductionAmount?:     number;
-  additionalDiscountAmount?: number;
-}): number {
-  return b.totalAmount
-    + (b.extraChargeAmount          ?? 0)
-    - (b.earlyDeductionAmount       ?? 0)
-    - (b.additionalDiscountAmount   ?? 0)
-    - b.amountPaid;
 }
 
 /**

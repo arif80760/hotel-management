@@ -42,6 +42,7 @@ import {
   uploadDocument,
   deleteDocument,
 } from "@/services/documentsService";
+import { calcTrueDue } from "@/lib/invoiceUtils";
 
 // ─────────────────────────────────────────────────────────────
 // LOCAL TYPES
@@ -241,26 +242,6 @@ function fmtTime(d: Date): string {
 /** Format a Date to "Apr 22, 2026" */
 function fmtShortDate(d: Date): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
-
-/**
- * Canonical outstanding-balance formula.
- * Always use this instead of the naive (totalAmount − amountPaid).
- * Early deduction and additional discount are 0 for bookings not yet checked out,
- * so the formula naturally reduces to the original for in-progress stays.
- */
-function calcTrueDue(b: {
-  totalAmount:             number;
-  amountPaid:              number;
-  extraChargeAmount?:      number;
-  earlyDeductionAmount?:   number;
-  additionalDiscountAmount?: number;
-}): number {
-  return b.totalAmount
-    + (b.extraChargeAmount          ?? 0)
-    - (b.earlyDeductionAmount       ?? 0)
-    - (b.additionalDiscountAmount   ?? 0)
-    - b.amountPaid;
 }
 
 /**
