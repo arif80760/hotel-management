@@ -24,7 +24,10 @@ import type { MockRoom, RoomStatus } from "@/lib/mockData";
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────
 const CATEGORIES  = ["Single", "Double", "Deluxe", "Suite", "Family"] as const;
-const FLOOR_OPTIONS = ["Floor 1", "Floor 2", "Floor 3", "Floor 4"] as const;
+const FLOOR_OPTIONS = [
+  "Floor 1", "Floor 2", "Floor 3", "Floor 4", "Floor 5",
+  "Floor 6", "Floor 7", "Floor 8", "Floor 9", "Floor 10",
+] as const;
 const ALL_STATUSES: RoomStatus[] = [
   "Available", "Occupied", "Reserved", "Cleaning", "Maintenance",
 ];
@@ -301,7 +304,7 @@ export default function RoomsClient() {
           </h1>
           <p className="text-[13px] text-slate-500 mt-1">
             {rooms.length} room{rooms.length !== 1 ? "s" : ""} across{" "}
-            {FLOOR_OPTIONS.length} floors
+            {new Set(rooms.map(r => r.floor)).size} floors
           </p>
         </div>
         {isAdmin && (

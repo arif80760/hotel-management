@@ -167,8 +167,18 @@ export default function RoomBoard() {
 
   const totalRooms = roomsWithDerivedStatus.length;
 
-  // Group rooms by floor — order matches "Floor 1" → "Floor 4"
-  const floorOrder = ["Floor 1", "Floor 2", "Floor 3", "Floor 4"];
+  // Floor list derived from actual rooms data, sorted naturally.
+  // Adding a new floor in DB (or via future settings module) appears
+  // here automatically without code changes.
+  const floorOrder = useMemo(
+    () => Array.from(new Set(rooms.map(r => r.floor))).sort((a, b) => {
+      // Natural sort: "Floor 1", "Floor 2", ..., "Floor 10"
+      const numA = parseInt(a.replace(/\D/g, ""), 10) || 0;
+      const numB = parseInt(b.replace(/\D/g, ""), 10) || 0;
+      return numA - numB;
+    }),
+    [rooms],
+  );
   const roomsByFloor = floorOrder.reduce<Record<string, typeof roomsWithDerivedStatus>>(
     (acc, floor) => {
       acc[floor] = roomsWithDerivedStatus.filter(r => r.floor === floor);
