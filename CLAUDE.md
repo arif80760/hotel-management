@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-05-06 (rev 7)
+Last updated: 2026-05-06 (rev 8)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -263,6 +263,7 @@ booking_documents links to bookings via TEXT booking_ref (loose coupling — no 
 | Payment Method Tracking | ✅ Complete | `lib/mockData.ts`, `services/bookingsService.ts`, `HotelContext.tsx`, `BookingsClient.tsx`, `FrontDeskClient.tsx` |
 | Booking Edit (Feature B) | ✅ Complete | `app/bookings/BookingsClient.tsx`, `contexts/HotelContext.tsx`, `services/bookingsService.ts` |
 | Dynamic Room Board (Block 2) | ✅ Complete | `components/RoomBoard.tsx`, `contexts/HotelContext.tsx` |
+| Invoice + Reservation Details (Block 3) | ✅ Complete | `app/bookings/[id]/invoice/page.tsx`, `app/bookings/[id]/reservation/page.tsx`, `components/invoice/`, `lib/invoiceUtils.ts` |
 
 ---
 
@@ -462,6 +463,37 @@ export const supabase = g._supabase;
 ### Number Input Styling
 Use `tabular-nums` class on all currency/number display elements for aligned decimal columns.
 
+### Modal z-index Hierarchy
+Fixed-position modals must use the correct z-index tier so stacking order is predictable:
+
+| Tier | Class | Used for |
+|---|---|---|
+| z-40 | `z-40` | Toasts, dropdowns, floating panels |
+| z-50 | `z-50` | Primary modals (Edit Booking, Timeline, Create Booking, etc.) |
+| z-60 | `z-[60]` | Confirmation dialogs that overlay a primary modal |
+| z-70 | `z-[70]` | Critical alerts (reserved for future use) |
+
+**Rule:** Any dialog that must appear *on top of* a primary modal must use `z-[60]` or higher.
+Stacking context is DOM-order within the same z-index — if two elements share `z-50`, the one
+rendered **later in the JSX** wins and paints on top. This was the root cause of the risky-edit
+confirmation modal being invisible (it rendered before the Edit Booking modal and was painted over).
+
+### Standalone Document Routes
+Pages that must print cleanly (invoice, reservation details) are excluded from the
+Sidebar + TopBar shell via `isStandaloneDocument` in `AppShell.tsx`:
+
+```
+/^\/bookings\/[^/]+\/(invoice|reservation)$/
+```
+
+These routes are: authenticated (routing guard still applies), HotelProvider-free (server
+components fetch their own data directly), wrapped in `<div className="w-full min-h-full">`
+to prevent flex-shrink under `<body className="h-full flex">`.
+
+To add a new printable route: extend the regex, create a server component page with
+`export const dynamic = "force-dynamic"`, inject `<style>{\`@page { margin: 12mm; }\`}</style>`,
+and use `<PrintButtons />` + `<LetterHead />` from `components/invoice/`.
+
 ---
 
 ## 7. Important Rules
@@ -488,9 +520,10 @@ Use `tabular-nums` class on all currency/number display elements for aligned dec
 - `ROOM_CATALOG` is still exported from `lib/mockData.ts` and used by the booking form for price hints
 - When Supabase rooms data is stable, replace with a derived map from live `rooms` state
 
-### Known Issues / Technical Debt
-- **`services/bookingsService.ts` — `recordPayment()` cap uses naive formula**: The `Math.min` clamp on line ~610 uses `total_amount − paid_amount`, which is incorrect when the booking has `extra_charge_amount`, `early_deduction_amount`, or `additional_discount_amount`. Should be replaced with the true-due formula matching `calcTrueDue()` in the UI layer. Tracked as a separate fix; do not roll into payment method tracking.
+### Resolved Issues
+- **[Resolved Day 2 Block 3] `recordPayment()` cap now uses true-due formula**: Mirrors `calcTrueDue()`. Previous naive formula (`total_amount − paid_amount`) silently dropped payments when `extra_charge_amount` existed, causing React optimistic state to permanently diverge from DB `paid_amount`. Fix: service now SELECTs all adjustment columns and computes `trueDue = total + extraCharge − earlyDeduction − additionalDiscount − paid`. Throws on positive-amount request with no balance so HotelContext `.catch()` rolls back the optimistic update.
 
+### Known Issues / Technical Debt
 - **`createBooking` atomicity**: If the booking INSERT succeeds but the initial payment INSERT fails (e.g., 23514 `chk_paid_not_exceed_total` when paid > total), the booking row is left as a phantom with paid_amount=0. UI validation in the create form now prevents the most common cause (paid > total), but a true fix requires a Postgres RPC function wrapping booking + payment in a transaction. Tracked as future work.
 
 - **Stale "Confirmed" booking handling (planned)**: When today's date > booking's `check_in_date` AND status is still `"Confirmed"`, the booking is in a stale state. Two real-world causes: (1) guest stayed but staff forgot to click Check In, (2) guest never arrived (no-show).
@@ -587,6 +620,16 @@ On non-today dates, Cleaning and Maintenance never appear (they are point-in-tim
   - Floor list derived dynamically from `rooms` data with natural sort (no hardcoded floor count)
   - Room form (Rooms page) expanded from Floors 1-4 to 1-10; subtitle derives distinct floor count from live `rooms` data
 
+- **Invoice + Reservation Details (Block 3)**: Printable A4-style documents for bookings
+  - Invoice page: `app/bookings/[id]/invoice/page.tsx` — server component, `force-dynamic`, fetches booking + payments via `getBookingByRef` + `getPaymentsByBookingRef`
+  - Reservation Details page: `app/bookings/[id]/reservation/page.tsx` — server component, booking only (no payments); shows estimated total, planned checkout dates
+  - Both pages: professional letterhead (`components/invoice/LetterHead.tsx`), print button (`components/invoice/PrintButtons.tsx`), `@page { margin: 12mm; size: A4 portrait; }` injected via `<style>` tag
+  - AppShell strips sidebar/topbar for `/bookings/[id]/(invoice|reservation)` routes via `isStandaloneDocument` regex; wraps children in `<div className="w-full min-h-full">` to prevent flex-shrink layout bug
+  - Timeline modal footer has "Reservation" and "Invoice" buttons that `window.open(...)` the appropriate route in a new tab; visibility gated by booking status: Reservation for Confirmed/Checked In, Invoice for Checked In/Checked Out
+  - `calcTrueDue()` extracted from both client files into `lib/invoiceUtils.ts` (single source of truth)
+  - `formatInvoiceDate()` handles both date-only strings (`"2026-04-22"` → anchored to local noon) and full ISO timestamps
+  - Download PDF removed — html2canvas 1.4.1 cannot render Tailwind 4's `oklch()` colors; users use browser Print → Save as PDF instead
+
 - **Booking Edit (Feature B)**: Full in-place edit of Confirmed and Checked-In bookings
   - Fixed-overlay modal opened from: pencil icon in row action bar, "Edit Booking" button in timeline modal footer
   - **Status-based field gating**: Confirmed → all fields editable; Checked In → contact/guest info only (amber banner, room/dates/rates disabled); Checked Out/Cancelled → edit button not shown
@@ -598,8 +641,16 @@ On non-today dates, Cleaning and Maintenance never appear (they are point-in-tim
   - **Amount paid guard**: `validateEdit()` blocks submit when `amountPaid > totalAmount`. Service-side Step 4.5 throws `PHANTOM BOOKING WARNING` if `new totalAmount < current paid_amount`.
   - **FrontDesk parity**: deferred to a future session
 
-### Future Planned
-- Housekeeping module (room cleaning queue)
+### Day 3 Priorities (most likely)
+- Housekeeping module: Cleaning queue, room-ready confirmation, Maintenance set/clear UI
+  (currently no buttons), booking-block for Maintenance rooms
+- No-show handling: add `no_show` status, `isStaleConfirmed()` helper, stale banner in
+  edit modal (see Known Issues for full spec)
+
+### Day 4+ (deferred)
+- Settings module: Make HOTEL_INFO (name, address, logo, footer text) DB-backed instead
+  of hardcoded in `lib/hotelInfo.ts`
+- FrontDeskClient parity: Booking Edit flow not yet ported from BookingsClient
 - Reporting / analytics dashboard
 - Online booking widget (guest-facing)
 - Late-checkout billing (fee schedule for overdue guests)
