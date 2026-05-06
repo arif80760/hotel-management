@@ -513,6 +513,13 @@ export default function BookingsClient({ initialRoom }: Props) {
   const [editErrors,  setEditErrors]  = useState<Partial<Record<keyof EditFormData, string>>>({});
   const [editSaving,  setEditSaving]  = useState<boolean>(false);
 
+  // ── Edit confirmation modal state (risky-change review step) ─
+  // confirmDiffs: row-by-row diff shown in the rose-tinted confirm modal.
+  // pendingChanges: the payload staged for submit once the user confirms.
+  type DiffRow = { field: string; from: string; to: string };
+  const [confirmDiffs,   setConfirmDiffs]   = useState<DiffRow[] | null>(null);
+  const [pendingChanges, setPendingChanges] = useState<import("@/services/bookingsService").UpdateBookingPayload | null>(null);
+
   // ── Derived ────────────────────────────────────────────────
   // Look up the room being entered in the live rooms list from context.
   // This means newly added rooms (from the Rooms page) are immediately
@@ -738,14 +745,26 @@ export default function BookingsClient({ initialRoom }: Props) {
     setEditErrors({});
   }, [editTarget?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Close edit booking modal on Escape
+  // Close confirmation modal on Escape — leaves edit modal open behind it
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") handleEditCancel();
+      if (e.key === "Escape") handleConfirmCancel();
+    }
+    if (confirmDiffs !== null) document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [confirmDiffs]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Close edit booking modal on Escape (skip when confirm overlay is on top)
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        if (confirmDiffs !== null) return;   // confirm modal handles this ESC
+        handleEditCancel();
+      }
     }
     if (editTarget) document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [editTarget]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [editTarget, confirmDiffs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Prevent body scroll when edit modal is open
   useEffect(() => {
@@ -1370,6 +1389,33 @@ export default function BookingsClient({ initialRoom }: Props) {
     closePayModal();
   }
 
+  // ── Edit confirmation helpers ──────────────────────────────
+
+  /** Returns true when any field that warrants a risky-change review step is changing. */
+  function isRiskyEdit(changes: import("@/services/bookingsService").UpdateBookingPayload): boolean {
+    return (
+      changes.bookingRate  !== undefined ||
+      changes.fixedRate    !== undefined ||
+      changes.roomNumber   !== undefined ||
+      changes.checkInISO   !== undefined ||
+      changes.checkOutISO  !== undefined
+    );
+  }
+
+  function handleConfirmCancel() {
+    setConfirmDiffs(null);
+    setPendingChanges(null);
+  }
+
+  function handleConfirmSubmit() {
+    if (!editTarget || !pendingChanges) return;
+    setEditSaving(true);
+    updateBooking(editTarget.id, pendingChanges, editTarget);
+    setConfirmDiffs(null);
+    setPendingChanges(null);
+    handleEditCancel();
+  }
+
   // ── Edit booking handlers ──────────────────────────────────
 
   /** Append a blank additional-guest row in the edit form. */
@@ -1475,6 +1521,28 @@ export default function BookingsClient({ initialRoom }: Props) {
       changes.additionalGuests = cleanedExtras;
 
     if (Object.keys(changes).length === 0) { handleEditCancel(); return; }
+
+    // ── Risky-edit review step ────────────────────────────────
+    // Room, date, and rate changes get a confirmation modal showing a diff
+    // table before the save is dispatched.
+    if (isRiskyEdit(changes)) {
+      const diffs: Array<{ field: string; from: string; to: string }> = [];
+      if (changes.roomNumber  !== undefined)
+        diffs.push({ field: "Room",           from: editTarget.roomNumber,       to: changes.roomNumber });
+      if (changes.checkInISO  !== undefined)
+        diffs.push({ field: "Check-in",       from: editTarget.checkInISO  ?? "", to: changes.checkInISO });
+      if (changes.checkOutISO !== undefined)
+        diffs.push({ field: "Check-out",      from: editTarget.checkOutISO ?? "", to: changes.checkOutISO });
+      if (changes.bookingRate !== undefined)
+        diffs.push({ field: "Booking Rate",   from: `৳${editTarget.bookingRate ?? 0}`, to: `৳${changes.bookingRate}` });
+      if (changes.fixedRate   !== undefined)
+        diffs.push({ field: "Published Rate", from: `৳${editTarget.fixedRate   ?? 0}`, to: `৳${changes.fixedRate}` });
+      if (changes.totalAmount !== undefined)
+        diffs.push({ field: "Total Amount",   from: `৳${editTarget.totalAmount}`,      to: `৳${changes.totalAmount}` });
+      setConfirmDiffs(diffs);
+      setPendingChanges(changes);
+      return;
+    }
 
     setEditSaving(true);
     updateBooking(editTarget.id, changes, editTarget);
@@ -4292,6 +4360,76 @@ export default function BookingsClient({ initialRoom }: Props) {
           </div>
         );
       })()}
+
+      {/* ══════════════════════════════════════════════════════
+          RISKY-EDIT CONFIRMATION MODAL
+          ══════════════════════════════════════════════════════ */}
+      {confirmDiffs !== null && editTarget && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center px-4"
+          onClick={handleConfirmCancel}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="px-6 pt-5 pb-4 border-b border-rose-100 bg-rose-50 rounded-t-2xl">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-full bg-rose-100 flex items-center justify-center shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-rose-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-[14px] font-semibold text-slate-800">Confirm changes</h3>
+                  <p className="text-[11.5px] text-slate-500 mt-0.5">Review before saving {editTarget.id}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Diff table */}
+            <div className="px-6 py-4">
+              <table className="w-full text-[12px]">
+                <thead>
+                  <tr className="border-b border-slate-100">
+                    <th className="text-left pb-2 text-[11px] font-semibold text-slate-400 uppercase tracking-wide w-1/3">Field</th>
+                    <th className="text-left pb-2 text-[11px] font-semibold text-slate-400 uppercase tracking-wide w-1/3">From</th>
+                    <th className="text-left pb-2 text-[11px] font-semibold text-slate-400 uppercase tracking-wide w-1/3">To</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {confirmDiffs.map(row => (
+                    <tr key={row.field}>
+                      <td className="py-2 font-medium text-slate-600">{row.field}</td>
+                      <td className="py-2 text-slate-400 line-through">{row.from}</td>
+                      <td className="py-2 font-semibold text-slate-800">{row.to}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-2">
+              <button
+                type="button"
+                onClick={handleConfirmCancel}
+                className="px-4 py-2 text-[13px] font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors"
+              >
+                Go back
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmSubmit}
+                className="px-5 py-2 text-[13px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors"
+              >
+                Confirm &amp; Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ══════════════════════════════════════════════════════
           EDIT BOOKING MODAL (fixed overlay)
