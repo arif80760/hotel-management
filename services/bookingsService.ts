@@ -581,6 +581,9 @@ export async function createBooking(
   // If the insert fails after the booking already exists, we throw a
   // descriptive error so the caller surfaces it immediately. The booking
   // will exist with paid_amount = 0; staff can use Add Payment to reconcile.
+  // TODO: Wrap Steps 4–4.5 in a Postgres transaction (RPC) for true atomicity.
+  //       If the payment insert fails after the booking row already exists, the booking
+  //       stays with paid_amount = 0 and staff must reconcile via Add Payment manually.
   if (booking.amountPaid > 0) {
     const initPaymentPayload = {
       booking_id: inserted!.id,
@@ -810,6 +813,19 @@ export async function updateBooking(
     bookingUpdate.payment_status = newPmtStatus.toLowerCase();
     console.log("[updateBooking] Step 4 — totalAmount changed →", changes.totalAmount,
       "| derived payment_status:", bookingUpdate.payment_status);
+  }
+
+  // ── Step 4.5 — Guard against phantom bookings ───────────────────────────
+  // If the new total_amount would fall below the already-recorded paid_amount,
+  // the booking would appear "Paid" but no additional payment was actually received
+  // for the gap. The UI validates this first (validateEdit), but this is the
+  // hard server-side guard.
+  if (changes.totalAmount !== undefined && changes.totalAmount < current.paid_amount) {
+    throw new Error(
+      `PHANTOM BOOKING WARNING — booking ${bookingRef}: ` +
+      `new totalAmount (${changes.totalAmount}) is less than paid_amount (${current.paid_amount}). ` +
+      `Reduce the amount paid first via a payment adjustment, then lower the total.`
+    );
   }
 
   // ── Step 5 — Execute bookings UPDATE ────────────────────────────────────

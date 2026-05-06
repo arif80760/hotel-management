@@ -1463,6 +1463,11 @@ export default function BookingsClient({ initialRoom }: Props) {
       if (at < 1 || dot < at + 2 || dot === em.length - 1)
         e.email = "Invalid email format.";
     }
+    // Guard: amountPaid cannot exceed totalAmount — prevents phantom "Paid" status.
+    const editAmountPaidNum  = parseFloat(editForm.amountPaid)  || 0;
+    const editTotalAmountNum = parseFloat(editForm.totalAmount) || 0;
+    if (editAmountPaidNum > editTotalAmountNum && editTotalAmountNum > 0)
+      e.amountPaid = `Amount paid (৳${editAmountPaidNum.toLocaleString()}) cannot exceed total amount (৳${editTotalAmountNum.toLocaleString()}).`;
     setEditErrors(e);
     return Object.keys(e).length === 0;
   }
@@ -4696,13 +4701,17 @@ export default function BookingsClient({ initialRoom }: Props) {
                         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400">৳</span>
                         <input
                           type="number" min={0}
+                          max={parseFloat(editForm.totalAmount) || undefined}
                           value={editForm.amountPaid}
-                          disabled
-                          className="w-full pl-6 pr-3 py-2 text-[13px] rounded-xl border border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed"
+                          onChange={e => { setEditForm(p => ({ ...p, amountPaid: e.target.value })); setEditErrors(p => ({ ...p, amountPaid: undefined })); }}
+                          className={`w-full pl-6 pr-3 py-2 text-[13px] rounded-xl border ${editErrors.amountPaid ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400`}
                           placeholder="0"
                         />
                       </div>
-                      <p className="mt-1 text-[11px] text-slate-400">Adjust via Record Payment.</p>
+                      {editErrors.amountPaid
+                        ? <p className="mt-1 text-[11.5px] text-red-500">{editErrors.amountPaid}</p>
+                        : <p className="mt-1 text-[11px] text-slate-400">Adjust via Record Payment for post-booking payments.</p>
+                      }
                     </div>
                   </div>
                 </div>
