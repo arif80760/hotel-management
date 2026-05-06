@@ -38,6 +38,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
 
   const isLoginPage = pathname === "/login";
+  // Standalone document routes (invoice, reservation details) —
+  // render without app shell so they print cleanly
+  const isStandaloneDocument = /^\/bookings\/[^/]+\/(invoice|reservation)$/.test(pathname);
 
   // ── Routing guard ─────────────────────────────────────────────
   useEffect(() => {
@@ -66,6 +69,14 @@ export default function AppShell({ children }: { children: ReactNode }) {
 
   // ── Not logged in — render nothing while redirect fires ───────
   if (!user) return null;
+
+  // ── Standalone document — authenticated but no app chrome ─────
+  // Invoice and reservation-details pages must print without the
+  // sidebar and topbar. HotelProvider is omitted too — these pages
+  // are server components that fetch their own data directly.
+  if (isStandaloneDocument) {
+    return <div className="w-full min-h-full">{children}</div>;
+  }
 
   // ── Authenticated — full shell ────────────────────────────────
   // HotelProvider is mounted here (not in root layout) so it only
