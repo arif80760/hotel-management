@@ -260,6 +260,36 @@ export async function getAllBookings(): Promise<MockBooking[]> {
   return (data as BookingRow[]).map(mapBooking);
 }
 
+/**
+ * Fetches a single booking by booking_ref (e.g. "BK-1037").
+ * Returns null if no matching row — caller should 404 in that case.
+ * Throws on DB error.
+ */
+export async function getBookingByRef(bookingRef: string): Promise<MockBooking | null> {
+  const { data, error } = await supabase
+    .from("bookings")
+    .select(BOOKING_SELECT)
+    .eq("booking_ref", bookingRef)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[getBookingByRef] query failed:");
+    console.error("  bookingRef :", bookingRef);
+    console.error("  message    :", error.message);
+    console.error("  details    :", error.details);
+    console.error("  hint       :", error.hint);
+    console.error("  code       :", error.code);
+    throw new Error(
+      `[getBookingByRef] failed — ${error.message}` +
+      (error.code    ? ` (code: ${error.code})`      : "") +
+      (error.hint    ? ` | hint: ${error.hint}`       : "") +
+      (error.details ? ` | details: ${error.details}` : ""),
+    );
+  }
+
+  return data ? mapBooking(data as BookingRow) : null;
+}
+
 // ─────────────────────────────────────────────────────────────
 // GUEST LOOKUP  (used internally by createBooking)
 // ─────────────────────────────────────────────────────────────
@@ -683,6 +713,15 @@ export type UpdateBookingPayload = {
   roomCategory?: string;
 };
 
+/** A single payment transaction row from the `payments` table. */
+export type Payment = {
+  id:        string;
+  amount:    number;
+  method:    PaymentMethod;
+  notes:     string | null;
+  createdAt: string;          // ISO timestamp, e.g. "2026-05-06T10:32:00+06:00"
+};
+
 /**
  * Edit a booking's fields in Supabase.
  *
@@ -1070,7 +1109,7 @@ export async function recordPayment(
     statusText: lookupStatusText,
   } = await supabase
     .from("bookings")
-    .select("id, paid_amount, total_amount")
+    .select("id, total_amount, paid_amount, extra_charge_amount, early_deduction_amount, additional_discount_amount")
     .eq("booking_ref", id)
     .single();
 
@@ -1100,13 +1139,33 @@ export async function recordPayment(
     "| paid:", booking.paid_amount, "/ total:", booking.total_amount);
 
   // ── Step 2: Clamp amount and insert into payments ─────────────
-  // TODO: This cap uses the naive formula and is incorrect when the booking has
-  //       extra_charge_amount, early_deduction_amount, or additional_discount_amount.
-  //       Replace with the true-due formula (matching calcTrueDue in the UI layer).
-  //       Tracked as a separate fix; do not roll into payment method tracking.
-  const safeAmount = Math.min(amount, booking.total_amount - booking.paid_amount);
+  // Mirror calcTrueDue formula — caps at the TRUE outstanding balance,
+  // including extra charges, early-checkout deductions, and additional
+  // discounts. Previous naive formula (total − paid) silently dropped
+  // payments when extra charges existed (e.g. checkout surcharge added
+  // after all room-rate payments were collected), breaking financial
+  // integrity: optimistic React state diverged from DB paid_amount.
+  const trueDue =
+    booking.total_amount
+    + ((booking.extra_charge_amount         as number | null) ?? 0)
+    - ((booking.early_deduction_amount      as number | null) ?? 0)
+    - ((booking.additional_discount_amount  as number | null) ?? 0)
+    - booking.paid_amount;
+
+  const safeAmount = Math.min(amount, trueDue);
+
   if (safeAmount <= 0) {
-    console.log("[recordPayment] safeAmount is 0 or negative — nothing to insert, returning.");
+    // Positive amount requested but nothing genuinely owed — throw so that
+    // HotelContext's .catch() can roll back the optimistic amountPaid update.
+    // This prevents React state from permanently diverging from DB paid_amount.
+    if (amount > 0) {
+      throw new Error(
+        `[recordPayment] No outstanding balance for booking ${id}. ` +
+        `True due: ৳${trueDue}, Already paid: ৳${booking.paid_amount}, Requested: ৳${amount}`
+      );
+    }
+    // amount = 0 is a legitimate no-op (e.g. ৳0 advance at booking creation)
+    console.log("[recordPayment] amount is 0 — nothing to insert, returning.");
     return;
   }
 
@@ -1328,4 +1387,83 @@ export async function checkoutWithOverride(
 
   console.log("[checkoutWithOverride] succeeded for booking_ref:", id);
   // DB trigger fn_sync_room_status sets the room to "cleaning" automatically.
+}
+
+// ─────────────────────────────────────────────────────────────
+// PAYMENTS FETCH
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Fetches all payment rows for a booking, ordered oldest-first.
+ * Returns an empty array if the booking has no payments yet.
+ * Throws on DB error (caller should catch and show an error state).
+ */
+export async function getPaymentsByBookingRef(
+  bookingRef: string,
+): Promise<Payment[]> {
+  // Step 1: resolve booking_ref → internal UUID
+  const { data: bookingRow, error: bookingErr } = await supabase
+    .from("bookings")
+    .select("id")
+    .eq("booking_ref", bookingRef)
+    .single();
+
+  if (bookingErr) {
+    // PGRST116 = no row found (.single() on zero rows). A missing booking
+    // just means no payments — the page's getBookingByRef call is the source
+    // of truth for whether the booking exists and will trigger notFound().
+    if (bookingErr.code === "PGRST116") {
+      console.warn(
+        `[getPaymentsByBookingRef] booking not found: ${bookingRef} — returning empty payments`,
+      );
+      return [];
+    }
+    // Any other error is a real failure (RLS block, network, schema mismatch) — log and throw
+    console.error("[getPaymentsByBookingRef] booking lookup failed:");
+    console.error("  bookingRef :", bookingRef);
+    console.error("  message    :", bookingErr.message  ?? "(none)");
+    console.error("  details    :", bookingErr.details  ?? "(none)");
+    console.error("  hint       :", bookingErr.hint     ?? "(none)");
+    console.error("  code       :", bookingErr.code     ?? "(none)");
+    throw new Error(`[getPaymentsByBookingRef] ${bookingErr.message}`);
+  }
+  // Supabase .single() returned null data without an error — shouldn't happen,
+  // but guard defensively to avoid downstream null-deref
+  if (!bookingRow) {
+    console.warn(
+      `[getPaymentsByBookingRef] booking not found: ${bookingRef} — returning empty payments`,
+    );
+    return [];
+  }
+
+  // Step 2: fetch all payments for that booking UUID, oldest first
+  const { data, error } = await supabase
+    .from("payments")
+    .select("id, amount, method, notes, created_at")
+    .eq("booking_id", bookingRow.id)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    console.error("[getPaymentsByBookingRef] payments fetch failed:");
+    console.error("  bookingRef :", bookingRef);
+    console.error("  booking_id :", bookingRow.id);
+    console.error("  message    :", error.message  ?? "(none)");
+    console.error("  details    :", error.details  ?? "(none)");
+    console.error("  hint       :", error.hint     ?? "(none)");
+    console.error("  code       :", error.code     ?? "(none)");
+    throw new Error(
+      `[getPaymentsByBookingRef] payments fetch failed — ${error.message}` +
+      (error.code    ? ` (code: ${error.code})`       : "") +
+      (error.hint    ? ` | hint: ${error.hint}`        : "") +
+      (error.details ? ` | details: ${error.details}`  : ""),
+    );
+  }
+
+  return (data ?? []).map(row => ({
+    id:        row.id as string,
+    amount:    Number(row.amount),
+    method:    row.method as PaymentMethod,
+    notes:     row.notes ?? null,
+    createdAt: row.created_at as string,
+  }));
 }
