@@ -9,7 +9,7 @@
 
 import { useState, useMemo, useRef } from "react";
 import Link from "next/link";
-import { useHotel, type RoomStatus, type Room, type Booking } from "@/contexts/HotelContext";
+import { useHotel, type RoomStatus, type Room, type Booking, type BookingStatus } from "@/contexts/HotelContext";
 
 // ── Status colour config — single source of truth ────────────
 const STATUS: Record<RoomStatus, {
@@ -104,8 +104,21 @@ function getBookingForRoomOnDate(
   );
 }
 
+/**
+ * Returns a friendly short name for compact display.
+ * Handles Bangla honorific prefixes: "Md. Abdullah Hassan" → "Md. Abdullah"
+ * Simple names: "John Smith" → "John", "Tofazzol" → "Tofazzol"
+ */
+function extractFirstName(fullName: string): string {
+  const parts = fullName.trim().split(/\s+/);
+  if (parts.length <= 1) return parts[0] ?? "";
+  // If first word ends with "." treat as honorific → include next word
+  if (parts[0].endsWith(".")) return `${parts[0]} ${parts[1]}`;
+  return parts[0];
+}
+
 export default function RoomBoard() {
-  const { rooms, bookings } = useHotel();
+  const { rooms, bookings, markRoomAvailable } = useHotel();
 
   const [selectedDate, setSelectedDate] = useState<string>(TODAY_ISO);
   const isToday = selectedDate === TODAY_ISO;
@@ -143,6 +156,16 @@ export default function RoomBoard() {
     })),
     [rooms, bookings, selectedDate],
   );
+
+  const statusCounts = useMemo(() => {
+    const counts: Record<RoomStatus, number> = {
+      Available: 0, Reserved: 0, Occupied: 0, Cleaning: 0, Maintenance: 0,
+    };
+    for (const room of roomsWithDerivedStatus) counts[room.displayStatus]++;
+    return counts;
+  }, [roomsWithDerivedStatus]);
+
+  const totalRooms = roomsWithDerivedStatus.length;
 
   // Group rooms by floor — order matches "Floor 1" → "Floor 4"
   const floorOrder = ["Floor 1", "Floor 2", "Floor 3", "Floor 4"];
@@ -246,6 +269,25 @@ export default function RoomBoard() {
         </button>
       </div>
 
+      {/* ── Summary stats bar ──────────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-6 py-2.5 border-b border-slate-100 text-[12px]">
+        <span className="font-semibold text-slate-700">{totalRooms} rooms</span>
+        <span className="text-slate-300 select-none">·</span>
+        {(["Available", "Reserved", "Occupied", "Cleaning", "Maintenance"] as RoomStatus[]).map((status, i, arr) => {
+          const cfg = STATUS[status];
+          const count = statusCounts[status];
+          return (
+            <span key={status} className="inline-flex items-center gap-1.5">
+              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${count > 0 ? cfg.dot : "bg-slate-200"}`} />
+              <span className={count > 0 ? cfg.text : "text-slate-300"}>
+                {count} {cfg.label}
+              </span>
+              {i < arr.length - 1 && <span className="text-slate-300 select-none ml-1">·</span>}
+            </span>
+          );
+        })}
+      </div>
+
       {/* Floor sections */}
       <div className="p-6 space-y-7">
         {floorOrder.map((floorLabel) => {
@@ -298,6 +340,27 @@ export default function RoomBoard() {
                           {cfg.label}
                         </span>
                       </div>
+                      {room.displayBooking && (
+                        <p className="text-[11px] text-slate-500 truncate mt-0.5 leading-none"
+                           title={room.displayBooking.guestName}>
+                          {extractFirstName(room.displayBooking.guestName)}
+                        </p>
+                      )}
+                      {room.displayStatus === "Cleaning" && isToday && (
+                        <button
+                          onClick={e => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            markRoomAvailable(room.roomNumber);
+                          }}
+                          className="flex items-center gap-1 mt-1 text-[10.5px] font-medium text-slate-400 hover:text-amber-600 transition-colors cursor-pointer"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3">
+                            <polyline points="20 6 9 17 4 12"/>
+                          </svg>
+                          Mark Available
+                        </button>
+                      )}
                       {/* Hover arrow */}
                       <span className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity text-slate-400">
                         {ArrowRight}
