@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-05-06 (rev 6)
+Last updated: 2026-05-06 (rev 7)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -262,6 +262,7 @@ booking_documents links to bookings via TEXT booking_ref (loose coupling — no 
 | Stay Timing Step 2 (billing) | ✅ Complete | `BookingsClient.tsx`, `FrontDeskClient.tsx`, `HotelContext.tsx`, `bookingsService.ts` |
 | Payment Method Tracking | ✅ Complete | `lib/mockData.ts`, `services/bookingsService.ts`, `HotelContext.tsx`, `BookingsClient.tsx`, `FrontDeskClient.tsx` |
 | Booking Edit (Feature B) | ✅ Complete | `app/bookings/BookingsClient.tsx`, `contexts/HotelContext.tsx`, `services/bookingsService.ts` |
+| Dynamic Room Board (Block 2) | ✅ Complete | `components/RoomBoard.tsx`, `contexts/HotelContext.tsx` |
 
 ---
 
@@ -503,7 +504,35 @@ Use `tabular-nums` class on all currency/number display elements for aligned dec
   - Update reporting / dues views to handle no-shows separately
   - **DO NOT** use cancel-and-rebook to fix forgotten check-ins — destroys audit trail
 
-  Discovered during Feature B testing on 2026-05-06. The dynamic room block (next session) will surface stale bookings visually when staff navigates past dates.
+  Discovered during Feature B testing on 2026-05-06. The dynamic room block now surfaces stale bookings visually when staff navigates past dates (Room Board shows "Available" for stale Confirmed bookings).
+
+- **Dual-writer for Cleaning status**: When staff checks out a guest, `HotelContext.checkoutNormal/checkoutWithOverride` sets room status to `"Cleaning"` optimistically AND the DB trigger `fn_sync_room_status` does the same. Both writers produce the same value, so there is no conflict today. Future: when the trigger is revised (e.g., to skip Cleaning for certain room types), the optimistic write in HotelContext must stay in sync.
+
+- **Maintenance flag does not block bookings**: `room.status === "Maintenance"` is a display-only flag today. The booking overlap check queries by `room_number` and ignores room status — a Maintenance room can still be booked. This is intentional for now (staff must manually avoid double-booking a Maintenance room). Day 3 housekeeping module will add a booking-block guard.
+
+- **No "Mark Maintenance" button in UI**: Staff currently has no way to set a room to Maintenance from the Room Board. Only Cleaning → Available is exposed (`markRoomAvailable` in HotelContext). Full Cleaning/Maintenance management UI is deferred to Day 3 housekeeping module.
+
+### Cleaning / Maintenance Lifecycle (as of Block 2)
+
+**Cleaning:**
+- Auto-set on checkout: both `HotelContext.checkoutNormal/checkoutWithOverride` optimistically set the room to `"Cleaning"`, and the DB trigger `fn_sync_room_status` does the same server-side.
+- Manual clear: staff clicks "Mark Available" on a Cleaning card in today's Room Board view → calls `markRoomAvailable(roomNumber)` → optimistic flip + `roomsService.setRoomStatus()` persist.
+- Rationale for manual clear: time-based auto-clear risks delivering a dirty room to the next guest if housekeeping runs late. Manual confirmation is the safer default until a housekeeping queue is built.
+
+**Maintenance:**
+- Set manually today: no UI button — must be set directly in Supabase or via a future admin panel.
+- Cleared manually: same — no UI today.
+- Does NOT block bookings at the service layer (known issue above).
+- Full Maintenance workflow (set/clear buttons, booking block, reason field) deferred to Day 3 housekeeping module.
+
+**Operational priority hierarchy in Room Board derivation:**
+```
+Maintenance (room.status, today only)
+  > Cleaning (room.status, today only)
+    > Occupied / Reserved (derived from active bookings)
+      > Available (default)
+```
+On non-today dates, Cleaning and Maintenance never appear (they are point-in-time operational states, not bookable date ranges).
 
 ---
 
@@ -545,6 +574,19 @@ Use `tabular-nums` class on all currency/number display elements for aligned dec
   - **Additional discount**: "More Discount" section in checkout modal — optional amount + reason; violet colour; validated to not exceed `(total + extraCharge − earlyDeduction − amountPaid)`; no role restriction; written to `additional_discount_amount`, `additional_discount_reason`, `additional_discount_by`, `additional_discount_at` in DB
   - **Updated finalPayable formula**: `(total + extra) − earlyDeduction − additionalDiscount − amountPaid`
   - **Currency**: all `$` USD symbols replaced with `৳` BDT throughout the app — booking form, pay modal, panels, dues monitor, booking-detail drawer, rooms form, checkout modal
+- **Dynamic Room Board (Block 2)**: Date-navigable room grid on the Dashboard
+  - Date navigation: Prev/Next day buttons + native date picker for jumping to any date
+  - `localDateToISO()` helper avoids UTC midnight rollback in UTC+ timezones (e.g. Bangladesh UTC+6)
+  - Status derivation from bookings: today uses `room.status` (Cleaning/Maintenance preserved); future/past dates derived from active bookings
+  - `bookingActiveOnDate()` uses half-open interval `[checkIn, checkOut)` matching booking system overlap semantics
+  - Special case: `today === checkOut AND status === "Checked In"` → "Occupied" (guest physically present until staff confirms checkout)
+  - Stale Confirmed bookings on past dates → "Available" (no `no_show` status yet — see Known Issues)
+  - Guest first name display: non-today cards with active booking show guest name under status pill; honorific-aware (`"Md. Abdullah Hassan"` → `"Md. Abdullah"`)
+  - Summary stats bar: above floor grid, shows breakdown of all 5 statuses for selected date; recomputes via `useMemo` on date change
+  - Mark Available button: Cleaning cards on today's view show a subtle one-click action to flip room to Available (`markRoomAvailable` context action); intentionally narrow API — Day 3 will expand
+  - Floor list derived dynamically from `rooms` data with natural sort (no hardcoded floor count)
+  - Room form (Rooms page) expanded from Floors 1-4 to 1-10; subtitle derives distinct floor count from live `rooms` data
+
 - **Booking Edit (Feature B)**: Full in-place edit of Confirmed and Checked-In bookings
   - Fixed-overlay modal opened from: pencil icon in row action bar, "Edit Booking" button in timeline modal footer
   - **Status-based field gating**: Confirmed → all fields editable; Checked In → contact/guest info only (amber banner, room/dates/rates disabled); Checked Out/Cancelled → edit button not shown
