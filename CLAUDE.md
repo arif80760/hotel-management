@@ -492,6 +492,19 @@ Use `tabular-nums` class on all currency/number display elements for aligned dec
 
 - **`createBooking` atomicity**: If the booking INSERT succeeds but the initial payment INSERT fails (e.g., 23514 `chk_paid_not_exceed_total` when paid > total), the booking row is left as a phantom with paid_amount=0. UI validation in the create form now prevents the most common cause (paid > total), but a true fix requires a Postgres RPC function wrapping booking + payment in a transaction. Tracked as future work.
 
+- **Stale "Confirmed" booking handling (planned)**: When today's date > booking's `check_in_date` AND status is still `"Confirmed"`, the booking is in a stale state. Two real-world causes: (1) guest stayed but staff forgot to click Check In, (2) guest never arrived (no-show).
+
+  Planned solution (deferred to future session):
+  - Add `no_show` to the booking status enum (DB migration required)
+  - Add `isStaleConfirmed(booking)` helper for detection
+  - Show stale-state banner in edit modal: "Past check-in date — use Backdated Check In or Mark No-Show"
+  - Restrict risky fields (room / dates / rate) on stale bookings, similar to Checked-In gating
+  - Add "Mark as No-Show" action button in row and timeline modal
+  - Update reporting / dues views to handle no-shows separately
+  - **DO NOT** use cancel-and-rebook to fix forgotten check-ins — destroys audit trail
+
+  Discovered during Feature B testing on 2026-05-06. The dynamic room block (next session) will surface stale bookings visually when staff navigates past dates.
+
 ---
 
 ## 8. Workflow Notes
