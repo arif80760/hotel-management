@@ -1208,6 +1208,10 @@ export default function BookingsClient({ initialRoom }: Props) {
     setSuccessMsg(
       `${checkoutConfirm.guestName} checked out · Room ${checkoutConfirm.roomNumber} is now Cleaning.`
     );
+    // Auto-open invoice in new tab. Called synchronously (checkoutNormal is optimistic,
+    // no await before this) so it fires within the user-click event — not blocked by
+    // Chrome's popup blocker.
+    window.open(`/bookings/${checkoutConfirm.id}/invoice`, "_blank");
     closeCheckoutConfirm();
   }
 
@@ -1247,6 +1251,8 @@ export default function BookingsClient({ initialRoom }: Props) {
     setSuccessMsg(
       `Admin override: ${checkoutConfirm.guestName} checked out with ৳${finalPayable.toLocaleString()} still outstanding.`
     );
+    // Auto-open invoice in new tab (same rationale as handleConfirmCheckout above).
+    window.open(`/bookings/${checkoutConfirm.id}/invoice`, "_blank");
     closeCheckoutConfirm();
   }
 
