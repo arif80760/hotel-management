@@ -74,6 +74,22 @@ type FormData = {
   amountPaid:       string;   // deposit/payment collected at booking time
 };
 
+/** Form state for the Edit Booking modal. All number inputs stored as strings. */
+type EditFormData = {
+  guestName:        string;
+  phone:            string;
+  email:            string;
+  room:             string;
+  checkIn:          string;   // YYYY-MM-DD
+  checkOut:         string;   // YYYY-MM-DD
+  totalGuests:      number;
+  additionalGuests: AdditionalGuest[];
+  fixedRate:        string;
+  bookingRate:      string;
+  totalAmount:      string;
+  amountPaid:       string;   // display-only read-only context (not sent to service)
+};
+
 // ─────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────
@@ -302,6 +318,12 @@ const EMPTY_FORM: FormData = {
   totalAmount: "", amountPaid: "0",
 };
 
+const EMPTY_EDIT_FORM: EditFormData = {
+  guestName: "", phone: "", email: "", room: "", checkIn: "", checkOut: "",
+  totalGuests: 1, additionalGuests: [],
+  fixedRate: "", bookingRate: "", totalAmount: "", amountPaid: "0",
+};
+
 // ─────────────────────────────────────────────────────────────
 // DOUBLE-BOOKING HELPERS
 // ─────────────────────────────────────────────────────────────
@@ -405,6 +427,7 @@ export default function BookingsClient({ initialRoom }: Props) {
     rooms, bookings, nextBookingId,
     createBooking, changeBookingStatus,
     checkoutNormal, checkoutWithOverride, recordPayment,
+    updateBooking,
   } = useHotel();
 
   // Real role from authenticated session
@@ -482,6 +505,13 @@ export default function BookingsClient({ initialRoom }: Props) {
   // "dues"     = outstanding-dues monitor (new)
   const [pageView,  setPageView]  = useState<"bookings" | "dues">("bookings");
   const [dueFilter, setDueFilter] = useState<"all" | "inhouse" | "checkedout">("all");
+
+  // ── Edit booking modal state ────────────────────────────────
+  // editTarget: the booking currently being edited (null = modal closed)
+  const [editTarget,  setEditTarget]  = useState<Booking | null>(null);
+  const [editForm,    setEditForm]    = useState<EditFormData>({ ...EMPTY_EDIT_FORM });
+  const [editErrors,  setEditErrors]  = useState<Partial<Record<keyof EditFormData, string>>>({});
+  const [editSaving,  setEditSaving]  = useState<boolean>(false);
 
   // ── Derived ────────────────────────────────────────────────
   // Look up the room being entered in the live rooms list from context.
@@ -605,6 +635,41 @@ export default function BookingsClient({ initialRoom }: Props) {
   // Threshold above which a due amount is flagged as "high" with an extra icon
   const HIGH_DUE_THRESHOLD = 500;
 
+  // ── Edit modal derived values ──────────────────────────────
+  const editNights = calcNights(editForm.checkIn, editForm.checkOut);
+
+  const editRoomConflict = useMemo((): Booking | null => {
+    if (!editTarget) return null;
+    const room = editForm.room.trim();
+    if (!room || !editForm.checkIn || !editForm.checkOut) return null;
+    if (editNights <= 0) return null;
+    return findRoomConflict(bookings, room, editForm.checkIn, editForm.checkOut, editTarget.id) ?? null;
+  }, [bookings, editForm.room, editForm.checkIn, editForm.checkOut, editTarget?.id, editNights]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const editFixedRateNum     = parseFloat(editForm.fixedRate)   || 0;
+  const editBookingRateNum   = parseFloat(editForm.bookingRate)  || editFixedRateNum;
+  const editDiscountPerNight = editFixedRateNum > 0 && editBookingRateNum < editFixedRateNum
+    ? editFixedRateNum - editBookingRateNum : 0;
+  const editDiscountPct      = editFixedRateNum > 0 && editDiscountPerNight > 0
+    ? Math.round((editDiscountPerNight / editFixedRateNum) * 100) : 0;
+  const editTotalSaving      = editDiscountPerNight > 0 && editNights > 0
+    ? editDiscountPerNight * editNights : 0;
+
+  const editHasChanges = editTarget !== null && (
+    editForm.guestName   !== editTarget.guestName                                     ||
+    editForm.phone       !== (editTarget.phone ?? "")                                 ||
+    editForm.email       !== (editTarget.email ?? "")                                 ||
+    editForm.room        !== editTarget.roomNumber                                    ||
+    editForm.checkIn     !== (editTarget.checkInISO  ?? "")                           ||
+    editForm.checkOut    !== (editTarget.checkOutISO ?? "")                           ||
+    editForm.totalGuests !== editTarget.totalGuests                                   ||
+    JSON.stringify(editForm.additionalGuests) !==
+      JSON.stringify(editTarget.additionalGuests ?? [])                               ||
+    parseFloat(editForm.totalAmount) !== editTarget.totalAmount                       ||
+    parseFloat(editForm.fixedRate)   !== (editTarget.fixedRate   ?? 0)                ||
+    parseFloat(editForm.bookingRate) !== (editTarget.bookingRate ?? 0)
+  );
+
   // ── Effects ────────────────────────────────────────────────
   useEffect(() => {
     if (initialRoom) {
@@ -652,6 +717,45 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (docsModal) document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [docsModal]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Pre-fill edit form fields when a booking is selected for editing
+  useEffect(() => {
+    if (!editTarget) return;
+    setEditForm({
+      guestName:        editTarget.guestName,
+      phone:            editTarget.phone         ?? "",
+      email:            editTarget.email         ?? "",
+      room:             editTarget.roomNumber,
+      checkIn:          editTarget.checkInISO    ?? "",
+      checkOut:         editTarget.checkOutISO   ?? "",
+      totalGuests:      editTarget.totalGuests,
+      additionalGuests: editTarget.additionalGuests ?? [],
+      fixedRate:        String(editTarget.fixedRate   ?? ""),
+      bookingRate:      String(editTarget.bookingRate ?? ""),
+      totalAmount:      String(editTarget.totalAmount),
+      amountPaid:       String(editTarget.amountPaid),
+    });
+    setEditErrors({});
+  }, [editTarget?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Close edit booking modal on Escape
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") handleEditCancel();
+    }
+    if (editTarget) document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [editTarget]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Prevent body scroll when edit modal is open
+  useEffect(() => {
+    if (editTarget) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => { document.body.style.overflow = ""; };
+  }, [editTarget]);
 
   // Auto-fill fixedRate and bookingRate when the room changes.
   // Both start at the published room price. Staff can lower bookingRate to apply a discount.
@@ -1264,6 +1368,124 @@ export default function BookingsClient({ initialRoom }: Props) {
       `৳${(payModal.amountPaid + amount).toLocaleString()} now paid of ৳${payModal.totalAmount.toLocaleString()}`
     );
     closePayModal();
+  }
+
+  // ── Edit booking handlers ──────────────────────────────────
+
+  /** Append a blank additional-guest row in the edit form. */
+  function addEditGuest() {
+    setEditForm(prev => {
+      const next = [...prev.additionalGuests, { name: "", nationality: "" }];
+      return {
+        ...prev,
+        additionalGuests: next,
+        totalGuests: Math.max(prev.totalGuests, next.length + 1),
+      };
+    });
+  }
+
+  /** Update a field on one additional-guest row in the edit form. */
+  function updateEditGuest(index: number, field: keyof AdditionalGuest, value: string) {
+    setEditForm(prev => ({
+      ...prev,
+      additionalGuests: prev.additionalGuests.map((g, i) =>
+        i === index ? { ...g, [field]: value } : g
+      ),
+    }));
+  }
+
+  /** Remove an additional-guest row from the edit form. */
+  function removeEditGuest(index: number) {
+    setEditForm(prev => ({
+      ...prev,
+      additionalGuests: prev.additionalGuests.filter((_, i) => i !== index),
+    }));
+  }
+
+  function validateEdit(): boolean {
+    const e: Partial<Record<keyof EditFormData, string>> = {};
+    if (!editForm.guestName.trim()) e.guestName = "Guest name is required.";
+    if (!editForm.room.trim())      e.room      = "Room number is required.";
+    if (!editForm.checkIn)          e.checkIn   = "Check-in date is required.";
+    if (!editForm.checkOut)         e.checkOut  = "Check-out date is required.";
+    if (editForm.checkIn && editForm.checkOut && calcNights(editForm.checkIn, editForm.checkOut) <= 0)
+      e.checkOut = "Check-out must be after check-in.";
+    if (editForm.email.trim()) {
+      const em  = editForm.email.trim();
+      const at  = em.indexOf("@");
+      const dot = em.lastIndexOf(".");
+      if (at < 1 || dot < at + 2 || dot === em.length - 1)
+        e.email = "Invalid email format.";
+    }
+    setEditErrors(e);
+    return Object.keys(e).length === 0;
+  }
+
+  function handleEditSubmit() {
+    if (!editTarget) return;
+    if (!validateEdit()) return;
+    if (!editHasChanges) { handleEditCancel(); return; }
+
+    const changes: import("@/services/bookingsService").UpdateBookingPayload = {};
+
+    if (editForm.guestName !== editTarget.guestName)
+      changes.guestName = editForm.guestName.trim();
+
+    if (editForm.phone !== (editTarget.phone ?? ""))
+      changes.phone = editForm.phone.trim();
+
+    if (editForm.email.trim() !== "" && editForm.email !== (editTarget.email ?? ""))
+      changes.email = editForm.email.trim();
+
+    if (editForm.room !== editTarget.roomNumber) {
+      const editedRoomInfo = rooms.find(r => r.roomNumber === editForm.room.trim());
+      changes.roomNumber   = editForm.room.trim();
+      changes.roomCategory = (editedRoomInfo?.category ?? editTarget.roomCategory).toLowerCase();
+    }
+
+    if (editForm.checkIn  !== (editTarget.checkInISO  ?? "")) changes.checkInISO  = editForm.checkIn;
+    if (editForm.checkOut !== (editTarget.checkOutISO ?? "")) changes.checkOutISO = editForm.checkOut;
+
+    // Derive nights from the final resolved dates (Commit 6 will remove this block)
+    const ciISO = changes.checkInISO  ?? editTarget.checkInISO  ?? "";
+    const coISO = changes.checkOutISO ?? editTarget.checkOutISO ?? "";
+    if (changes.checkInISO !== undefined || changes.checkOutISO !== undefined) {
+      changes.nights = calcNights(ciISO, coISO);
+    }
+
+    const newTotal = parseFloat(editForm.totalAmount);
+    if (!isNaN(newTotal) && newTotal !== editTarget.totalAmount)
+      changes.totalAmount = newTotal;
+
+    const newFixed = parseFloat(editForm.fixedRate);
+    if (!isNaN(newFixed) && newFixed !== (editTarget.fixedRate ?? 0))
+      changes.fixedRate = newFixed;
+
+    const newRate = parseFloat(editForm.bookingRate);
+    if (!isNaN(newRate) && newRate !== (editTarget.bookingRate ?? 0))
+      changes.bookingRate = newRate;
+
+    if (editForm.totalGuests !== editTarget.totalGuests)
+      changes.totalGuests = editForm.totalGuests;
+
+    const cleanedExtras = editForm.additionalGuests
+      .filter(g => g.name.trim() !== "")
+      .map(g => ({ name: g.name.trim(), nationality: g.nationality.trim() }));
+    if (JSON.stringify(cleanedExtras) !== JSON.stringify(editTarget.additionalGuests ?? []))
+      changes.additionalGuests = cleanedExtras;
+
+    if (Object.keys(changes).length === 0) { handleEditCancel(); return; }
+
+    setEditSaving(true);
+    updateBooking(editTarget.id, changes, editTarget);
+    handleEditCancel();
+  }
+
+  function handleEditCancel() {
+    setEditTarget(null);
+    setEditForm({ ...EMPTY_EDIT_FORM });
+    setEditErrors({});
+    setEditSaving(false);
   }
 
   // ── Render ─────────────────────────────────────────────────
@@ -4033,6 +4255,307 @@ export default function BookingsClient({ initialRoom }: Props) {
                   className="w-full py-2.5 text-[13px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors"
                 >
                   Close
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ══════════════════════════════════════════════════════
+          EDIT BOOKING MODAL (fixed overlay)
+          ══════════════════════════════════════════════════════ */}
+      {editTarget && (() => {
+        const isCheckedIn = editTarget.status === "Checked In";
+        return (
+          <div
+            className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-start justify-center overflow-y-auto py-8 px-4"
+            onClick={handleEditCancel}
+          >
+            <div
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-lg my-auto"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-slate-100">
+                <div>
+                  <h2 className="text-[15px] font-semibold text-slate-800">Edit Booking</h2>
+                  <p className="text-[12px] text-slate-400 mt-0.5 flex items-center gap-1.5">
+                    {editTarget.id}
+                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10.5px] font-semibold ${statusBadge(editTarget.status)}`}>
+                      {editTarget.status}
+                    </span>
+                  </p>
+                </div>
+                <button
+                  onClick={handleEditCancel}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Checked-In warning banner */}
+              {isCheckedIn && (
+                <div className="mx-6 mt-4 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <p className="text-[12px] text-amber-700 leading-snug">
+                    <span className="font-semibold">Guest is checked in.</span>{" "}
+                    Contact and guest info can be updated. Room, dates, and rates are locked.
+                  </p>
+                </div>
+              )}
+
+              <div className="px-6 py-4 space-y-5">
+
+                {/* ── Guest Info ─────────────────────────────── */}
+                <div>
+                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">Guest Info</p>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-[12px] font-medium text-slate-600 mb-1">Guest Name *</label>
+                      <input
+                        type="text"
+                        value={editForm.guestName}
+                        onChange={e => { setEditForm(p => ({ ...p, guestName: e.target.value })); setEditErrors(p => ({ ...p, guestName: undefined })); }}
+                        className={`w-full px-3 py-2 text-[13px] rounded-xl border ${editErrors.guestName ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400`}
+                        placeholder="Full name"
+                      />
+                      {editErrors.guestName && <p className="mt-1 text-[11.5px] text-red-500">{editErrors.guestName}</p>}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[12px] font-medium text-slate-600 mb-1">Phone</label>
+                        <input
+                          type="text"
+                          value={editForm.phone}
+                          onChange={e => setEditForm(p => ({ ...p, phone: e.target.value }))}
+                          className="w-full px-3 py-2 text-[13px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400"
+                          placeholder="+880 1xxx xxxx"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[12px] font-medium text-slate-600 mb-1">Email</label>
+                        <input
+                          type="email"
+                          value={editForm.email}
+                          onChange={e => { setEditForm(p => ({ ...p, email: e.target.value })); setEditErrors(p => ({ ...p, email: undefined })); }}
+                          className={`w-full px-3 py-2 text-[13px] rounded-xl border ${editErrors.email ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400`}
+                          placeholder="guest@email.com"
+                        />
+                        {editErrors.email && <p className="mt-1 text-[11.5px] text-red-500">{editErrors.email}</p>}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── Stay Details ───────────────────────────── */}
+                <div>
+                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">Stay Details</p>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-[12px] font-medium text-slate-600 mb-1">Room Number *</label>
+                      <input
+                        type="text"
+                        value={editForm.room}
+                        onChange={e => { setEditForm(p => ({ ...p, room: e.target.value })); setEditErrors(p => ({ ...p, room: undefined })); }}
+                        disabled={isCheckedIn}
+                        className={`w-full px-3 py-2 text-[13px] rounded-xl border ${editErrors.room ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed`}
+                        placeholder="204"
+                      />
+                      {editErrors.room && <p className="mt-1 text-[11.5px] text-red-500">{editErrors.room}</p>}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[12px] font-medium text-slate-600 mb-1">Check-in *</label>
+                        <input
+                          type="date"
+                          value={editForm.checkIn}
+                          onChange={e => { setEditForm(p => ({ ...p, checkIn: e.target.value })); setEditErrors(p => ({ ...p, checkIn: undefined })); }}
+                          disabled={isCheckedIn}
+                          className={`w-full px-3 py-2 text-[13px] rounded-xl border ${editErrors.checkIn ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed`}
+                        />
+                        {editErrors.checkIn && <p className="mt-1 text-[11.5px] text-red-500">{editErrors.checkIn}</p>}
+                      </div>
+                      <div>
+                        <label className="block text-[12px] font-medium text-slate-600 mb-1">Check-out *</label>
+                        <input
+                          type="date"
+                          value={editForm.checkOut}
+                          onChange={e => { setEditForm(p => ({ ...p, checkOut: e.target.value })); setEditErrors(p => ({ ...p, checkOut: undefined })); }}
+                          disabled={isCheckedIn}
+                          className={`w-full px-3 py-2 text-[13px] rounded-xl border ${editErrors.checkOut ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed`}
+                        />
+                        {editErrors.checkOut && <p className="mt-1 text-[11.5px] text-red-500">{editErrors.checkOut}</p>}
+                      </div>
+                    </div>
+                    {editNights > 0 && (
+                      <p className="text-[12px] text-slate-500">
+                        <span className="font-medium text-slate-700">{editNights}</span>{" "}
+                        night{editNights !== 1 ? "s" : ""}
+                      </p>
+                    )}
+                    {editRoomConflict && (
+                      <div className="px-3 py-2 bg-red-50 border border-red-200 rounded-xl text-[12px] text-red-600">
+                        ⚠️ Room conflict with booking {editRoomConflict.id} ({editRoomConflict.checkIn} – {editRoomConflict.checkOut}).
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ── Guests ─────────────────────────────────── */}
+                <div>
+                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">Guests</p>
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3">
+                      <label className="text-[12px] font-medium text-slate-600 whitespace-nowrap">Total Guests</label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={editForm.totalGuests}
+                        onChange={e => setEditForm(p => ({ ...p, totalGuests: Math.max(1, parseInt(e.target.value) || 1) }))}
+                        className="w-20 px-3 py-2 text-[13px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400"
+                      />
+                    </div>
+                    {editForm.additionalGuests.map((g, i) => (
+                      <div key={i} className="grid grid-cols-[1fr_1fr_auto] gap-2 items-end">
+                        <div>
+                          {i === 0 && <label className="block text-[11.5px] text-slate-500 mb-1">Name</label>}
+                          <input
+                            type="text"
+                            value={g.name}
+                            onChange={e => updateEditGuest(i, "name", e.target.value)}
+                            placeholder="Guest name"
+                            className="w-full px-3 py-2 text-[13px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400"
+                          />
+                        </div>
+                        <div>
+                          {i === 0 && <label className="block text-[11.5px] text-slate-500 mb-1">Nationality</label>}
+                          <input
+                            type="text"
+                            value={g.nationality}
+                            onChange={e => updateEditGuest(i, "nationality", e.target.value)}
+                            placeholder="Nationality"
+                            className="w-full px-3 py-2 text-[13px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeEditGuest(i)}
+                          className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={addEditGuest}
+                      className="text-[12px] text-violet-600 hover:text-violet-700 font-medium flex items-center gap-1"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                      </svg>
+                      Add guest
+                    </button>
+                  </div>
+                </div>
+
+                {/* ── Rates & Payment ────────────────────────── */}
+                <div>
+                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">Rates & Payment</p>
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[12px] font-medium text-slate-600 mb-1">Published Rate / night</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400">৳</span>
+                          <input
+                            type="number" min={0}
+                            value={editForm.fixedRate}
+                            onChange={e => setEditForm(p => ({ ...p, fixedRate: e.target.value }))}
+                            disabled={isCheckedIn}
+                            className="w-full pl-6 pr-3 py-2 text-[13px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed"
+                            placeholder="0"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[12px] font-medium text-slate-600 mb-1">Booking Rate / night</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400">৳</span>
+                          <input
+                            type="number" min={0}
+                            value={editForm.bookingRate}
+                            onChange={e => setEditForm(p => ({ ...p, bookingRate: e.target.value }))}
+                            disabled={isCheckedIn}
+                            className="w-full pl-6 pr-3 py-2 text-[13px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed"
+                            placeholder="0"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    {editDiscountPct > 0 && (
+                      <p className="text-[11.5px] text-emerald-600">
+                        {editDiscountPct}% discount — saving ৳{editTotalSaving.toLocaleString()} total
+                        {editNights > 0 ? ` (৳${editDiscountPerNight.toLocaleString()}/night × ${editNights} nights)` : ""}
+                      </p>
+                    )}
+                    <div>
+                      <label className="block text-[12px] font-medium text-slate-600 mb-1">Total Amount</label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400">৳</span>
+                        <input
+                          type="number" min={0}
+                          value={editForm.totalAmount}
+                          onChange={e => setEditForm(p => ({ ...p, totalAmount: e.target.value }))}
+                          disabled={isCheckedIn}
+                          className="w-full pl-6 pr-3 py-2 text-[13px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed"
+                          placeholder="0"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[12px] font-medium text-slate-600 mb-1">Amount Paid at Booking</label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400">৳</span>
+                        <input
+                          type="number" min={0}
+                          value={editForm.amountPaid}
+                          disabled
+                          className="w-full pl-6 pr-3 py-2 text-[13px] rounded-xl border border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed"
+                          placeholder="0"
+                        />
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-400">Adjust via Record Payment.</p>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Footer */}
+              <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={handleEditCancel}
+                  className="px-4 py-2 text-[13px] font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleEditSubmit}
+                  disabled={!editHasChanges || editSaving || !!editRoomConflict}
+                  className="px-5 py-2 text-[13px] font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {editSaving ? "Saving…" : "Save Changes"}
                 </button>
               </div>
             </div>

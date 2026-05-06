@@ -460,7 +460,8 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         }
         if (changes.fixedRate    !== undefined) patch.fixedRate    = changes.fixedRate   ?? undefined;
         if (changes.bookingRate  !== undefined) patch.bookingRate  = changes.bookingRate ?? undefined;
-        if (changes.totalGuests  !== undefined) patch.totalGuests  = changes.totalGuests;
+        if (changes.totalGuests       !== undefined) patch.totalGuests       = changes.totalGuests;
+        if (changes.additionalGuests  !== undefined) patch.additionalGuests  = changes.additionalGuests;
         return { ...b, ...patch };
       })
     );

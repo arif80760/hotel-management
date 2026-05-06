@@ -27,6 +27,7 @@ import {
   type PaymentMethod,
   type RoomStatus,
   type CheckoutOverride,
+  type AdditionalGuest,
   isPlaceholderEmail,
 } from "@/lib/mockData";
 
@@ -673,7 +674,8 @@ export type UpdateBookingPayload = {
   totalAmount?:  number;
   fixedRate?:    number | null;
   bookingRate?:  number | null;
-  totalGuests?:  number;
+  totalGuests?:        number;
+  additionalGuests?:   AdditionalGuest[];
   roomCategory?: string;
 };
 
@@ -929,6 +931,56 @@ export async function updateBooking(
     console.log("[updateBooking] Step 7 — guest updated:", currentGuestId);
   } else if (changes.guestName !== undefined || changes.phone !== undefined || changes.email !== undefined) {
     console.warn("[updateBooking] Step 7 — guest fields in changes but no currentGuestId; guest row NOT updated");
+  }
+
+  // ── Step 7.5 — Replace additional guests ────────────────────────────────
+  // When additionalGuests is present in changes, DELETE all existing booking_guests
+  // rows for this booking then re-INSERT the new list. Sort order is preserved by
+  // the array index. An empty array means "remove all additional guests".
+  if (changes.additionalGuests !== undefined) {
+    console.log("[updateBooking] Step 7.5 — replacing booking_guests, count:", changes.additionalGuests.length);
+
+    // 7.5a — Fetch booking UUID (needed for booking_guests FK)
+    const { data: bRow, error: bRowErr } = await supabase
+      .from("bookings")
+      .select("id")
+      .eq("booking_ref", bookingRef)
+      .single();
+
+    if (bRowErr || !bRow) {
+      console.error("[updateBooking] Step 7.5 — could not fetch booking id:", bRowErr?.message);
+      // Non-fatal: proceed without updating booking_guests
+    } else {
+      // 7.5b — DELETE existing rows
+      const { error: delErr } = await supabase
+        .from("booking_guests")
+        .delete()
+        .eq("booking_id", bRow.id);
+
+      if (delErr) {
+        console.error("[updateBooking] Step 7.5 — DELETE booking_guests failed:", delErr.message);
+      } else if (changes.additionalGuests.length > 0) {
+        // 7.5c — INSERT new rows
+        const guestRows = changes.additionalGuests.map((g, i) => ({
+          booking_id:  bRow.id,
+          name:        g.name,
+          nationality: g.nationality ?? null,
+          sort_order:  i + 1,
+        }));
+
+        const { error: insErr } = await supabase
+          .from("booking_guests")
+          .insert(guestRows);
+
+        if (insErr) {
+          console.error("[updateBooking] Step 7.5 — INSERT booking_guests failed:", insErr.message);
+        } else {
+          console.log("[updateBooking] Step 7.5 — booking_guests replaced, rows:", guestRows.length);
+        }
+      } else {
+        console.log("[updateBooking] Step 7.5 — no additional guests, booking_guests cleared");
+      }
+    }
   }
 
   // ── Step 8 — Re-fetch with all joins ────────────────────────────────────
