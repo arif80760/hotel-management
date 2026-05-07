@@ -558,8 +558,9 @@ async function findOrCreateGuest(
  *
  * Steps:
  *   1. Find or create the primary guest profile.
- *   2. Look up the room UUID from room_number.
- *   3. Insert the booking record.
+ *   2. Look up the room UUID from room_number; check for overlapping bookings.
+ *   3. Call create_booking_with_rooms RPC (booking + booking_rooms + payment atomically).
+ *   3.5. UPDATE bookings.fixed_rate (non-fatal; RPC does not own this column).
  *   4. Insert any additional guests into booking_guests.
  *   5. Return the full booking (re-fetched with joins).
  */
@@ -567,7 +568,7 @@ export async function createBooking(
   booking: MockBooking,
   initialPaymentMethod: PaymentMethod = "cash",
 ): Promise<MockBooking> {
-  console.log("[createBooking] Starting — booking ref will be assigned by DB, guest:", booking.guestName, "room:", booking.roomNumber);
+  console.log("[createBooking] Starting — booking_ref (client-assigned):", booking.id, "| guest:", booking.guestName, "| room:", booking.roomNumber);
 
   // ── Step 1 — Resolve primary guest UUID ───────────────────
   const guestId = await findOrCreateGuest(booking.guestName, booking.phone, booking.email);
@@ -658,46 +659,86 @@ export async function createBooking(
     console.log(`[createBooking] Step 2.5 — room ${booking.roomNumber} is available`);
   }
 
-  // ── Step 3 — Insert booking row ────────────────────────────
-  const bookingPayload = {
-    room_id:                  roomRow!.id,
-    primary_guest_id:         guestId,
-    check_in_date:            parseDisplayDate(booking.checkIn),
-    check_out_date:           parseDisplayDate(booking.checkOut),
-    room_category_at_booking: booking.roomCategory.toLowerCase(),
-    total_guests:             booking.totalGuests,
-    status:                   "confirmed",
-    total_amount:             booking.totalAmount,
-    // paid_amount is intentionally omitted here — if amountPaid > 0 a payments
-    // row is inserted in Step 4.5 and the fn_sync_paid_amount trigger keeps
-    // bookings.paid_amount in sync automatically.
-    fixed_rate:               booking.fixedRate   ?? null,
-    booking_rate:             booking.bookingRate ?? null,
-  };
+  // ── Step 3 — create_booking_with_rooms RPC ───────────────────────────────
+  // Atomically INSERTs:
+  //   • bookings row   (status = confirmed, booking_ref = booking.id)
+  //   • booking_rooms row(s) with per-room rate, dates, and nights
+  //   • rooms.status → reserved for each room
+  //   • payments row   (when p_initial_payment > 0 AND p_payment_method IS NOT NULL)
+  // Returns the new booking UUID.
+  //
+  // NOTE: The RPC does NOT write fixed_rate (no booking_rooms equivalent).
+  //       Step 3.5 below handles that as a non-fatal follow-up UPDATE.
+  const roomsPayload = [{
+    room_id:        roomRow!.id,
+    check_in_date:  checkInISO,
+    check_out_date: checkOutISO,
+    nights:         booking.nights,
+    category:       booking.roomCategory.toLowerCase(),
+    rate:           booking.bookingRate ?? booking.fixedRate ?? 0,
+  }];
 
-  console.log("[createBooking] Step 3 — INSERT bookings, payload:", bookingPayload);
+  console.log(
+    "[createBooking] Step 3 — RPC create_booking_with_rooms" +
+    ` | booking_ref: ${booking.id}` +
+    ` | total_amount: ${booking.totalAmount}` +
+    ` | rooms:`, roomsPayload,
+  );
 
-  const {
-    data: inserted,
-    error: bookingErr,
-    status: bookingStatus,
-    statusText: bookingStatusText,
-  } = await supabase
-    .from("bookings")
-    .insert(bookingPayload)
-    .select("id, booking_ref")
-    .single();
+  const { data: bookingUUID, error: rpcErr } = await supabase.rpc(
+    "create_booking_with_rooms",
+    {
+      p_booking_ref:      booking.id,
+      p_primary_guest_id: guestId,
+      p_total_guests:     booking.totalGuests,
+      p_rooms:            roomsPayload,
+      p_total_amount:     booking.totalAmount,
+      p_initial_payment:  booking.amountPaid > 0 ? booking.amountPaid   : 0,
+      p_payment_method:   booking.amountPaid > 0 ? initialPaymentMethod : null,
+      p_recorded_by:      null,
+    },
+  );
 
-  if (bookingErr || !inserted) {
-    logSupabaseError("Step 3 — INSERT bookings", bookingErr, bookingStatus, bookingStatusText, bookingPayload);
+  if (rpcErr || !bookingUUID) {
+    logSupabaseError(
+      "Step 3 — RPC create_booking_with_rooms",
+      rpcErr,
+      undefined,
+      undefined,
+      { p_booking_ref: booking.id, rooms: roomsPayload },
+    );
   }
 
-  console.log("[createBooking] Step 3 — booking inserted:", inserted!.booking_ref, "(uuid:", inserted!.id + ")");
+  console.log("[createBooking] Step 3 — RPC succeeded, booking UUID:", bookingUUID);
 
-  // ── Step 4 — Insert additional guests ─────────────────────
+  // ── Step 3.5 — UPDATE bookings.fixed_rate (non-fatal) ─────────────────────
+  // The RPC INSERT does not include fixed_rate (no booking_rooms equivalent).
+  // mapBooking() reads row.fixed_rate directly (`fixedRate: row.fixed_rate ?? undefined`),
+  // so it must be written separately. Non-fatal: the booking is already committed;
+  // leaving fixedRate undefined is tolerable until the next page reload sets it.
+  if (booking.fixedRate != null) {
+    const { error: frErr } = await supabase
+      .from("bookings")
+      .update({ fixed_rate: booking.fixedRate })
+      .eq("id", bookingUUID as string);
+
+    if (frErr) {
+      console.warn(
+        "[createBooking] Step 3.5 — UPDATE bookings.fixed_rate FAILED (non-fatal):",
+        frErr.message,
+        "| booking UUID:", bookingUUID,
+      );
+    } else {
+      console.log("[createBooking] Step 3.5 — fixed_rate written:", booking.fixedRate);
+    }
+  } else {
+    console.log("[createBooking] Step 3.5 — no fixed_rate to write, skipping");
+  }
+
+  // ── Step 4 — Insert additional guests ─────────────────────────────────────
   if (booking.additionalGuests.length > 0) {
     const guestRows = booking.additionalGuests.map((g, i) => ({
-      booking_id:  inserted!.id,
+      booking_id:  bookingUUID as string,
       name:        g.name,
       nationality: g.nationality || null,
       sort_order:  i,
@@ -722,74 +763,8 @@ export async function createBooking(
     console.log("[createBooking] Step 4 — no additional guests, skipping booking_guests insert");
   }
 
-  // ── Step 4.5 — Insert initial payment row (if any) ────────
-  //
-  // Previously, amountPaid was written directly to bookings.paid_amount
-  // with no corresponding payments row — a silent gap in the audit trail.
-  // This step fixes that: all payments, including the one at booking
-  // creation, are now proper rows in the payments table. The DB trigger
-  // fn_sync_paid_amount updates bookings.paid_amount automatically.
-  //
-  // If the insert fails after the booking already exists, we throw a
-  // descriptive error so the caller surfaces it immediately. The booking
-  // will exist with paid_amount = 0; staff can use Add Payment to reconcile.
-  // TODO: Wrap Steps 4–4.5 in a Postgres transaction (RPC) for true atomicity.
-  //       If the payment insert fails after the booking row already exists, the booking
-  //       stays with paid_amount = 0 and staff must reconcile via Add Payment manually.
-  if (booking.amountPaid > 0) {
-    const initPaymentPayload = {
-      booking_id: inserted!.id,
-      amount:     booking.amountPaid,
-      method:     initialPaymentMethod,
-    };
-
-    console.log(
-      "[createBooking] Step 4.5 — INSERT initial payment, payload:",
-      initPaymentPayload,
-    );
-
-    const {
-      error:      pmtErr,
-      status:     pmtStatus,
-      statusText: pmtStatusText,
-    } = await supabase
-      .from("payments")
-      .insert(initPaymentPayload);
-
-    if (pmtErr) {
-      console.error("──────────── [createBooking] Step 4.5 — INSERT payments FAILED ────────────");
-      console.error("  message    :", pmtErr.message);
-      console.error("  details    :", pmtErr.details);
-      console.error("  hint       :", pmtErr.hint);
-      console.error("  code       :", pmtErr.code);
-      console.error("  HTTP status:", pmtStatus, pmtStatusText);
-      console.error("  payload    :", initPaymentPayload);
-      console.error("  NOTE       : Booking was created but initial payment was NOT recorded.");
-      console.error("               booking_ref:", inserted!.booking_ref, "| amount:", booking.amountPaid);
-      console.error("────────────────────────────────────────────────────────────────────────────");
-      throw new Error(
-        `[createBooking] Booking ${inserted!.booking_ref} was created, ` +
-        `but the initial payment of ৳${booking.amountPaid} failed to record. ` +
-        `Manual reconciliation required. Cause: ${pmtErr.message}` +
-        (pmtErr.code    ? ` (code: ${pmtErr.code})`       : "") +
-        (pmtErr.hint    ? ` | hint: ${pmtErr.hint}`        : "") +
-        (pmtErr.details ? ` | details: ${pmtErr.details}`  : ""),
-      );
-    }
-
-    console.log(
-      "[createBooking] Step 4.5 — initial payment inserted successfully, amount:",
-      booking.amountPaid,
-    );
-    // DB trigger fn_sync_paid_amount        → updates bookings.paid_amount
-    // DB trigger fn_sync_last_payment_method → updates bookings.last_payment_method
-    // Both are reflected in the Step 5 re-fetch.
-  } else {
-    console.log("[createBooking] Step 4.5 — amountPaid is 0, skipping initial payment insert");
-  }
-
-  // ── Step 5 — Re-fetch with all joins ───────────────────────
-  console.log("[createBooking] Step 5 — re-fetching booking with joins, uuid:", inserted!.id);
+  // ── Step 5 — Re-fetch with all joins ──────────────────────────────────────
+  console.log("[createBooking] Step 5 — re-fetching booking with joins, uuid:", bookingUUID);
 
   const {
     data: full,
@@ -799,7 +774,7 @@ export async function createBooking(
   } = await supabase
     .from("bookings")
     .select(BOOKING_SELECT)
-    .eq("id", inserted!.id)
+    .eq("id", bookingUUID as string)
     .single();
 
   if (fetchErr || !full) {
