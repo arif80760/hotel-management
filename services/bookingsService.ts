@@ -632,8 +632,8 @@ export async function createBooking(
     data:  conflictRows,
     error: conflictErr,
   } = await supabase
-    .from("bookings")
-    .select("booking_ref, check_in_date, check_out_date, status")
+    .from("booking_rooms")
+    .select("check_in_date, check_out_date, status, bookings!booking_id(booking_ref)")
     .eq("room_id", roomRow!.id)
     .in("status", ["confirmed", "checked_in"])
     .lt("check_in_date", checkOutISO)   // existing starts before new ends
@@ -647,9 +647,10 @@ export async function createBooking(
     );
   } else if (conflictRows && conflictRows.length > 0) {
     const c = conflictRows[0];
+    const cBookings = c.bookings as Array<{ booking_ref: string }>;
     const msg =
       `Room is unavailable for this date range. ` +
-      `Existing booking ${c.booking_ref} covers ${c.check_in_date} – ${c.check_out_date}` +
+      `Existing booking ${cBookings[0]?.booking_ref ?? "unknown"} covers ${c.check_in_date} – ${c.check_out_date}` +
       ` (status: ${c.status}). Please select another room or different dates.`;
     console.error("[createBooking] Step 2.5 — BLOCKED:", msg);
     throw new Error(msg);
@@ -873,7 +874,7 @@ export async function updateBooking(
   // ── Step 1 — Fetch current booking ─────────────────────────────────────
   const { data: current, error: curErr } = await supabase
     .from("bookings")
-    .select("id, booking_ref, room_id, paid_amount, total_amount, status, check_in_date, check_out_date")
+    .select("id, booking_ref, room_id, paid_amount, total_amount, status, check_in_date, check_out_date, booking_rooms(id, room_id)")
     .eq("booking_ref", bookingRef)
     .single();
 
@@ -924,13 +925,13 @@ export async function updateBooking(
     );
 
     const { data: conflicts, error: conflictErr } = await supabase
-      .from("bookings")
-      .select("booking_ref, check_in_date, check_out_date, status")
+      .from("booking_rooms")
+      .select("check_in_date, check_out_date, status, bookings!booking_id(booking_ref)")
       .eq("room_id", targetRoomId)
       .in("status", ["confirmed", "checked_in"])
       .lt("check_in_date", coISO)
       .gt("check_out_date", ciISO)
-      .neq("booking_ref", bookingRef);    // ← exclude current booking
+      .neq("booking_id", current.id);    // ← exclude current booking by UUID
 
     if (conflictErr) {
       // Proceeding on overlap query failure risks a double-booking — throw instead.
@@ -942,9 +943,10 @@ export async function updateBooking(
 
     if (conflicts && conflicts.length > 0) {
       const c = conflicts[0];
+      const cBookings = c.bookings as Array<{ booking_ref: string }>;
       throw new Error(
         `Room is unavailable for ${ciISO} – ${coISO}. ` +
-        `Booking ${c.booking_ref} covers ${c.check_in_date} – ${c.check_out_date} (${c.status}).`
+        `Booking ${cBookings[0]?.booking_ref ?? "unknown"} covers ${c.check_in_date} – ${c.check_out_date} (${c.status}).`
       );
     }
 
@@ -1017,6 +1019,53 @@ export async function updateBooking(
     console.log("[updateBooking] Step 5 — booking updated");
   } else {
     console.log("[updateBooking] Step 5 — no booking-level changes, skipping UPDATE");
+  }
+
+  // ── Step 5.5 — Mirror field changes to booking_rooms ──────────────────────
+  // Phase 4.4: the bookings table is the legacy write path; booking_rooms is the
+  // authoritative source that mapBooking() reads from (via the r0 shim). Any edit
+  // that touches room, dates, rate, or category must also update the booking_rooms
+  // row so the re-fetch in Step 8 returns the correct values.
+  //
+  // Current edit UI only supports single-room edits. We update ALL booking_rooms
+  // rows for this booking (there is normally exactly one) because if the room, dates
+  // or rate changed, they changed for the whole booking. When the multi-room add/remove
+  // UI lands (Phase 5+), this block will be replaced with per-room RPC calls.
+  const brRoomFields =
+    resolvedRoomId             !== undefined ||
+    changes.checkInISO         !== undefined ||
+    changes.checkOutISO        !== undefined ||
+    changes.bookingRate        !== undefined ||
+    changes.roomCategory       !== undefined;
+
+  if (brRoomFields) {
+    const brPayload: Record<string, unknown> = {};
+    if (resolvedRoomId       !== undefined) brPayload.room_id        = resolvedRoomId;
+    if (changes.checkInISO   !== undefined) brPayload.check_in_date  = changes.checkInISO;
+    if (changes.checkOutISO  !== undefined) brPayload.check_out_date = changes.checkOutISO;
+    if (changes.bookingRate  !== undefined) brPayload.booking_rate   = changes.bookingRate;
+    if (changes.roomCategory !== undefined)
+      brPayload.room_category = changes.roomCategory.toLowerCase();
+
+    // Derive the booking UUID (already in scope as current.id)
+    console.log("[updateBooking] Step 5.5 — UPDATE booking_rooms, booking_id:", current.id, "| payload:", brPayload);
+
+    const { error: brErr } = await supabase
+      .from("booking_rooms")
+      .update(brPayload)
+      .eq("booking_id", current.id);
+
+    if (brErr) {
+      // Non-fatal: booking row is already updated; log loudly but don't abort.
+      // The bookings table is source-of-truth for legacy columns; booking_rooms
+      // will be corrected on next page load via mapBooking's fallback chain.
+      console.error("[updateBooking] Step 5.5 — UPDATE booking_rooms FAILED:", brErr.message,
+        "| booking_id:", current.id, "| payload:", brPayload);
+    } else {
+      console.log("[updateBooking] Step 5.5 — booking_rooms updated successfully");
+    }
+  } else {
+    console.log("[updateBooking] Step 5.5 — no room-level changes, skipping booking_rooms UPDATE");
   }
 
   // TODO: Wrap booking UPDATE + room cascade in a Postgres transaction (RPC function)
@@ -1338,9 +1387,19 @@ export async function recordPayment(
 
 /**
  * Check out a booking that has no outstanding balance.
- * Records extra charges, early-checkout deduction, and any additional discount.
+ *
+ * Step 1 — Calls `checkout_booking_room` RPC (atomic):
+ *   • Sets booking_rooms.status → checked_out
+ *   • Sets rooms.status         → cleaning
+ *   • Records actual_checkout_date + early deduction on the booking_rooms row
+ *   • Advances bookings.status  → checked_out (when this is the last active room)
+ *
+ * Step 2 — Updates bookings table for fields the RPC doesn't own:
+ *   extra_charge_amount/reason and additional_discount_* columns.
+ *   Skipped entirely when neither is present.
  *
  * @param id                       booking_ref ("BK-1041"), not the UUID
+ * @param bookingRoomId            booking_rooms.id for the room being checked out (rooms[0] for single-room bookings)
  * @param extraChargeAmount        additional amount charged at checkout (0 = none)
  * @param extraChargeReason        human-readable reason, e.g. "Mini-bar - 3 soft drinks"
  * @param actualCheckoutDate       ISO date (YYYY-MM-DD) the guest actually left
@@ -1352,6 +1411,7 @@ export async function recordPayment(
  */
 export async function checkoutNormal(
   id: string,
+  bookingRoomId: string,
   extraChargeAmount: number,
   extraChargeReason: string | null,
   actualCheckoutDate: string,
@@ -1361,51 +1421,92 @@ export async function checkoutNormal(
   additionalDiscountReason: string | null,
   additionalDiscountBy: string | null,
 ): Promise<void> {
-  const updatePayload: Record<string, unknown> = {
-    status:                     "checked_out",
-    actual_checkout_date:       actualCheckoutDate,
-    early_nights_deducted:      earlyNightsDeducted,
-    early_deduction_amount:     earlyDeductionAmount,
-    additional_discount_amount: additionalDiscountAmount,
-    additional_discount_at:     new Date().toISOString(),
-  };
-  if (extraChargeAmount > 0) {
-    updatePayload.extra_charge_amount = extraChargeAmount;
-    updatePayload.extra_charge_reason = extraChargeReason || null;
-  }
-  if (additionalDiscountReason) {
-    updatePayload.additional_discount_reason = additionalDiscountReason;
-  }
-  if (additionalDiscountBy) {
-    updatePayload.additional_discount_by = additionalDiscountBy;
-  }
+  // ── Step 1 — checkout_booking_room RPC ─────────────────────────────────────
+  // Atomically sets booking_rooms.status, rooms.status = cleaning, stamps
+  // actual_checkout_date + early deduction, and advances bookings.status when
+  // this is the last active room on the booking.
+  console.log(
+    "[checkoutNormal] Step 1 — RPC checkout_booking_room" +
+    ` | bookingRoomId: ${bookingRoomId}` +
+    ` | actualCheckoutDate: ${actualCheckoutDate}` +
+    ` | earlyNightsDeducted: ${earlyNightsDeducted}` +
+    ` | earlyDeductionAmount: ${earlyDeductionAmount}`
+  );
 
-  console.log("[checkoutNormal] UPDATE bookings, booking_ref:", id, "| payload:", updatePayload);
+  const { error: rpcErr } = await supabase.rpc("checkout_booking_room", {
+    p_booking_room_id:       bookingRoomId,
+    p_actual_checkout_date:  actualCheckoutDate || null,
+    p_early_nights_deducted: earlyNightsDeducted,
+    p_deduction_amount:      earlyDeductionAmount,
+  });
 
-  const { error, status, statusText } = await supabase
-    .from("bookings")
-    .update(updatePayload)
-    .eq("booking_ref", id);
-
-  if (error) {
-    console.error("──────────── [checkoutNormal] UPDATE bookings FAILED ────────────");
-    console.error("  message    :", error.message);
-    console.error("  details    :", error.details);
-    console.error("  hint       :", error.hint);
-    console.error("  code       :", error.code);
-    console.error("  HTTP status:", status, statusText);
-    console.error("  booking_ref:", id);
-    console.error("  payload    :", updatePayload);
-    console.error("────────────────────────────────────────────────────────────────");
+  if (rpcErr) {
+    console.error("──────────── [checkoutNormal] Step 1 — RPC checkout_booking_room FAILED ────────────");
+    console.error("  message       :", rpcErr.message);
+    console.error("  details       :", rpcErr.details);
+    console.error("  hint          :", rpcErr.hint);
+    console.error("  code          :", rpcErr.code);
+    console.error("  bookingRoomId :", bookingRoomId);
+    console.error("  booking_ref   :", id);
+    console.error("────────────────────────────────────────────────────────────────────────────────────");
     throw new Error(
-      `[checkoutNormal] Update failed — ${error.message}` +
-      (error.code    ? ` (code: ${error.code})`       : "") +
-      (error.hint    ? ` | hint: ${error.hint}`        : "") +
-      (error.details ? ` | details: ${error.details}`  : "")
+      `[checkoutNormal] checkout_booking_room RPC failed — ${rpcErr.message}` +
+      (rpcErr.code    ? ` (code: ${rpcErr.code})`       : "") +
+      (rpcErr.hint    ? ` | hint: ${rpcErr.hint}`        : "") +
+      (rpcErr.details ? ` | details: ${rpcErr.details}`  : "")
     );
   }
 
-  console.log("[checkoutNormal] succeeded for booking_ref:", id);
+  console.log("[checkoutNormal] Step 1 — RPC succeeded for booking_ref:", id);
+
+  // ── Step 2 — Update bookings for fields the RPC doesn't own ────────────────
+  // extra_charge_* and additional_discount_* live only on the bookings table.
+  // Skip the UPDATE entirely when neither is present.
+  const bookingsPayload: Record<string, unknown> = {};
+
+  if (extraChargeAmount > 0) {
+    bookingsPayload.extra_charge_amount = extraChargeAmount;
+    bookingsPayload.extra_charge_reason = extraChargeReason || null;
+  }
+  if (additionalDiscountAmount > 0) {
+    bookingsPayload.additional_discount_amount = additionalDiscountAmount;
+    bookingsPayload.additional_discount_at     = new Date().toISOString();
+    if (additionalDiscountReason) bookingsPayload.additional_discount_reason = additionalDiscountReason;
+    if (additionalDiscountBy)     bookingsPayload.additional_discount_by     = additionalDiscountBy;
+  }
+
+  if (Object.keys(bookingsPayload).length > 0) {
+    console.log("[checkoutNormal] Step 2 — UPDATE bookings, booking_ref:", id, "| payload:", bookingsPayload);
+
+    const { error, status, statusText } = await supabase
+      .from("bookings")
+      .update(bookingsPayload)
+      .eq("booking_ref", id);
+
+    if (error) {
+      console.error("──────────── [checkoutNormal] Step 2 — UPDATE bookings FAILED ────────────");
+      console.error("  message    :", error.message);
+      console.error("  details    :", error.details);
+      console.error("  hint       :", error.hint);
+      console.error("  code       :", error.code);
+      console.error("  HTTP status:", status, statusText);
+      console.error("  booking_ref:", id);
+      console.error("  payload    :", bookingsPayload);
+      console.error("────────────────────────────────────────────────────────────────────");
+      throw new Error(
+        `[checkoutNormal] bookings update failed — ${error.message}` +
+        (error.code    ? ` (code: ${error.code})`       : "") +
+        (error.hint    ? ` | hint: ${error.hint}`        : "") +
+        (error.details ? ` | details: ${error.details}`  : "")
+      );
+    }
+
+    console.log("[checkoutNormal] Step 2 — extra charge / discount written for booking_ref:", id);
+  } else {
+    console.log("[checkoutNormal] Step 2 — no extra charges or discount, skipping bookings UPDATE");
+  }
+
+  console.log("[checkoutNormal] complete for booking_ref:", id);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1414,11 +1515,18 @@ export async function checkoutNormal(
 
 /**
  * Admin-only: check out a booking that has an outstanding balance.
- * Sets status to "checked_out", stamps the override audit fields, and
- * records checked_out_at. Optionally records extra charges, early-checkout
- * deduction, and any additional discount applied at checkout.
+ *
+ * Step 1 — Calls `checkout_booking_room` RPC (atomic):
+ *   • Sets booking_rooms.status → checked_out
+ *   • Sets rooms.status         → cleaning
+ *   • Records actual_checkout_date + early deduction on the booking_rooms row
+ *   • Advances bookings.status  → checked_out (when this is the last active room)
+ *
+ * Step 2 — Updates bookings table for fields the RPC doesn't own:
+ *   override audit fields (always written) + extra_charge_* + additional_discount_*.
  *
  * @param id                       booking_ref ("BK-1041"), not the UUID
+ * @param bookingRoomId            booking_rooms.id for the room being checked out (rooms[0] for single-room bookings)
  * @param overrideReason           free-text reason entered by the admin
  * @param overrideBy               auth.users UUID of the admin performing the override
  * @param extraChargeAmount        additional amount charged at checkout (0 = none)
@@ -1432,6 +1540,7 @@ export async function checkoutNormal(
  */
 export async function checkoutWithOverride(
   id: string,
+  bookingRoomId: string,
   overrideReason: string,
   overrideBy: string,
   extraChargeAmount?: number,
@@ -1443,8 +1552,48 @@ export async function checkoutWithOverride(
   additionalDiscountReason?: string | null,
   additionalDiscountBy?: string | null,
 ): Promise<void> {
+  // ── Step 1 — checkout_booking_room RPC ─────────────────────────────────────
+  // Atomically sets booking_rooms.status, rooms.status = cleaning, stamps
+  // actual_checkout_date + early deduction, and advances bookings.status when
+  // this is the last active room on the booking.
+  console.log(
+    "[checkoutWithOverride] Step 1 — RPC checkout_booking_room" +
+    ` | bookingRoomId: ${bookingRoomId}` +
+    ` | actualCheckoutDate: ${actualCheckoutDate ?? "none"}` +
+    ` | earlyNightsDeducted: ${earlyNightsDeducted ?? 0}` +
+    ` | earlyDeductionAmount: ${earlyDeductionAmount ?? 0}`
+  );
+
+  const { error: rpcErr } = await supabase.rpc("checkout_booking_room", {
+    p_booking_room_id:       bookingRoomId,
+    p_actual_checkout_date:  actualCheckoutDate  || null,
+    p_early_nights_deducted: earlyNightsDeducted ?? 0,
+    p_deduction_amount:      earlyDeductionAmount ?? 0,
+  });
+
+  if (rpcErr) {
+    console.error("──────────── [checkoutWithOverride] Step 1 — RPC checkout_booking_room FAILED ────────────");
+    console.error("  message       :", rpcErr.message);
+    console.error("  details       :", rpcErr.details);
+    console.error("  hint          :", rpcErr.hint);
+    console.error("  code          :", rpcErr.code);
+    console.error("  bookingRoomId :", bookingRoomId);
+    console.error("  booking_ref   :", id);
+    console.error("──────────────────────────────────────────────────────────────────────────────────────────");
+    throw new Error(
+      `[checkoutWithOverride] checkout_booking_room RPC failed — ${rpcErr.message}` +
+      (rpcErr.code    ? ` (code: ${rpcErr.code})`       : "") +
+      (rpcErr.hint    ? ` | hint: ${rpcErr.hint}`        : "") +
+      (rpcErr.details ? ` | details: ${rpcErr.details}`  : "")
+    );
+  }
+
+  console.log("[checkoutWithOverride] Step 1 — RPC succeeded for booking_ref:", id);
+
+  // ── Step 2 — Update bookings for override audit + fields RPC doesn't own ───
+  // Override audit fields are always written (override_checkout, override_reason,
+  // override_by, override_at). Extra charges and additional discount are conditional.
   const updatePayload: Record<string, unknown> = {
-    status:            "checked_out",
     override_checkout: true,
     override_reason:   overrideReason.trim() || "No reason provided",
     override_by:       overrideBy,
@@ -1454,11 +1603,6 @@ export async function checkoutWithOverride(
     updatePayload.extra_charge_amount = extraChargeAmount;
     updatePayload.extra_charge_reason = extraChargeReason || null;
   }
-  if (actualCheckoutDate) {
-    updatePayload.actual_checkout_date   = actualCheckoutDate;
-    updatePayload.early_nights_deducted  = earlyNightsDeducted  ?? 0;
-    updatePayload.early_deduction_amount = earlyDeductionAmount ?? 0;
-  }
   if (additionalDiscountAmount && additionalDiscountAmount > 0) {
     updatePayload.additional_discount_amount = additionalDiscountAmount;
     updatePayload.additional_discount_at     = new Date().toISOString();
@@ -1466,7 +1610,7 @@ export async function checkoutWithOverride(
     if (additionalDiscountBy)     updatePayload.additional_discount_by     = additionalDiscountBy;
   }
 
-  console.log("[checkoutWithOverride] UPDATE bookings, booking_ref:", id, "| payload:", updatePayload);
+  console.log("[checkoutWithOverride] Step 2 — UPDATE bookings, booking_ref:", id, "| payload:", updatePayload);
 
   const { error, status, statusText } = await supabase
     .from("bookings")
@@ -1474,7 +1618,7 @@ export async function checkoutWithOverride(
     .eq("booking_ref", id);
 
   if (error) {
-    console.error("──────────── [checkoutWithOverride] UPDATE bookings FAILED ────────────");
+    console.error("──────────── [checkoutWithOverride] Step 2 — UPDATE bookings FAILED ────────────");
     console.error("  message    :", error.message);
     console.error("  details    :", error.details);
     console.error("  hint       :", error.hint);
@@ -1482,13 +1626,11 @@ export async function checkoutWithOverride(
     console.error("  HTTP status:", status, statusText);
     console.error("  booking_ref:", id);
     console.error("  payload    :", updatePayload);
-    console.error("─────────────────────────────────────────────────────────────────────");
+    console.error("─────────────────────────────────────────────────────────────────────────────────");
     // Common causes:
     //   42501 — RLS blocks UPDATE on bookings for this role
-    //   42703 — column does not exist (e.g. override_checkout / override_at
-    //            name differs from actual DB schema — check column names in
-    //            Supabase Table Editor → bookings table)
-    //   22P02 — invalid enum value for status field
+    //   42703 — column does not exist (check override_checkout / override_reason /
+    //            override_at column names in Supabase Table Editor → bookings table)
     if (error.code === "42501") {
       console.error("[checkoutWithOverride] RLS BLOCK: authenticated role lacks",
         "UPDATE permission on the bookings table.");
@@ -1499,15 +1641,14 @@ export async function checkoutWithOverride(
         "Check the exact column names in Supabase → bookings table.");
     }
     throw new Error(
-      `[checkoutWithOverride] Update failed — ${error.message}` +
+      `[checkoutWithOverride] bookings update failed — ${error.message}` +
       (error.code    ? ` (code: ${error.code})`       : "") +
       (error.hint    ? ` | hint: ${error.hint}`        : "") +
       (error.details ? ` | details: ${error.details}`  : "")
     );
   }
 
-  console.log("[checkoutWithOverride] succeeded for booking_ref:", id);
-  // DB trigger fn_sync_room_status sets the room to "cleaning" automatically.
+  console.log("[checkoutWithOverride] complete for booking_ref:", id);
 }
 
 // ─────────────────────────────────────────────────────────────

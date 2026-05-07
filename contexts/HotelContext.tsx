@@ -290,6 +290,20 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     const target = bookings.find(b => b.id === id);
     if (!target) return;
 
+    // Guard FIRST — before any state mutation.
+    // target.rooms?.[0]?.id: optional chain on rooms handles the case where the booking
+    // was loaded from state before Phase 3 (rooms property absent) or was created
+    // with old code that didn't insert a booking_rooms row (rooms: []).
+    // If no bookingRoomId, bail without touching state — no UI corruption, no DB call.
+    const bookingRoomId = target.rooms?.[0]?.id ?? "";
+    if (!bookingRoomId) {
+      console.error(
+        `[HotelContext checkoutNormal] booking ${id} has no booking_rooms row — ` +
+        "cannot complete checkout. Refresh the page to reload room data."
+      );
+      return;
+    }
+
     // Capture current state so we can roll back if the DB write fails.
     const previousBookings = bookings;
     const previousRooms    = rooms;
@@ -326,6 +340,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     );
     bookingsService.checkoutNormal(
       id,
+      bookingRoomId,
       extraChargeAmount,
       extraChargeReason,
       actualCheckoutDate,
@@ -360,6 +375,16 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     const overrideBy = user?.id;
     if (!overrideBy) {
       console.error("[HotelContext checkoutWithOverride] blocked — no authenticated user id available.");
+      return;
+    }
+
+    // Guard FIRST — before any state mutation. Same rationale as checkoutNormal above.
+    const bookingRoomId = target.rooms?.[0]?.id ?? "";
+    if (!bookingRoomId) {
+      console.error(
+        `[HotelContext checkoutWithOverride] booking ${id} has no booking_rooms row — ` +
+        "cannot complete checkout. Refresh the page to reload room data."
+      );
       return;
     }
 
@@ -406,6 +431,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     );
     bookingsService.checkoutWithOverride(
       id,
+      bookingRoomId,
       overrideReason,
       overrideBy,
       extraChargeAmount,

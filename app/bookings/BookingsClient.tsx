@@ -781,6 +781,19 @@ export default function BookingsClient({ initialRoom }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.bookingRate, nights]);
 
+  // Edit form: auto-recompute totalAmount when bookingRate or dates change.
+  // Mirrors the create form behavior above. Pre-existing gap — edit form was
+  // never wired for live recalc (surfaced during Phase 4 smoke testing).
+  // Staff can still override totalAmount directly after the auto-fill.
+  useEffect(() => {
+    if (!editTarget) return;
+    const rate = parseFloat(editForm.bookingRate) || 0;
+    if (rate > 0 && editNights > 0) {
+      setEditForm(prev => ({ ...prev, totalAmount: String(rate * editNights) }));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editForm.bookingRate, editNights, editTarget?.id]);
+
   // ── Core form field handler ─────────────────────────────────
   function setField<K extends keyof FormData>(key: K, value: FormData[K]) {
     setForm(prev => ({ ...prev, [key]: value }));
@@ -1487,6 +1500,17 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (editForm.checkIn  !== (editTarget.checkInISO  ?? "")) changes.checkInISO  = editForm.checkIn;
     if (editForm.checkOut !== (editTarget.checkOutISO ?? "")) changes.checkOutISO = editForm.checkOut;
 
+    // Capture rate/fixed changes FIRST so the auto-recalc below can use them.
+    // Previously these were set after the auto-recalc block, meaning
+    // changes.bookingRate was always undefined when the recalc ran.
+    const newFixed = parseFloat(editForm.fixedRate);
+    if (!isNaN(newFixed) && newFixed !== (editTarget.fixedRate ?? 0))
+      changes.fixedRate = newFixed;
+
+    const newRate = parseFloat(editForm.bookingRate);
+    if (!isNaN(newRate) && newRate !== (editTarget.bookingRate ?? 0))
+      changes.bookingRate = newRate;
+
     // Auto-recompute totalAmount when dates or rate change.
     // nights is a DB GENERATED column and cannot be written directly (error 23508).
     // The manual override check below lets the user's explicit totalAmount value win.
@@ -1500,14 +1524,6 @@ export default function BookingsClient({ initialRoom }: Props) {
     // Manual override: if user explicitly changed totalAmount, their value wins
     const newTotal = parseFloat(editForm.totalAmount);
     if (!isNaN(newTotal) && newTotal !== editTarget.totalAmount) changes.totalAmount = newTotal;
-
-    const newFixed = parseFloat(editForm.fixedRate);
-    if (!isNaN(newFixed) && newFixed !== (editTarget.fixedRate ?? 0))
-      changes.fixedRate = newFixed;
-
-    const newRate = parseFloat(editForm.bookingRate);
-    if (!isNaN(newRate) && newRate !== (editTarget.bookingRate ?? 0))
-      changes.bookingRate = newRate;
 
     if (editForm.totalGuests !== editTarget.totalGuests)
       changes.totalGuests = editForm.totalGuests;
