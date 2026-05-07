@@ -28,6 +28,7 @@ import {
   type MockBooking as Booking,
   type AdditionalGuest,
   type BookingDocument,
+  type CreateBookingInput,
   HOTEL_POLICY,
   PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
@@ -909,38 +910,35 @@ export default function BookingsClient({ initialRoom }: Props) {
     const resolvedFixedRate   = parseFloat(form.fixedRate)   || info?.price || 0;
     const resolvedBookingRate = parseFloat(form.bookingRate) || resolvedFixedRate;
 
-    const newBooking: Booking = {
-      id:               `BK-${nextBookingId}`,
-      guestName:        form.guest.trim(),
-      phone:            form.phone.trim() || "—",
-      email:            form.email.trim() || undefined,
-      roomNumber:       form.room.trim(),
-      roomCategory:     info?.category ?? "Unknown",
-      checkIn:          formatDate(form.checkIn),
-      checkOut:         formatDate(form.checkOut),
-      checkInISO:       form.checkIn,    // already YYYY-MM-DD from <input type="date">
-      checkOutISO:      form.checkOut,
-      nights:           n,
-      status:           form.status,
-      payment:          derivePaymentStatus(resolvedTotal, resolvedPaid),
-      totalAmount:      resolvedTotal,
-      amountPaid:       resolvedPaid,
-      fixedRate:        resolvedFixedRate   || undefined,
-      bookingRate:      resolvedBookingRate || undefined,
+    const newInput: CreateBookingInput = {
+      id:           `BK-${nextBookingId}`,
+      primaryGuest: {
+        name:  form.guest.trim(),
+        phone: form.phone.trim() || "—",
+        email: form.email.trim() || undefined,
+      },
+      additionalGuests: cleanedExtras,
       // Ensure count is never less than actual named guests + primary
       totalGuests:      Math.max(form.totalGuests, cleanedExtras.length + 1),
-      additionalGuests: cleanedExtras,
-      // Optimistic placeholder — populated from DB on re-fetch after createBooking resolves.
-      rooms:            [],
-      extraCharges:     [],
-      createdAt:        new Date().toISOString(),
-      isNew:            true,
+      rooms: [{
+        roomNumber:   form.room.trim(),
+        roomCategory: info?.category ?? "Unknown",
+        fixedRate:    resolvedFixedRate,
+        bookingRate:  resolvedBookingRate,
+        checkIn:      form.checkIn,   // YYYY-MM-DD from <input type="date">
+        checkOut:     form.checkOut,
+        nights:       n,
+      }],
+      totalAmount:      resolvedTotal,
+      amountPaid:       resolvedPaid,
+      amountPaidMethod: bookingPayMethod,
+      status:           form.status,
     };
 
-    createBooking(newBooking, bookingPayMethod);
+    createBooking(newInput);
 
     const guestSummary = cleanedExtras.length > 0
-      ? ` · ${newBooking.totalGuests} guests total`
+      ? ` · ${newInput.totalGuests} guests total`
       : "";
     const paymentSummary = resolvedPaid > 0
       ? ` · ৳${resolvedPaid.toLocaleString()} paid`
@@ -949,7 +947,7 @@ export default function BookingsClient({ initialRoom }: Props) {
     // ── Upload staged documents (if any) ───────────────────────
     const docsToUpload = pendingDocs.filter(d => d.docType && d.file);
     if (docsToUpload.length > 0) {
-      const bookingRef = newBooking.id;
+      const bookingRef = newInput.id;
       let uploadFailed = false;
 
       // Sequential uploads so each can be individually diagnosed in console
@@ -978,16 +976,16 @@ export default function BookingsClient({ initialRoom }: Props) {
 
       if (uploadFailed) {
         setSuccessMsg(
-          `Booking ${newBooking.id} created for ${newBooking.guestName}${guestSummary}${paymentSummary} · Room ${newBooking.roomNumber} is now Reserved — ⚠️ Document upload failed. You can upload documents later from the Documents button.`
+          `Booking ${newInput.id} created for ${newInput.primaryGuest.name}${guestSummary}${paymentSummary} · Room ${newInput.rooms[0].roomNumber} is now Reserved — ⚠️ Document upload failed. You can upload documents later from the Documents button.`
         );
       } else {
         setSuccessMsg(
-          `Booking ${newBooking.id} created for ${newBooking.guestName}${guestSummary}${paymentSummary} · Room ${newBooking.roomNumber} is now Reserved`
+          `Booking ${newInput.id} created for ${newInput.primaryGuest.name}${guestSummary}${paymentSummary} · Room ${newInput.rooms[0].roomNumber} is now Reserved`
         );
       }
     } else {
       setSuccessMsg(
-        `Booking ${newBooking.id} created for ${newBooking.guestName}${guestSummary}${paymentSummary} · Room ${newBooking.roomNumber} is now Reserved`
+        `Booking ${newInput.id} created for ${newInput.primaryGuest.name}${guestSummary}${paymentSummary} · Room ${newInput.rooms[0].roomNumber} is now Reserved`
       );
     }
 

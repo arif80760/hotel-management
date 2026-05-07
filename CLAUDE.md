@@ -590,6 +590,16 @@ and use `<PrintButtons />` + `<LetterHead />` from `components/invoice/`.
 
 ### Known Issues / Technical Debt
 
+### Synthetic optimistic IDs in checkout guards
+
+Location: `contexts/HotelContext.tsx` — `checkoutNormal` / `checkoutWithOverride`
+
+When `createBooking` is called, `BookingRoom` entries in the optimistic booking carry IDs of the form `"optimistic-BK-XXXX-room-i"` and `roomId: ""`. The checkout guard correctly bails when `bookingRoomId` is empty string (`roomId === ""`), so accidental checkout of an unresolved optimistic booking is already blocked.
+
+However, the guard does not explicitly detect the `"optimistic-..."` ID pattern and would produce a generic error message rather than a friendly "booking is still being saved, please wait" prompt. The race window between optimistic display and `.then()` reconciliation is sub-second under normal network conditions, making this a low-priority UX polish item rather than a correctness issue.
+
+**Future improvement**: Add an `isOptimisticBookingRoom(room: BookingRoom): boolean` predicate (`room.id.startsWith("optimistic-")`) and surface a friendlier toast in checkout guards.
+
 ### Known Bug — fn_sync_payment_status doesn't account for extras
 
 Location: Database trigger `fn_sync_payment_status` (authoritative body in `sql/schema/05-triggers.sql`)

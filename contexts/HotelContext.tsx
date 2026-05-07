@@ -32,6 +32,8 @@ import type {
   PaymentMethod,
   CheckoutOverride,
   CreateBookingInput,
+  BookingRoom,
+  BookingRoomStatus,
 } from "@/lib/mockData";
 
 import * as roomsService    from "@/services/roomsService";
@@ -47,6 +49,23 @@ export { ROOM_CATALOG } from "@/lib/mockData";
 // with a derived map from the live `rooms` state.
 
 // ─────────────────────────────────────────────────────────────
+// PRIVATE HELPERS
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * ISO "YYYY-MM-DD" → display "Apr 22, 2026".
+ * Used to build optimistic display dates from CreateBookingInput ISO fields.
+ * Appends T12:00:00 to avoid UTC midnight rollback in UTC+ timezones.
+ * Same logic as formatDate in BookingsClient — duplicated here to keep
+ * HotelContext free of UI-layer imports.
+ */
+function formatDateDisplay(isoDate: string): string {
+  return new Date(`${isoDate}T12:00:00`).toLocaleDateString("en-US", {
+    month: "short", day: "numeric", year: "numeric",
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
 // CONTEXT TYPE
 // ─────────────────────────────────────────────────────────────
 type HotelContextType = {
@@ -55,7 +74,7 @@ type HotelContextType = {
   loading:             boolean;           // true while initial data is being fetched
   nextBookingId:       number;
   nextRoomId:          number;
-  createBooking:       (b: MockBooking, initialPaymentMethod?: PaymentMethod)      => void;
+  createBooking:       (input: CreateBookingInput)                                => void;
   changeBookingStatus: (id: string, status: BookingStatus)                        => void;
   addRoom:             (room: MockRoom)                                            => void;
   updateRoom:          (id: string, updates: Partial<Omit<MockRoom, "id"|"status">>) => void;
@@ -147,77 +166,98 @@ export function HotelProvider({ children }: { children: ReactNode }) {
 
   // ── Booking actions ─────────────────────────────────────────
 
-  function createBooking(booking: MockBooking, initialPaymentMethod: PaymentMethod = "cash") {
-    // Capture current room status before the optimistic update so we can
-    // restore it if the service layer rejects (e.g. overlap race condition).
-    const prevRoomStatus = rooms.find(r => r.roomNumber === booking.roomNumber)?.status;
+  function createBooking(input: CreateBookingInput) {
+    // Capture pre-update room statuses for rollback (supports N rooms).
+    const prevRoomStatuses = new Map<string, RoomStatus | undefined>(
+      input.rooms.map(r => [
+        r.roomNumber,
+        rooms.find(room => room.roomNumber === r.roomNumber)?.status,
+      ]),
+    );
 
-    // 1. Optimistic: show in UI immediately.
-    //    Include lastPaymentMethod when there is an initial payment so the
-    //    booking drawer reflects it without waiting for the DB trigger to fire.
-    setBookings(prev => [
-      booking.amountPaid > 0
-        ? { ...booking, lastPaymentMethod: initialPaymentMethod }
-        : booking,
-      ...prev,
-    ]);
+    // Build optimistic MockBooking from CreateBookingInput for immediate UI display.
+    // rooms[] is populated with synthetic BookingRoom objects so the bookings list
+    // and drawer can render immediately. The .then() handler replaces this entire
+    // object with the real DB-fetched booking once the service resolves, giving
+    // subsequent actions (checkout, edit) the real booking_rooms.id UUIDs.
+    const r0 = input.rooms[0];
+    const optimisticRooms: BookingRoom[] = input.rooms.map((r, i) => ({
+      id:           `optimistic-${input.id}-room-${i}`,
+      bookingId:    input.id,
+      roomId:       "",                                       // unknown until service resolves
+      roomNumber:   r.roomNumber,
+      roomCategory: r.roomCategory,
+      checkIn:      formatDateDisplay(r.checkIn),
+      checkOut:     formatDateDisplay(r.checkOut),
+      checkInISO:   r.checkIn,
+      checkOutISO:  r.checkOut,
+      nights:       r.nights,
+      bookingRate:  r.bookingRate,
+      status:       "Confirmed" as BookingRoomStatus,
+      earlyNightsDeducted:  0,
+      earlyDeductionAmount: 0,
+    }));
+
+    const optimisticBooking: MockBooking = {
+      id:               input.id,
+      guestName:        input.primaryGuest.name,
+      phone:            input.primaryGuest.phone,
+      email:            input.primaryGuest.email,
+      guestId:          undefined,
+      roomNumber:       r0.roomNumber,
+      roomCategory:     r0.roomCategory,
+      checkIn:          formatDateDisplay(r0.checkIn),
+      checkOut:         formatDateDisplay(r0.checkOut),
+      checkInISO:       r0.checkIn,
+      checkOutISO:      r0.checkOut,
+      nights:           r0.nights,
+      status:           input.status,
+      payment:          bookingsService.derivePaymentStatus(input.totalAmount, input.amountPaid),
+      totalAmount:      input.totalAmount,
+      amountPaid:       input.amountPaid,
+      totalGuests:      input.totalGuests,
+      additionalGuests: input.additionalGuests,
+      fixedRate:        r0.fixedRate   > 0 ? r0.fixedRate   : undefined,
+      bookingRate:      r0.bookingRate > 0 ? r0.bookingRate : undefined,
+      lastPaymentMethod: input.amountPaid > 0 ? input.amountPaidMethod : undefined,
+      rooms:            optimisticRooms,
+      extraCharges:     [],
+      createdAt:        new Date().toISOString(),
+      isNew:            true,
+    };
+
+    // 1. Optimistic: show in UI immediately
+    setBookings(prev => [optimisticBooking, ...prev]);
     setNextBookingId(n => n + 1);
     setRooms(prev =>
       prev.map(r =>
-        r.roomNumber === booking.roomNumber ? { ...r, status: "Reserved" as RoomStatus } : r
+        prevRoomStatuses.has(r.roomNumber) ? { ...r, status: "Reserved" as RoomStatus } : r
       )
     );
 
-    // 2. Persist to Supabase in the background.
-    // bookingsService.createBooking() runs a DB-level overlap check (Layer C)
-    // before the INSERT.  On any failure (including double-booking), we roll
-    // back the optimistic update so the phantom booking never stays in the UI.
-    //
-    // Phase 5.1 bridge: HotelContext still receives MockBooking (public API
-    // unchanged) and converts it to CreateBookingInput before calling the service.
-    // Phase 5.2 will move this conversion to the form (BookingsClient) and update
-    // the context's public signature to accept CreateBookingInput directly.
-    const serviceInput: CreateBookingInput = {
-      id:           booking.id,
-      primaryGuest: {
-        name:  booking.guestName,
-        phone: booking.phone,
-        email: booking.email,
-      },
-      additionalGuests: booking.additionalGuests,
-      totalGuests:      booking.totalGuests,
-      rooms: [{
-        roomNumber:   booking.roomNumber,
-        roomCategory: booking.roomCategory,
-        fixedRate:    booking.fixedRate    ?? 0,
-        bookingRate:  booking.bookingRate  ?? booking.fixedRate ?? 0,
-        checkIn:      booking.checkInISO   ?? "",
-        checkOut:     booking.checkOutISO  ?? "",
-        nights:       booking.nights,
-      }],
-      totalAmount:      booking.totalAmount,
-      amountPaid:       booking.amountPaid,
-      amountPaidMethod: initialPaymentMethod,
-      status:           booking.status,
-    };
+    // 2. Persist to Supabase.
+    //    .then() — replace optimistic booking with real once service resolves.
+    //              Gives subsequent actions (checkout, edit) the real booking_rooms.id.
+    //    .catch() — roll back all optimistic changes on any failure (overlap race,
+    //               network error, RPC failure, etc.).
+    bookingsService.createBooking(input)
+      .then(realBooking => {
+        setBookings(prev => prev.map(b => b.id === input.id ? realBooking : b));
+      })
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[HotelContext createBooking] failed — rolling back optimistic update:", msg);
 
-    bookingsService.createBooking(serviceInput).catch(err => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[HotelContext createBooking] failed — rolling back optimistic update:", msg);
-
-      // Roll back: remove the booking and restore the room status
-      setBookings(prev => prev.filter(b => b.id !== booking.id));
-      setNextBookingId(n => n - 1);
-      if (prevRoomStatus !== undefined) {
-        setRooms(prev =>
-          prev.map(r =>
-            r.roomNumber === booking.roomNumber
-              ? { ...r, status: prevRoomStatus }
-              : r
-          )
-        );
-      }
-    });
+        setBookings(prev => prev.filter(b => b.id !== input.id));
+        setNextBookingId(n => n - 1);
+        for (const [roomNumber, prevStatus] of prevRoomStatuses) {
+          if (prevStatus !== undefined) {
+            setRooms(prev =>
+              prev.map(r => r.roomNumber === roomNumber ? { ...r, status: prevStatus } : r)
+            );
+          }
+        }
+      });
   }
 
   function changeBookingStatus(id: string, newStatus: BookingStatus) {
