@@ -58,22 +58,33 @@ type PendingDoc = {
   note:     string;
 };
 
+/** One room line in the Create Booking form. Keyed by a stable UUID so rows
+ *  can be added/removed without index-shift issues in conflict maps. */
+type RoomFormRow = {
+  id:          string;   // crypto.randomUUID()
+  room:        string;
+  checkIn:     string;
+  checkOut:    string;
+  fixedRate:   string;   // auto-filled from room price; read-only display
+  bookingRate: string;   // editable — lower than fixedRate for discounts
+};
+
 type FormData = {
   guest:            string;
   phone:            string;
   email:            string;
-  room:             string;
-  checkIn:          string;
-  checkOut:         string;
   status:           BookingStatus;
   totalGuests:      number;
   additionalGuests: AdditionalGuest[];
-  // Rate fields — stored as strings for simple <input> bindings
-  fixedRate:        string;   // published/standard room rate per night (auto-filled from room)
-  bookingRate:      string;   // actual negotiated rate per night (editable for discounts)
-  // Payment fields — stored as strings so <input> bindings are simple
-  totalAmount:      string;   // total charge = bookingRate × nights (auto-computed, editable)
   amountPaid:       string;   // deposit/payment collected at booking time
+  rooms:            RoomFormRow[];
+};
+
+/** Flat errors for booking-level fields + per-row errors keyed by RoomFormRow.id. */
+type FormErrors = {
+  guest?: string;
+  email?: string;
+  rooms?: Record<string, { room?: string; checkIn?: string; checkOut?: string; bookingRate?: string; }>;
 };
 
 /** Form state for the Edit Booking modal. All number inputs stored as strings. */
@@ -100,6 +111,11 @@ function calcNights(checkIn: string, checkOut: string): number {
   return Math.max(0, Math.floor(
     (new Date(checkOut).getTime() - new Date(checkIn).getTime()) / 86_400_000
   ));
+}
+
+/** Convenience wrapper — number of nights for a RoomFormRow. */
+function rowNights(r: RoomFormRow): number {
+  return calcNights(r.checkIn, r.checkOut);
 }
 
 function formatDate(iso: string): string {
@@ -293,11 +309,16 @@ function dateOffsetISO(days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** Creates a blank room row with a fresh UUID. */
+function makeEmptyRoomRow(): RoomFormRow {
+  return { id: crypto.randomUUID(), room: "", checkIn: "", checkOut: "", fixedRate: "", bookingRate: "" };
+}
+
 const EMPTY_FORM: FormData = {
-  guest: "", phone: "", email: "", room: "", checkIn: "", checkOut: "",
+  guest: "", phone: "", email: "",
   status: "Confirmed", totalGuests: 1, additionalGuests: [],
-  fixedRate: "", bookingRate: "",
-  totalAmount: "", amountPaid: "0",
+  amountPaid: "0",
+  rooms: [makeEmptyRoomRow()],
 };
 
 const EMPTY_EDIT_FORM: EditFormData = {
@@ -418,8 +439,11 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   // ── Local UI state ─────────────────────────────────────────
   const [formOpen,     setFormOpen]     = useState<boolean>(!!initialRoom);
-  const [form,         setForm]         = useState<FormData>({ ...EMPTY_FORM, room: initialRoom ?? "" });
-  const [errors,       setErrors]       = useState<Partial<Record<keyof FormData, string>>>({});
+  const [form,         setForm]         = useState<FormData>({
+    ...EMPTY_FORM,
+    rooms: [{ ...makeEmptyRoomRow(), room: initialRoom ?? "" }],
+  });
+  const [errors,       setErrors]       = useState<FormErrors>({});
   const [successMsg,   setSuccessMsg]   = useState<string>("");
   const [activeFilter, setActiveFilter] = useState<string>("All");
   const [searchQuery,  setSearchQuery]  = useState<string>("");
@@ -502,38 +526,51 @@ export default function BookingsClient({ initialRoom }: Props) {
   const [confirmDiffs,   setConfirmDiffs]   = useState<DiffRow[] | null>(null);
   const [pendingChanges, setPendingChanges] = useState<import("@/services/bookingsService").UpdateBookingPayload | null>(null);
 
-  // ── Derived ────────────────────────────────────────────────
-  // Look up the room being entered in the live rooms list from context.
-  // This means newly added rooms (from the Rooms page) are immediately
-  // available for booking without a page reload.
-  const roomInfo = useMemo(() => {
-    const found = rooms.find(r => r.roomNumber === form.room.trim());
-    return found
-      ? { category: found.category, price: found.price, capacity: found.capacity }
-      : null;
-  }, [rooms, form.room]);
+  // ── Derived (Create Booking form) ──────────────────────────
 
-  const nights         = calcNights(form.checkIn, form.checkOut);
-  const estimatedTotal = roomInfo && nights > 0 ? roomInfo.price * nights : null;
+  /** Total nights across all room rows (sum). */
+  const totalNights = useMemo(
+    () => form.rooms.reduce((sum, r) => sum + rowNights(r), 0),
+    [form.rooms]
+  );
 
-  // Rate derived values
-  const fixedRateNum   = parseFloat(form.fixedRate)   || roomInfo?.price || 0;
-  const bookingRateNum = parseFloat(form.bookingRate)  || fixedRateNum;
-  const discountPerNight = fixedRateNum > 0 && bookingRateNum < fixedRateNum
-    ? fixedRateNum - bookingRateNum : 0;
-  const discountPct = fixedRateNum > 0 && discountPerNight > 0
-    ? Math.round((discountPerNight / fixedRateNum) * 100) : 0;
-  const totalSaving  = discountPerNight > 0 && nights > 0 ? discountPerNight * nights : 0;
+  /** Grand total charge: Σ bookingRate (or fixedRate or room price) × nights per row. */
+  const grandTotal = useMemo(
+    () => form.rooms.reduce((sum, r) => {
+      const n     = rowNights(r);
+      const found = rooms.find(x => x.roomNumber === r.room.trim());
+      const fixed   = parseFloat(r.fixedRate)  || found?.price || 0;
+      const booking = parseFloat(r.bookingRate) || fixed;
+      return sum + booking * n;
+    }, 0),
+    [form.rooms, rooms]
+  );
 
-  // ── Room availability (Layer A — real-time form feedback) ───
-  // Scans the live bookings array whenever the room number or dates change.
-  // Shows a warning banner BEFORE the user submits — no network call needed.
-  const roomConflict = useMemo((): Booking | null => {
-    const room = form.room.trim();
-    if (!room || !form.checkIn || !form.checkOut) return null;
-    if (calcNights(form.checkIn, form.checkOut) <= 0) return null;
-    return findRoomConflict(bookings, room, form.checkIn, form.checkOut) ?? null;
-  }, [bookings, form.room, form.checkIn, form.checkOut]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** Per-row conflict against existing bookings (Layer A real-time feedback). */
+  const roomConflicts = useMemo((): Record<string, Booking | null> => {
+    const result: Record<string, Booking | null> = {};
+    for (const r of form.rooms) {
+      if (!r.room || !r.checkIn || !r.checkOut || rowNights(r) <= 0) { result[r.id] = null; continue; }
+      result[r.id] = findRoomConflict(bookings, r.room.trim(), r.checkIn, r.checkOut) ?? null;
+    }
+    return result;
+  }, [bookings, form.rooms]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Per-row duplicate conflict — same room number with overlapping dates in sibling rows. */
+  const duplicateConflicts = useMemo((): Record<string, RoomFormRow | null> => {
+    const result: Record<string, RoomFormRow | null> = {};
+    for (const r of form.rooms) {
+      if (!r.room || !r.checkIn || !r.checkOut || rowNights(r) <= 0) { result[r.id] = null; continue; }
+      const sibling = form.rooms.find(other =>
+        other.id !== r.id &&
+        other.room.trim() !== "" &&
+        other.room.trim() === r.room.trim() &&
+        bookingDatesOverlap(other.checkIn, other.checkOut, r.checkIn, r.checkOut)
+      ) ?? null;
+      result[r.id] = sibling;
+    }
+    return result;
+  }, [form.rooms]);
 
   // Live amountPaid for the booking in the checkout confirmation modal.
   // Updates in real-time when the staff records a payment inside the modal.
@@ -543,11 +580,10 @@ export default function BookingsClient({ initialRoom }: Props) {
       ?? checkoutConfirm.amountPaid;
   }, [bookings, checkoutConfirm?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Payment derived values (updated live as the user types)
-  const totalAmountNum  = parseFloat(form.totalAmount) || 0;
-  const amountPaidNum   = parseFloat(form.amountPaid)  || 0;
-  const dueAmount       = Math.max(0, totalAmountNum - amountPaidNum);
-  const formPayStatus   = derivePaymentStatus(totalAmountNum, amountPaidNum);
+  // Payment derived values for the Create Booking form
+  const amountPaidNum   = parseFloat(form.amountPaid) || 0;
+  const dueAmount       = Math.max(0, grandTotal - amountPaidNum);
+  const formPayStatus   = derivePaymentStatus(grandTotal, amountPaidNum);
 
   const tabFilteredBookings =
     activeFilter === "All" ? bookings : bookings.filter(b => b.status === activeFilter);
@@ -662,7 +698,10 @@ export default function BookingsClient({ initialRoom }: Props) {
   // ── Effects ────────────────────────────────────────────────
   useEffect(() => {
     if (initialRoom) {
-      setForm(f => ({ ...f, room: initialRoom }));
+      setForm(f => ({
+        ...f,
+        rooms: f.rooms.map((r, i) => i === 0 ? { ...r, room: initialRoom } : r),
+      }));
       setFormOpen(true);
     }
   }, [initialRoom]);
@@ -758,30 +797,6 @@ export default function BookingsClient({ initialRoom }: Props) {
     return () => { document.body.style.overflow = ""; };
   }, [editTarget]);
 
-  // Auto-fill fixedRate and bookingRate when the room changes.
-  // Both start at the published room price. Staff can lower bookingRate to apply a discount.
-  useEffect(() => {
-    if (roomInfo) {
-      setForm(prev => ({
-        ...prev,
-        fixedRate:   String(roomInfo.price),
-        bookingRate: String(roomInfo.price),
-      }));
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomInfo?.price]);
-
-  // Auto-fill totalAmount from bookingRate × nights.
-  // Fires whenever the user edits bookingRate or when dates change.
-  // Staff can still override totalAmount directly for packages or flat rates.
-  useEffect(() => {
-    const rate = parseFloat(form.bookingRate) || 0;
-    if (rate > 0 && nights > 0) {
-      setForm(prev => ({ ...prev, totalAmount: String(rate * nights) }));
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.bookingRate, nights]);
-
   // Edit form: auto-recompute totalAmount when bookingRate or dates change.
   // Mirrors the create form behavior above. Pre-existing gap — edit form was
   // never wired for live recalc (surfaced during Phase 4 smoke testing).
@@ -795,10 +810,66 @@ export default function BookingsClient({ initialRoom }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editForm.bookingRate, editNights, editTarget?.id]);
 
-  // ── Core form field handler ─────────────────────────────────
-  function setField<K extends keyof FormData>(key: K, value: FormData[K]) {
+  // ── Core form field handler (booking-level fields only) ────
+  type BookingLevelField = "guest" | "phone" | "email" | "status" | "totalGuests" | "additionalGuests" | "amountPaid";
+  function setField<K extends BookingLevelField>(key: K, value: FormData[K]) {
     setForm(prev => ({ ...prev, [key]: value }));
-    if (errors[key]) setErrors(prev => ({ ...prev, [key]: undefined }));
+    if (key === "guest" && errors.guest) setErrors(prev => ({ ...prev, guest: undefined }));
+    if (key === "email" && errors.email) setErrors(prev => ({ ...prev, email: undefined }));
+  }
+
+  // ── Room row mutation helpers ───────────────────────────────
+
+  /** Append a new room row, copying dates from the first row for convenience. */
+  function addRoom() {
+    const first = form.rooms[0];
+    setForm(prev => ({
+      ...prev,
+      rooms: [...prev.rooms, { ...makeEmptyRoomRow(), checkIn: first?.checkIn ?? "", checkOut: first?.checkOut ?? "" }],
+    }));
+  }
+
+  /** Remove a room row by id, also cleaning up its errors. */
+  function removeRoom(id: string) {
+    setForm(prev => ({ ...prev, rooms: prev.rooms.filter(r => r.id !== id) }));
+    setErrors(prev => {
+      if (!prev.rooms) return prev;
+      const { [id]: _removed, ...rest } = prev.rooms;
+      return { ...prev, rooms: Object.keys(rest).length > 0 ? rest : undefined };
+    });
+  }
+
+  /** Patch a room row by id. Imperative rate auto-fill fires when "room" key is in patch. */
+  function updateRoom(id: string, patch: Partial<Omit<RoomFormRow, "id">>) {
+    setForm(prev => ({
+      ...prev,
+      rooms: prev.rooms.map(r => {
+        if (r.id !== id) return r;
+        const updated = { ...r, ...patch };
+        if ("room" in patch) {
+          const found = rooms.find(x => x.roomNumber === updated.room.trim());
+          if (found) {
+            updated.fixedRate   = String(found.price);
+            updated.bookingRate = String(found.price);
+          }
+        }
+        return updated;
+      }),
+    }));
+    // Clear per-row errors for the patched fields
+    if (errors.rooms?.[id]) {
+      const rowErrors = { ...errors.rooms[id] };
+      for (const k of Object.keys(patch) as Array<keyof typeof rowErrors>) {
+        if (k in rowErrors) delete rowErrors[k as keyof typeof rowErrors];
+      }
+      setErrors(prev => {
+        const merged = { ...prev.rooms, [id]: Object.keys(rowErrors).length > 0 ? rowErrors : undefined };
+        const filtered = Object.fromEntries(
+          Object.entries(merged).filter(([, v]) => v !== undefined)
+        ) as NonNullable<FormErrors["rooms"]>;
+        return { ...prev, rooms: Object.keys(filtered).length > 0 ? filtered : undefined };
+      });
+    }
   }
 
   // ── Additional guests handlers ──────────────────────────────
@@ -840,22 +911,28 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   // ── Validation ─────────────────────────────────────────────
   function validate(): boolean {
-    const e: Partial<Record<keyof FormData, string>> = {};
-    if (!form.guest.trim()) e.guest    = "Guest name is required.";
-    if (!form.room.trim())  e.room     = "Room number is required.";
-    if (!form.checkIn)      e.checkIn  = "Check-in date is required.";
-    if (!form.checkOut)     e.checkOut = "Check-out date is required.";
-    if (form.checkIn && form.checkOut && calcNights(form.checkIn, form.checkOut) <= 0)
-      e.checkOut = "Check-out must be after check-in.";
+    const e: FormErrors = {};
+    if (!form.guest.trim()) e.guest = "Guest name is required.";
     if (form.email.trim()) {
-      const em = form.email.trim();
-      const at = em.indexOf("@");
+      const em  = form.email.trim();
+      const at  = em.indexOf("@");
       const dot = em.lastIndexOf(".");
       if (at < 1 || dot < at + 2 || dot === em.length - 1)
         e.email = "Invalid email format.";
     }
+    const rowErrors: NonNullable<FormErrors["rooms"]> = {};
+    for (const r of form.rooms) {
+      const re: NonNullable<FormErrors["rooms"]>[string] = {};
+      if (!r.room.trim())  re.room     = "Room number is required.";
+      if (!r.checkIn)      re.checkIn  = "Check-in date is required.";
+      if (!r.checkOut)     re.checkOut = "Check-out date is required.";
+      if (r.checkIn && r.checkOut && calcNights(r.checkIn, r.checkOut) <= 0)
+        re.checkOut = "Check-out must be after check-in.";
+      if (Object.keys(re).length > 0) rowErrors[r.id] = re;
+    }
+    if (Object.keys(rowErrors).length > 0) e.rooms = rowErrors;
     setErrors(e);
-    return Object.keys(e).length === 0;
+    return !e.guest && !e.email && !e.rooms;
   }
 
   // ── Submit ─────────────────────────────────────────────────
@@ -875,40 +952,43 @@ export default function BookingsClient({ initialRoom }: Props) {
     }
     setPendingDocError("");
 
-    // ── Layer B: double-booking guard ─────────────────────────
+    // ── Layer B: double-booking guard (per-row) ───────────────
     // Re-check against the live bookings array right before we commit.
-    // This catches any race where the useMemo warning was dismissed or
-    // the form was submitted programmatically.
-    const conflict = findRoomConflict(bookings, form.room.trim(), form.checkIn, form.checkOut);
-    if (conflict) {
-      console.warn(
-        `[handleSubmit] double-booking blocked — room ${form.room} conflicts with` +
-        ` booking ${conflict.id} (${conflict.checkIn} – ${conflict.checkOut})`
+    let layerBConflict = false;
+    const layerBErrors: NonNullable<FormErrors["rooms"]> = {};
+    for (const r of form.rooms) {
+      if (!r.room.trim()) continue;
+      const extConflict = findRoomConflict(bookings, r.room.trim(), r.checkIn, r.checkOut);
+      if (extConflict) {
+        console.warn(
+          `[handleSubmit] double-booking blocked — room ${r.room} conflicts with` +
+          ` booking ${extConflict.id} (${extConflict.checkIn} – ${extConflict.checkOut})`
+        );
+        layerBErrors[r.id] = { room: `Room ${r.room} is unavailable (conflicts with booking ${extConflict.id}).` };
+        layerBConflict = true;
+        continue;
+      }
+      const dupConflict = form.rooms.find(other =>
+        other.id !== r.id &&
+        other.room.trim() !== "" &&
+        other.room.trim() === r.room.trim() &&
+        bookingDatesOverlap(other.checkIn, other.checkOut, r.checkIn, r.checkOut)
       );
-      setErrors(prev => ({
-        ...prev,
-        room: "Room is unavailable for this date range. Please select another room or different dates.",
-      }));
+      if (dupConflict) {
+        layerBErrors[r.id] = { room: `Room ${r.room} is already added for overlapping dates in this booking.` };
+        layerBConflict = true;
+      }
+    }
+    if (layerBConflict) {
+      setErrors(prev => ({ ...prev, rooms: { ...prev.rooms, ...layerBErrors } }));
       return;
     }
     // ─────────────────────────────────────────────────────────
-
-    const n    = calcNights(form.checkIn, form.checkOut);
-    const info = rooms.find(r => r.roomNumber === form.room.trim());
 
     // Strip empty rows from additionalGuests before saving
     const cleanedExtras = form.additionalGuests
       .filter(g => g.name.trim() !== "")
       .map(g => ({ name: g.name.trim(), nationality: g.nationality.trim() }));
-
-    // Resolve amounts — fall back to room estimate if staff left totalAmount blank
-    const resolvedTotal = totalAmountNum > 0
-      ? totalAmountNum
-      : info ? info.price * n : 0;
-    const resolvedPaid  = amountPaidNum;
-
-    const resolvedFixedRate   = parseFloat(form.fixedRate)   || info?.price || 0;
-    const resolvedBookingRate = parseFloat(form.bookingRate) || resolvedFixedRate;
 
     const newInput: CreateBookingInput = {
       id:           `BK-${nextBookingId}`,
@@ -920,17 +1000,23 @@ export default function BookingsClient({ initialRoom }: Props) {
       additionalGuests: cleanedExtras,
       // Ensure count is never less than actual named guests + primary
       totalGuests:      Math.max(form.totalGuests, cleanedExtras.length + 1),
-      rooms: [{
-        roomNumber:   form.room.trim(),
-        roomCategory: info?.category ?? "Unknown",
-        fixedRate:    resolvedFixedRate,
-        bookingRate:  resolvedBookingRate,
-        checkIn:      form.checkIn,   // YYYY-MM-DD from <input type="date">
-        checkOut:     form.checkOut,
-        nights:       n,
-      }],
-      totalAmount:      resolvedTotal,
-      amountPaid:       resolvedPaid,
+      rooms: form.rooms.map(r => {
+        const info    = rooms.find(x => x.roomNumber === r.room.trim());
+        const n       = rowNights(r);
+        const fixed   = parseFloat(r.fixedRate)  || info?.price || 0;
+        const booking = parseFloat(r.bookingRate) || fixed;
+        return {
+          roomNumber:   r.room.trim(),
+          roomCategory: info?.category ?? "Unknown",
+          fixedRate:    fixed,
+          bookingRate:  booking,
+          checkIn:      r.checkIn,
+          checkOut:     r.checkOut,
+          nights:       n,
+        };
+      }),
+      totalAmount:      grandTotal,
+      amountPaid:       amountPaidNum,
       amountPaidMethod: bookingPayMethod,
       status:           form.status,
     };
@@ -940,9 +1026,13 @@ export default function BookingsClient({ initialRoom }: Props) {
     const guestSummary = cleanedExtras.length > 0
       ? ` · ${newInput.totalGuests} guests total`
       : "";
-    const paymentSummary = resolvedPaid > 0
-      ? ` · ৳${resolvedPaid.toLocaleString()} paid`
+    const paymentSummary = amountPaidNum > 0
+      ? ` · ৳${amountPaidNum.toLocaleString()} paid`
       : " · payment pending";
+    const roomsSummary = newInput.rooms.length === 1
+      ? `Room ${newInput.rooms[0].roomNumber}`
+      : `${newInput.rooms.length} rooms (${newInput.rooms.map(r => r.roomNumber).join(", ")})`;
+    const reservedVerb = newInput.rooms.length === 1 ? "is" : "are";
 
     // ── Upload staged documents (if any) ───────────────────────
     const docsToUpload = pendingDocs.filter(d => d.docType && d.file);
@@ -976,23 +1066,24 @@ export default function BookingsClient({ initialRoom }: Props) {
 
       if (uploadFailed) {
         setSuccessMsg(
-          `Booking ${newInput.id} created for ${newInput.primaryGuest.name}${guestSummary}${paymentSummary} · Room ${newInput.rooms[0].roomNumber} is now Reserved — ⚠️ Document upload failed. You can upload documents later from the Documents button.`
+          `Booking ${newInput.id} created for ${newInput.primaryGuest.name}${guestSummary}${paymentSummary} · ${roomsSummary} ${reservedVerb} now Reserved — ⚠️ Document upload failed. You can upload documents later from the Documents button.`
         );
       } else {
         setSuccessMsg(
-          `Booking ${newInput.id} created for ${newInput.primaryGuest.name}${guestSummary}${paymentSummary} · Room ${newInput.rooms[0].roomNumber} is now Reserved`
+          `Booking ${newInput.id} created for ${newInput.primaryGuest.name}${guestSummary}${paymentSummary} · ${roomsSummary} ${reservedVerb} now Reserved`
         );
       }
     } else {
       setSuccessMsg(
-        `Booking ${newInput.id} created for ${newInput.primaryGuest.name}${guestSummary}${paymentSummary} · Room ${newInput.rooms[0].roomNumber} is now Reserved`
+        `Booking ${newInput.id} created for ${newInput.primaryGuest.name}${guestSummary}${paymentSummary} · ${roomsSummary} ${reservedVerb} now Reserved`
       );
     }
 
     setPendingDocs([]);
     setPendingDocError("");
-    setForm(EMPTY_FORM);
+    setForm({ ...EMPTY_FORM, rooms: [makeEmptyRoomRow()] });
     setBookingPayMethod("cash");
+    setErrors({});
     setFormOpen(false);
     setActiveFilter("All");
     setSearchQuery("");
@@ -1002,7 +1093,10 @@ export default function BookingsClient({ initialRoom }: Props) {
   }
 
   function handleCancel() {
-    setForm({ ...EMPTY_FORM, room: initialRoom ?? "" });
+    setForm({
+      ...EMPTY_FORM,
+      rooms: initialRoom ? [{ ...makeEmptyRoomRow(), room: initialRoom }] : [makeEmptyRoomRow()],
+    });
     setBookingPayMethod("cash");
     setErrors({});
     setPendingDocs([]);
@@ -1667,19 +1761,26 @@ export default function BookingsClient({ initialRoom }: Props) {
               <path d="M3 10h18M8 2v4M16 2v4M8 14h2M8 18h2M14 14h2M14 18h2"/>
             </svg>
           </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-[13.5px] font-semibold text-amber-900">Creating booking for Room {initialRoom}</p>
-            <p className="text-[12.5px] text-amber-700 mt-0.5">
-              {roomInfo
-                ? `${roomInfo.category} · $${roomInfo.price}/night · up to ${roomInfo.capacity} guest${roomInfo.capacity !== 1 ? "s" : ""} — fill in the details below.`
-                : "Fill in the guest details below to confirm the reservation."}
-            </p>
-          </div>
-          {roomInfo && (
-            <span className="flex-shrink-0 text-[12px] font-bold text-amber-700 bg-amber-100 border border-amber-300 px-3 py-1.5 rounded-lg whitespace-nowrap">
-              {roomInfo.category}
-            </span>
-          )}
+          {(() => {
+              const firstRowInfo = rooms.find(r => r.roomNumber === (form.rooms[0]?.room ?? "").trim());
+              return (
+                <>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[13.5px] font-semibold text-amber-900">Creating booking for Room {initialRoom}</p>
+                    <p className="text-[12.5px] text-amber-700 mt-0.5">
+                      {firstRowInfo
+                        ? `${firstRowInfo.category} · ৳${firstRowInfo.price}/night · up to ${firstRowInfo.capacity} guest${firstRowInfo.capacity !== 1 ? "s" : ""} — fill in the details below.`
+                        : "Fill in the guest details below to confirm the reservation."}
+                    </p>
+                  </div>
+                  {firstRowInfo && (
+                    <span className="flex-shrink-0 text-[12px] font-bold text-amber-700 bg-amber-100 border border-amber-300 px-3 py-1.5 rounded-lg whitespace-nowrap">
+                      {firstRowInfo.category}
+                    </span>
+                  )}
+                </>
+              );
+            })()}
         </div>
       )}
 
@@ -1712,169 +1813,290 @@ export default function BookingsClient({ initialRoom }: Props) {
           <form onSubmit={handleSubmit} noValidate>
 
             {/* ── Section 1: Reservation details ── */}
-            <div className="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+            <div className="p-6 space-y-5">
 
-              {/* Primary Guest Name */}
-              <div>
-                <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                  Primary Guest <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  placeholder="Responsible guest name"
-                  value={form.guest}
-                  onChange={e => setField("guest", e.target.value)}
-                  className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
-                    placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                    ${errors.guest ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
-                />
-                {errors.guest && <p className="mt-1 text-[11.5px] text-rose-600">{errors.guest}</p>}
-              </div>
+              {/* Booking-level fields: 4-col grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
 
-              {/* Phone */}
-              <div>
-                <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                  Phone Number
-                </label>
-                <input
-                  type="tel"
-                  placeholder="e.g. +1 617 555 0101"
-                  value={form.phone}
-                  onChange={e => setField("phone", e.target.value)}
-                  className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
-                    placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
-                />
-              </div>
-
-              {/* Email (optional) */}
-              <div>
-                <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                  Email <span className="text-slate-400 font-normal normal-case">(optional)</span>
-                </label>
-                <input
-                  type="email"
-                  placeholder="e.g. guest@example.com"
-                  value={form.email}
-                  onChange={e => setField("email", e.target.value)}
-                  className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
-                    placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                    ${errors.email ? "border-rose-400 bg-rose-50" : "border-slate-200"}`}
-                />
-                {errors.email && (
-                  <p className="mt-1 text-[11.5px] text-rose-500">{errors.email}</p>
-                )}
-              </div>
-
-              {/* Room Number */}
-              <div>
-                <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                  Room Number <span className="text-rose-500">*</span>
-                </label>
-                <div className="relative">
+                {/* Primary Guest Name */}
+                <div>
+                  <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
+                    Primary Guest <span className="text-rose-500">*</span>
+                  </label>
                   <input
                     type="text"
-                    placeholder="e.g. 204"
-                    value={form.room}
-                    onChange={e => setField("room", e.target.value)}
+                    placeholder="Responsible guest name"
+                    value={form.guest}
+                    onChange={e => setField("guest", e.target.value)}
                     className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
                       placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                      ${errors.room ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
+                      ${errors.guest ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
                   />
-                  {roomInfo && (
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded pointer-events-none">
-                      {roomInfo.category}
-                    </span>
+                  {errors.guest && <p className="mt-1 text-[11.5px] text-rose-600">{errors.guest}</p>}
+                </div>
+
+                {/* Phone */}
+                <div>
+                  <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
+                    Phone Number
+                  </label>
+                  <input
+                    type="tel"
+                    placeholder="e.g. +1 617 555 0101"
+                    value={form.phone}
+                    onChange={e => setField("phone", e.target.value)}
+                    className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                      placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
+                  />
+                </div>
+
+                {/* Email (optional) */}
+                <div>
+                  <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
+                    Email <span className="text-slate-400 font-normal normal-case">(optional)</span>
+                  </label>
+                  <input
+                    type="email"
+                    placeholder="e.g. guest@example.com"
+                    value={form.email}
+                    onChange={e => setField("email", e.target.value)}
+                    className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
+                      placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                      ${errors.email ? "border-rose-400 bg-rose-50" : "border-slate-200"}`}
+                  />
+                  {errors.email && (
+                    <p className="mt-1 text-[11.5px] text-rose-500">{errors.email}</p>
                   )}
                 </div>
-                {errors.room && <p className="mt-1 text-[11.5px] text-rose-600">{errors.room}</p>}
-              </div>
 
-              {/* Check-in */}
-              <div>
-                <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                  Check-in Date <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="date"
-                  value={form.checkIn}
-                  onChange={e => setField("checkIn", e.target.value)}
-                  className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
-                    focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                    ${errors.checkIn ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
-                />
-                {errors.checkIn && <p className="mt-1 text-[11.5px] text-rose-600">{errors.checkIn}</p>}
-                <p className="mt-1 text-[11.5px] text-slate-500">Past dates allowed for backdated entries.</p>
-              </div>
-
-              {/* Check-out */}
-              <div>
-                <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                  Check-out Date <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="date"
-                  min={form.checkIn || TODAY}
-                  value={form.checkOut}
-                  onChange={e => setField("checkOut", e.target.value)}
-                  className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
-                    focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                    ${errors.checkOut ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
-                />
-                {errors.checkOut && <p className="mt-1 text-[11.5px] text-rose-600">{errors.checkOut}</p>}
-              </div>
-
-              {/* Booking Status */}
-              <div>
-                <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                  Booking Status
-                </label>
-                <select
-                  value={form.status}
-                  onChange={e => setField("status", e.target.value as BookingStatus)}
-                  className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
-                    focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition appearance-none cursor-pointer"
-                >
-                  <option value="Confirmed">Confirmed</option>
-                  <option value="Checked In">Checked In</option>
-                </select>
-              </div>
-
-              {/* ── Stay duration summary (hotel timing policy) ── */}
-              {form.checkIn && form.checkOut && nights > 0 && (
-                <div className="col-span-full flex items-center gap-3 bg-sky-50 border border-sky-200 rounded-lg px-4 py-2.5">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-sky-500 flex-shrink-0">
-                    <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
-                  </svg>
-                  <p className="text-[13px] leading-relaxed">
-                    <span className="font-bold text-sky-800">{dayName(form.checkIn)}</span>
-                    {" "}<span className="text-sky-700">{formatDateShort(form.checkIn)}</span>
-                    {" "}<span className="text-sky-400 mx-0.5">→</span>{" "}
-                    <span className="font-bold text-sky-800">{dayName(form.checkOut)}</span>
-                    {" "}<span className="text-sky-700">{formatDateShort(form.checkOut)}</span>
-                    {" = "}
-                    <span className="font-bold text-sky-900">{nights} night{nights !== 1 ? "s" : ""}</span>
-                    <span className="text-sky-500 text-[11.5px] ml-2">· Check-in 12:00 PM · Check-out 11:59 AM</span>
-                  </p>
+                {/* Booking Status */}
+                <div>
+                  <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
+                    Booking Status
+                  </label>
+                  <select
+                    value={form.status}
+                    onChange={e => setField("status", e.target.value as BookingStatus)}
+                    className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                      focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition appearance-none cursor-pointer"
+                  >
+                    <option value="Confirmed">Confirmed</option>
+                    <option value="Checked In">Checked In</option>
+                  </select>
                 </div>
-              )}
+              </div>
 
-              {/* ── Room availability warning (Layer A — live feedback) ── */}
-              {roomConflict && (
-                <div className="col-span-full flex items-start gap-2.5 bg-rose-50 border border-rose-200 rounded-lg px-4 py-3">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5">
-                    <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-                    <path d="M12 9v4M12 17h.01"/>
-                  </svg>
-                  <p className="text-[12px] text-rose-700 leading-relaxed">
-                    <span className="font-semibold">Room unavailable.</span>{" "}
-                    Room {form.room} is already booked{" "}
-                    <span className="font-medium">{roomConflict.checkIn} – {roomConflict.checkOut}</span>{" "}
-                    (booking <span className="font-mono">{roomConflict.id}</span>,{" "}
-                    status: {roomConflict.status}).{" "}
-                    Please select another room or different dates.
-                  </p>
+              {/* ── Rooms sub-section ── */}
+              <div>
+                <div className="flex items-center gap-3 mb-4">
+                  <span className="text-[11px] font-bold text-slate-400 uppercase tracking-widest whitespace-nowrap">
+                    Rooms
+                  </span>
+                  <div className="flex-1 h-px bg-slate-100" />
+                  <button
+                    type="button"
+                    onClick={addRoom}
+                    className="flex items-center gap-1.5 text-[12px] font-semibold text-amber-600 hover:text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-3 py-1.5 rounded-lg transition-colors"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3.5 h-3.5">
+                      <path d="M12 5v14M5 12h14"/>
+                    </svg>
+                    Add Room
+                  </button>
                 </div>
-              )}
+
+                <div className="space-y-4">
+                  {form.rooms.map((r, idx) => {
+                    const rowInfo     = rooms.find(x => x.roomNumber === r.room.trim());
+                    const n           = rowNights(r);
+                    const rowConflict = roomConflicts[r.id] ?? null;
+                    const dupConflict = duplicateConflicts[r.id] ?? null;
+                    const rowErr      = errors.rooms?.[r.id];
+                    const fixedNum    = parseFloat(r.fixedRate)   || rowInfo?.price || 0;
+                    const bookingNum  = parseFloat(r.bookingRate) || fixedNum;
+                    const discPerNight = fixedNum > 0 && bookingNum < fixedNum ? fixedNum - bookingNum : 0;
+                    const discPct      = fixedNum > 0 && discPerNight > 0 ? Math.round((discPerNight / fixedNum) * 100) : 0;
+                    return (
+                      <div key={r.id} className="border border-slate-200 rounded-xl bg-slate-50/50 p-4 space-y-4">
+
+                        {/* Card header */}
+                        <div className="flex items-center justify-between">
+                          <span className="text-[12px] font-bold text-slate-500 uppercase tracking-wide">
+                            Room {idx + 1}
+                          </span>
+                          {form.rooms.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => removeRoom(r.id)}
+                              className="w-7 h-7 flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                              title="Remove this room"
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5">
+                                <path d="M18 6L6 18M6 6l12 12"/>
+                              </svg>
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Room fields grid */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+
+                          {/* Room Number */}
+                          <div>
+                            <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                              Room Number <span className="text-rose-500">*</span>
+                            </label>
+                            <div className="relative">
+                              <input
+                                type="text"
+                                placeholder="e.g. 204"
+                                value={r.room}
+                                onChange={e => updateRoom(r.id, { room: e.target.value })}
+                                className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
+                                  placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                                  ${rowErr?.room ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
+                              />
+                              {rowInfo && (
+                                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded pointer-events-none">
+                                  {rowInfo.category}
+                                </span>
+                              )}
+                            </div>
+                            {rowErr?.room && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.room}</p>}
+                          </div>
+
+                          {/* Check-in */}
+                          <div>
+                            <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                              Check-in <span className="text-rose-500">*</span>
+                            </label>
+                            <input
+                              type="date"
+                              value={r.checkIn}
+                              onChange={e => updateRoom(r.id, { checkIn: e.target.value })}
+                              className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
+                                focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                                ${rowErr?.checkIn ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
+                            />
+                            {rowErr?.checkIn && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.checkIn}</p>}
+                            <p className="mt-1 text-[11px] text-slate-400">Past dates allowed.</p>
+                          </div>
+
+                          {/* Check-out */}
+                          <div>
+                            <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                              Check-out <span className="text-rose-500">*</span>
+                            </label>
+                            <input
+                              type="date"
+                              min={r.checkIn || TODAY}
+                              value={r.checkOut}
+                              onChange={e => updateRoom(r.id, { checkOut: e.target.value })}
+                              className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
+                                focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                                ${rowErr?.checkOut ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
+                            />
+                            {rowErr?.checkOut && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.checkOut}</p>}
+                          </div>
+
+                          {/* Booking Rate */}
+                          <div>
+                            <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                              Rate / Night
+                            </label>
+                            <div className="relative">
+                              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none text-[13px]">৳</span>
+                              <input
+                                type="number"
+                                min={0}
+                                step="0.01"
+                                placeholder={rowInfo ? String(rowInfo.price) : "0.00"}
+                                value={r.bookingRate}
+                                onChange={e => updateRoom(r.id, { bookingRate: e.target.value })}
+                                onWheel={e => (e.target as HTMLInputElement).blur()}
+                                className={`w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
+                                  placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                                  [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none
+                                  ${rowErr?.bookingRate ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
+                              />
+                            </div>
+                            {r.fixedRate && r.fixedRate !== r.bookingRate && (
+                              <p className="mt-1 text-[11px] text-slate-400">
+                                Published: ৳{r.fixedRate}
+                              </p>
+                            )}
+                            {rowErr?.bookingRate && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.bookingRate}</p>}
+                          </div>
+                        </div>
+
+                        {/* Discount badge */}
+                        {discPerNight > 0 && (
+                          <div className="flex items-center gap-2 text-[12px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 flex-shrink-0">
+                              <path d="M20 12V22H4V12"/><path d="M22 7H2v5h20V7z"/><path d="M12 22V7"/><path d="M12 7H7.5a2.5 2.5 0 010-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 000-5C13 2 12 7 12 7z"/>
+                            </svg>
+                            <span>
+                              <span className="font-bold">{discPct}% discount</span>
+                              {" · "}৳{discPerNight.toLocaleString()}/night off
+                              {n > 0 && <span className="font-bold"> · Total saving: ৳{(discPerNight * n).toLocaleString()}</span>}
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Stay summary strip */}
+                        {n > 0 && (
+                          <div className="flex items-center gap-3 bg-sky-50 border border-sky-200 rounded-lg px-4 py-2.5">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-sky-500 flex-shrink-0">
+                              <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                            </svg>
+                            <p className="text-[13px] leading-relaxed">
+                              <span className="font-bold text-sky-800">{dayName(r.checkIn)}</span>
+                              {" "}<span className="text-sky-700">{formatDateShort(r.checkIn)}</span>
+                              {" "}<span className="text-sky-400 mx-0.5">→</span>{" "}
+                              <span className="font-bold text-sky-800">{dayName(r.checkOut)}</span>
+                              {" "}<span className="text-sky-700">{formatDateShort(r.checkOut)}</span>
+                              {" = "}
+                              <span className="font-bold text-sky-900">{n} night{n !== 1 ? "s" : ""}</span>
+                              {rowInfo && (
+                                <span className="text-sky-600 ml-2 font-medium">
+                                  · ৳{(bookingNum * n).toLocaleString()} total
+                                </span>
+                              )}
+                              <span className="text-sky-500 text-[11.5px] ml-2">· Check-in 12:00 PM · Check-out 11:59 AM</span>
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Room conflict warnings (Layer A) */}
+                        {rowConflict && (
+                          <div className="flex items-start gap-2.5 bg-rose-50 border border-rose-200 rounded-lg px-4 py-3">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5">
+                              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/>
+                            </svg>
+                            <p className="text-[12px] text-rose-700 leading-relaxed">
+                              <span className="font-semibold">Room unavailable.</span>{" "}
+                              Room {r.room} is already booked{" "}
+                              <span className="font-medium">{rowConflict.checkIn} – {rowConflict.checkOut}</span>{" "}
+                              (booking <span className="font-mono">{rowConflict.id}</span>, status: {rowConflict.status}).
+                            </p>
+                          </div>
+                        )}
+                        {!rowConflict && dupConflict && (
+                          <div className="flex items-start gap-2.5 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5">
+                              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/>
+                            </svg>
+                            <p className="text-[12px] text-amber-800 leading-relaxed">
+                              <span className="font-semibold">Duplicate room.</span>{" "}
+                              Room {r.room} appears more than once with overlapping dates in this booking.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
 
             {/* ── Section 2: Guests ── */}
@@ -1886,11 +2108,6 @@ export default function BookingsClient({ initialRoom }: Props) {
                   Guests
                 </span>
                 <div className="flex-1 h-px bg-slate-100" />
-                {roomInfo && (
-                  <span className="text-[11.5px] text-slate-400 whitespace-nowrap">
-                    Room capacity: up to <span className="font-semibold text-slate-600">{roomInfo.capacity}</span> guest{roomInfo.capacity !== 1 ? "s" : ""}
-                  </span>
-                )}
               </div>
 
               {/* Total Guests */}
@@ -2123,113 +2340,21 @@ export default function BookingsClient({ initialRoom }: Props) {
                 <div className="flex-1 h-px bg-slate-100" />
               </div>
 
-              {/* ── Rate fields ── */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-5">
-
-                {/* Fixed Room Rate */}
-                <div>
-                  <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                    Fixed Room Rate <span className="text-slate-400 font-normal normal-case">(per night)</span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">৳</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      placeholder="Standard published rate"
-                      value={form.fixedRate}
-                      onChange={e => setField("fixedRate", e.target.value)}
-                      onWheel={e => (e.target as HTMLInputElement).blur()}
-                      className="w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-slate-50 border border-slate-200 rounded-lg
-                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                        [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                    />
-                  </div>
-                  <p className="mt-1 text-[11.5px] text-slate-400">Published rate. Auto-filled from room price.</p>
-                </div>
-
-                {/* Booking Rate / Discounted Rate */}
-                <div>
-                  <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                    Booking Rate <span className="text-slate-400 font-normal normal-case">(per night)</span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">৳</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      placeholder="Actual negotiated rate"
-                      value={form.bookingRate}
-                      onChange={e => setField("bookingRate", e.target.value)}
-                      onWheel={e => (e.target as HTMLInputElement).blur()}
-                      className="w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
-                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                        [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                    />
-                  </div>
-                  <p className="mt-1 text-[11.5px] text-slate-400">Lower than fixed rate for discounts. Sets the total.</p>
-                </div>
-
-                {/* Discount / Rate Info Strip */}
-                {fixedRateNum > 0 && bookingRateNum > 0 && fixedRateNum !== bookingRateNum && (
-                  <div className={`sm:col-span-2 flex items-center gap-4 px-4 py-2.5 rounded-lg border text-[12px] font-medium ${
-                    discountPerNight > 0
-                      ? "bg-emerald-50 border-emerald-200 text-emerald-800"
-                      : "bg-amber-50 border-amber-200 text-amber-800"
-                  }`}>
-                    {discountPerNight > 0 ? (
-                      <>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 flex-shrink-0">
-                          <path d="M20 12V22H4V12"/><path d="M22 7H2v5h20V7z"/><path d="M12 22V7"/><path d="M12 7H7.5a2.5 2.5 0 010-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 000-5C13 2 12 7 12 7z"/>
-                        </svg>
-                        <span>
-                          <span className="font-bold">{discountPct}% discount</span>
-                          {" · "}৳{discountPerNight.toLocaleString()}/night off
-                          {nights > 0 && <span className="font-bold"> · Total saving: ৳{totalSaving.toLocaleString()}</span>}
-                        </span>
-                      </>
-                    ) : (
-                      <>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 flex-shrink-0">
-                          <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
-                        </svg>
-                        <span>
-                          <span className="font-bold">Custom rate</span> — ${(bookingRateNum - fixedRateNum).toLocaleString()}/night above standard published rate
-                        </span>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
 
-                {/* Total Amount */}
+                {/* Grand Total — read-only, derived from room rows */}
                 <div>
                   <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                    Total Amount (BDT)
+                    Grand Total (BDT)
                   </label>
                   <div className="relative">
-                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">
-                      ৳
-                    </span>
-                    <input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      placeholder="0.00"
-                      value={form.totalAmount}
-                      onChange={e => setField("totalAmount", e.target.value)}
-                      onWheel={e => (e.target as HTMLInputElement).blur()}
-                      className="w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
-                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                        [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                    />
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">৳</span>
+                    <div className="w-full pl-7 pr-3.5 py-2.5 text-[13.5px] font-semibold text-slate-800 bg-slate-50 border border-slate-200 rounded-lg">
+                      {grandTotal > 0 ? grandTotal.toLocaleString() : <span className="text-slate-400 font-normal">0.00</span>}
+                    </div>
                   </div>
                   <p className="mt-1 text-[11.5px] text-slate-400">
-                    Auto-computed from booking rate × nights. Override for flat-rate packages.
+                    Auto-computed from all room rows · {form.rooms.length} room{form.rooms.length !== 1 ? "s" : ""} · {totalNights} night{totalNights !== 1 ? "s" : ""}
                   </p>
                 </div>
 
@@ -2319,32 +2444,28 @@ export default function BookingsClient({ initialRoom }: Props) {
             </div>
 
             {/* ── Booking summary strip ── */}
-            {nights > 0 && (
+            {totalNights > 0 && (
               <div className="mx-6 mb-4 bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2">
                 <div className="text-center">
-                  <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Nights</p>
-                  <p className="text-[18px] font-bold text-slate-800">{nights}</p>
+                  <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Room{form.rooms.length !== 1 ? "s" : ""}</p>
+                  <p className="text-[18px] font-bold text-slate-800">{form.rooms.length}</p>
+                </div>
+                <div className="h-8 w-px bg-slate-200" />
+                <div className="text-center">
+                  <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Total Nights</p>
+                  <p className="text-[18px] font-bold text-slate-800">{totalNights}</p>
                 </div>
                 <div className="h-8 w-px bg-slate-200" />
                 <div className="text-center">
                   <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Guests</p>
                   <p className="text-[18px] font-bold text-slate-800">{form.totalGuests}</p>
                 </div>
-                {roomInfo && (
-                  <>
-                    <div className="h-8 w-px bg-slate-200" />
-                    <div className="text-center">
-                      <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Rate / Night</p>
-                      <p className="text-[18px] font-bold text-slate-800">৳{roomInfo.price}</p>
-                    </div>
-                  </>
-                )}
-                {estimatedTotal != null && (
+                {grandTotal > 0 && (
                   <>
                     <div className="h-8 w-px bg-slate-200" />
                     <div className="text-center">
                       <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Total</p>
-                      <p className="text-[18px] font-bold text-slate-800">৳{totalAmountNum > 0 ? totalAmountNum.toLocaleString() : estimatedTotal.toLocaleString()}</p>
+                      <p className="text-[18px] font-bold text-slate-800">৳{grandTotal.toLocaleString()}</p>
                     </div>
                     <div className="h-8 w-px bg-slate-200" />
                     <div className="text-center">
@@ -2361,7 +2482,9 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </>
                 )}
                 <div className="flex-1" />
-                <p className="text-[11.5px] text-slate-400 italic">Room will be marked Reserved on confirm</p>
+                <p className="text-[11.5px] text-slate-400 italic">
+                  {form.rooms.length === 1 ? "Room" : "Rooms"} will be marked Reserved on confirm
+                </p>
               </div>
             )}
 
