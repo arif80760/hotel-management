@@ -524,6 +524,47 @@ and use `<PrintButtons />` + `<LetterHead />` from `components/invoice/`.
 - **[Resolved Day 2 Block 3] `recordPayment()` cap now uses true-due formula**: Mirrors `calcTrueDue()`. Previous naive formula (`total_amount − paid_amount`) silently dropped payments when `extra_charge_amount` existed, causing React optimistic state to permanently diverge from DB `paid_amount`. Fix: service now SELECTs all adjustment columns and computes `trueDue = total + extraCharge − earlyDeduction − additionalDiscount − paid`. Throws on positive-amount request with no balance so HotelContext `.catch()` rolls back the optimistic update.
 
 ### Known Issues / Technical Debt
+
+### Known Bug — fn_sync_payment_status doesn't account for extras
+
+Location: Database trigger `fn_sync_payment_status` (authoritative body in `sql/schema/05-triggers.sql`)
+
+Problem: Trigger compares `paid_amount >= total_amount` to mark a booking as "paid". Does NOT include `extra_charge_amount`, `early_deduction_amount`, or `additional_discount_amount`.
+
+Same pattern as the `recordPayment` cap bug fixed in Block 3 (Day 2). The trigger sets `payment_status = 'paid'` when `paid_amount = total_amount`, but actual balance can still be outstanding when extra charges > deductions + discounts.
+
+Effect: `bookings.payment_status` field can be wrong, causing the Bookings list to display a "Paid" badge incorrectly. The invoice page shows the correct balance (it computes from payments via `calcTrueDue`), so guests see truth. But staff see a misleading "Paid" status in the list.
+
+Fix needed: Update trigger to use trueDue formula:
+```
+paid_amount >= (total_amount
+                + COALESCE(extra_charge_amount, 0)
+                - COALESCE(early_deduction_amount, 0)
+                - COALESCE(additional_discount_amount, 0))
+```
+
+Priority: Medium. Does not block multi-room work but should be fixed soon. Affects any single-room booking with extra charges (e.g. extra bed feature). Also update `sql/schema/05-triggers.sql` when fixed in DB.
+
+### Known Bug — fn_sync_paid_amount doesn't handle UPDATE/DELETE
+
+Location: Database trigger `fn_sync_paid_amount` (authoritative body in `sql/schema/05-triggers.sql`)
+
+Problem: Trigger fires only on `INSERT` (incremental `+= NEW.amount` pattern). If a payment row is `UPDATE`d (e.g., admin corrects a typo) or `DELETE`d (e.g., admin removes an erroneous entry), `bookings.paid_amount` silently drifts and never re-syncs.
+
+Effect:
+- **Currently safe**: app code never UPDATEs or DELETEs payment rows — only INSERTs new ones via `recordPayment()`.
+- **Risk**: any direct DB edit of the `payments` table (e.g., via Supabase Dashboard table editor) will break `bookings.paid_amount` with no error.
+- **Recovery**: requires a manual `UPDATE bookings SET paid_amount = (SELECT COALESCE(SUM(amount),0) FROM payments WHERE booking_id = ...)` to resync.
+
+Fix options (when prioritized):
+- **A)** Expand trigger to handle `UPDATE`/`DELETE` with full re-aggregate (`SELECT COALESCE(SUM(amount), 0) FROM payments WHERE booking_id = ...`)
+- **B)** Document app-layer-only INSERT policy formally and add a DB constraint or RLS policy to prevent payment edits
+- **C)** Add a Supabase Dashboard guard / admin UI that recomputes on demand
+
+Priority: Low. Does not manifest in current app behaviour. Revisit when admin payment-correction UI is needed.
+
+---
+
 - **`createBooking` atomicity**: If the booking INSERT succeeds but the initial payment INSERT fails (e.g., 23514 `chk_paid_not_exceed_total` when paid > total), the booking row is left as a phantom with paid_amount=0. UI validation in the create form now prevents the most common cause (paid > total), but a true fix requires a Postgres RPC function wrapping booking + payment in a transaction. Tracked as future work.
 
 - **Stale "Confirmed" booking handling (planned)**: When today's date > booking's `check_in_date` AND status is still `"Confirmed"`, the booking is in a stale state. Two real-world causes: (1) guest stayed but staff forgot to click Check In, (2) guest never arrived (no-show).

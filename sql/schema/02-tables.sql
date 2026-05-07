@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS public.bookings (
   -- ── Financials ──────────────────────────────────────────────
   total_amount                 NUMERIC(10, 2)     NOT NULL,
   paid_amount                  NUMERIC(10, 2)     NOT NULL DEFAULT 0,
-  due_amount                   NUMERIC(10, 2)     NOT NULL DEFAULT 0, -- maintained by trigger
+  due_amount                   NUMERIC(10, 2)     NOT NULL DEFAULT 0, -- VESTIGIAL: never read by app, never auto-updated. Candidate for removal in future cleanup.
   payment_status               public.payment_status NOT NULL DEFAULT 'unpaid',
   last_payment_method          public.payment_method,               -- nullable; set by trigger
 
@@ -194,7 +194,7 @@ COMMENT ON TABLE  public.bookings IS 'Core booking record — financial unit for
 COMMENT ON COLUMN public.bookings.booking_ref IS 'Human-readable ID, e.g. BK-1041. Unique.';
 COMMENT ON COLUMN public.bookings.room_id IS 'FK to rooms.id — the single room for this booking';
 COMMENT ON COLUMN public.bookings.paid_amount IS 'Maintained by trigger fn_sync_paid_amount = SUM(payments.amount)';
-COMMENT ON COLUMN public.bookings.due_amount  IS 'total_amount - paid_amount; maintained by trigger fn_sync_payment_status';
+COMMENT ON COLUMN public.bookings.due_amount  IS 'VESTIGIAL: never read by app layer, never auto-updated by any trigger. Candidate for removal in future cleanup.';
 COMMENT ON COLUMN public.bookings.payment_status IS 'Derived by trigger fn_sync_payment_status from paid vs total';
 COMMENT ON COLUMN public.bookings.last_payment_method IS 'Denormalized from most-recent payment; maintained by trigger fn_sync_last_payment_method';
 COMMENT ON COLUMN public.bookings.actual_checkout_date IS 'Calendar date the guest actually vacated (may be before check_out_date)';
