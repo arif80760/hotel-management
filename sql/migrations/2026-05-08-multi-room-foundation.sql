@@ -5,14 +5,15 @@
 -- Author:  Phase 1 of docs/multi-room-design.md
 --
 -- WHAT THIS MIGRATION DOES:
---   1. Extends booking_status enum with 'checked_out_early'
---   2. Creates booking_rooms table     (per-room stay record)
---   3. Creates booking_extra_charges table  (itemized extra charges)
---   4. Creates refunds table           (two-step refund lifecycle)
---   5. Backfills all existing bookings → booking_rooms (1:1)
---   6. Backfills existing extra charges → booking_extra_charges
---   7. Verification DO block (raises on mismatch — rolls back)
---   8. Drops trg_sync_room_status + fn_sync_room_status
+--   1. Creates booking_rooms table     (per-room stay record)
+--   2. Creates booking_extra_charges table  (itemized extra charges)
+--   3. Creates refunds table           (two-step refund lifecycle)
+--   4. Backfills all existing bookings → booking_rooms (1:1)
+--   5. Backfills existing extra charges → booking_extra_charges
+--   6. Verification DO block (raises on mismatch — rolls back)
+--   7. Drops trg_sync_room_status + fn_sync_room_status
+--
+-- NOTE: 'checked_out_early' enum extension is in enum-prep.sql (prerequisite).
 --
 -- WHAT THIS MIGRATION DOES NOT DO (safety):
 --   • Does NOT drop any columns from bookings — they stay for Phase 3
@@ -20,32 +21,25 @@
 --   • Does NOT modify any existing rows in bookings, rooms, or payments.
 --   • Does NOT touch any other triggers.
 --
--- TESTING — recommended workflow:
---   1. Change COMMIT → ROLLBACK and run to verify syntax + data.
---   2. Inspect the NOTICE messages and verification SELECT output.
---   3. Change back to COMMIT and run for real.
+-- PREREQUISITE: Run sql/migrations/2026-05-08-multi-room-enum-prep.sql
+--   FIRST in a separate session. The 'checked_out_early' enum value must
+--   be committed before this migration can use it. PostgreSQL raises
+--   ERROR 55P04 ("unsafe use of new value") if both run in the same session.
 --
--- NOTE ON ALTER TYPE:
---   In PostgreSQL 12+ (used by Supabase), ALTER TYPE ADD VALUE inside a
---   transaction auto-commits at the statement level — it persists even
---   if the outer transaction is later rolled back. This is a PostgreSQL
---   constraint. The IF NOT EXISTS guard makes it safe to run more than once.
+-- TESTING — recommended workflow:
+--   1. Run enum-prep.sql in one SQL Editor session (commits immediately).
+--   2. Open a NEW SQL Editor session, paste this file, change COMMIT → ROLLBACK.
+--   3. Inspect the NOTICE messages and verification SELECT output.
+--   4. Open another NEW session, paste this file with COMMIT, run for real.
 --
 -- ROLLBACK:
 --   See companion file: 2026-05-08-multi-room-foundation-rollback.sql
 --
--- NEXT STEP:
---   After COMMIT, apply: 2026-05-08-multi-room-rpc.sql
+-- APPLY ORDER:
+--   1. 2026-05-08-multi-room-enum-prep.sql  (separate session — adds enum value)
+--   2. This file                            (separate session — uses enum value)
+--   3. 2026-05-08-multi-room-rpc.sql        (separate session — creates functions)
 -- ===========================================================================
-
-
--- ═══════════════════════════════════════════════════════════════════════════
--- PRE-FLIGHT — Extend booking_status enum
--- Must sit outside the BEGIN block (auto-commits in PostgreSQL 12+).
--- The new value is available immediately for the transaction below.
--- ═══════════════════════════════════════════════════════════════════════════
-
-ALTER TYPE public.booking_status ADD VALUE IF NOT EXISTS 'checked_out_early';
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -57,7 +51,7 @@ BEGIN;
 
 
 -- ───────────────────────────────────────────────────────────────────────────
--- STEP 2 — Create booking_rooms
+-- STEP 1 — Create booking_rooms
 --
 -- Junction table: one row per room per booking.
 -- Captures the per-room stay period, rate, status, and lifecycle timestamps.
@@ -155,7 +149,7 @@ CREATE POLICY "Authenticated can delete booking_rooms"
 
 
 -- ───────────────────────────────────────────────────────────────────────────
--- STEP 3 — Create booking_extra_charges
+-- STEP 2 — Create booking_extra_charges
 --
 -- Itemized extra charges per booking, optionally attributed to one room.
 -- Replaces the scalar bookings.extra_charge_amount / extra_charge_reason
@@ -217,7 +211,7 @@ CREATE POLICY "Authenticated can delete booking_extra_charges"
 
 
 -- ───────────────────────────────────────────────────────────────────────────
--- STEP 4 — Create refunds
+-- STEP 3 — Create refunds
 --
 -- Two-step lifecycle: pending (created at cancellation) →
 --   disbursed (admin confirms money returned) or denied.
@@ -297,7 +291,7 @@ CREATE POLICY "Authenticated can update refunds"
 
 
 -- ───────────────────────────────────────────────────────────────────────────
--- STEP 5 — Backfill booking_rooms from existing bookings
+-- STEP 4 — Backfill booking_rooms from existing bookings
 --
 -- Creates exactly one booking_rooms row per booking.
 -- bookings.room_id (deprecated but retained) maps directly to room_id here.
@@ -375,7 +369,7 @@ FROM public.bookings b;
 
 
 -- ───────────────────────────────────────────────────────────────────────────
--- STEP 6 — Backfill booking_extra_charges from bookings.extra_charge_amount
+-- STEP 5 — Backfill booking_extra_charges from bookings.extra_charge_amount
 --
 -- Only for bookings where extra_charge_amount > 0.
 -- booking_room_id: links to the booking_rooms row just created above.
@@ -412,7 +406,7 @@ WHERE b.extra_charge_amount IS NOT NULL
 
 
 -- ───────────────────────────────────────────────────────────────────────────
--- STEP 7 — Verification
+-- STEP 6 — Verification
 --
 -- Counts are checked before the transaction commits.
 -- Any mismatch raises EXCEPTION → entire transaction ROLLBACK.
@@ -476,7 +470,7 @@ $$;
 
 
 -- ───────────────────────────────────────────────────────────────────────────
--- STEP 8 — Retire fn_sync_room_status trigger
+-- STEP 7 — Retire fn_sync_room_status trigger
 --
 -- This trigger set rooms.status whenever bookings.status changed.
 -- With multi-room support, a single booking.status change no longer maps
