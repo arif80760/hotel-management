@@ -708,6 +708,7 @@ export async function createBooking(
       p_initial_payment:  input.amountPaid > 0 ? input.amountPaid        : 0,
       p_payment_method:   input.amountPaid > 0 ? input.amountPaidMethod  : null,
       p_recorded_by:      null,
+      p_status:           BOOKING_STATUS_TO_DB[input.status] ?? "confirmed",
     },
   );
 

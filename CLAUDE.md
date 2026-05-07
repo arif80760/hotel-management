@@ -77,7 +77,8 @@ hotel-management/
 │   │   ├── 2026-05-08-multi-room-enum-prep.sql       # APPLY FIRST (separate session): adds checked_out_early to booking_status
 │   │   ├── 2026-05-08-multi-room-foundation.sql      # Creates booking_rooms, booking_extra_charges, refunds + backfill
 │   │   ├── 2026-05-08-multi-room-foundation-rollback.sql  # Rollback script for foundation migration
-│   │   └── 2026-05-08-multi-room-rpc.sql             # RPC functions: create_booking_with_rooms, cancel_booking_room, etc.
+│   │   ├── 2026-05-08-multi-room-rpc.sql             # RPC functions: create_booking_with_rooms, cancel_booking_room, etc.
+│   │   └── 2026-05-08-rpc-add-status-param.sql       # Adds p_status param to create_booking_with_rooms (Phase 5.2 fix)
 │   └── add_payment_method_extras.sql                 # (legacy location — superseded by sql/migrations/)
 │
 ├── public/                      # Static assets
