@@ -23,6 +23,9 @@ import { supabase } from "@/lib/supabase";
 import {
   type MockBooking,
   type BookingStatus,
+  type BookingRoomStatus,
+  type BookingRoom,
+  type BookingExtraCharge,
   type PaymentStatus,
   type PaymentMethod,
   type RoomStatus,
@@ -32,8 +35,41 @@ import {
 } from "@/lib/mockData";
 
 // ─────────────────────────────────────────────────────────────
-// RAW ROW TYPE  (shape returned by Supabase with joins)
+// RAW ROW TYPES  (shapes returned by Supabase with joins)
 // ─────────────────────────────────────────────────────────────
+
+/** One booking_rooms row as returned by the nested JOIN in BOOKING_SELECT. */
+type BookingRoomRow = {
+  id:                     string;
+  booking_id:             string;
+  room_id:                string;
+  check_in_date:          string;
+  check_out_date:         string;
+  nights:                 number;
+  room_category:          string;   // lowercase enum, e.g. "deluxe"
+  booking_rate:           number;
+  status:                 string;   // lowercase enum, e.g. "confirmed"
+  actual_checkout_date:   string | null;
+  early_nights_deducted:  number;   // NOT NULL DEFAULT 0 in DB
+  early_deduction_amount: number;   // NOT NULL DEFAULT 0 in DB
+  confirmed_at:           string | null;
+  checked_in_at:          string | null;
+  checked_out_at:         string | null;
+  cancelled_at:           string | null;
+  // Nested JOIN from rooms table
+  rooms: { room_number: string; category: string } | null;
+};
+
+/** One booking_extra_charges row as returned by the nested JOIN in BOOKING_SELECT. */
+type BookingExtraChargeRow = {
+  id:              string;
+  booking_room_id: string | null;
+  amount:          number;
+  reason:          string;
+  charge_type:     string | null;
+  applied_at:      string;
+};
+
 type BookingRow = {
   id:                       string;   // UUID
   booking_ref:              string;   // "BK-1041"
@@ -58,7 +94,7 @@ type BookingRow = {
   checked_in_at:            string | null;
   checked_out_at:           string | null;
   cancelled_at:             string | null;
-  // ── Step 2: early checkout + additional discount ──────────
+  // ── Legacy early checkout + additional discount (bookings table) ──
   actual_checkout_date:       string | null;
   early_nights_deducted:      number | null;
   early_deduction_amount:     number | null;
@@ -69,8 +105,9 @@ type BookingRow = {
   last_payment_method:        string | null;
   created_at:               string;
   updated_at:               string;
-  // Joined relations
-  rooms: { room_number: string; category: string } | null;
+  // ── Joined relations ──────────────────────────────────────
+  booking_rooms:          BookingRoomRow[];
+  booking_extra_charges:  BookingExtraChargeRow[];
   guests: { id: string; name: string; phone: string; email: string } | null;
   booking_guests: Array<{
     name:        string;
@@ -101,6 +138,14 @@ const DB_TO_PAYMENT_STATUS: Record<string, PaymentStatus> = {
   unpaid:  "Unpaid",
   partial: "Partial",
   paid:    "Paid",
+};
+
+const DB_TO_BOOKING_ROOM_STATUS: Record<string, BookingRoomStatus> = {
+  confirmed:          "Confirmed",
+  checked_in:         "Checked In",
+  checked_out:        "Checked Out",
+  checked_out_early:  "Checked Out Early",
+  cancelled:          "Cancelled",
 };
 
 function cap(s: string): string {
@@ -138,8 +183,33 @@ function parseDisplayDate(display: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// ROW MAPPER
+// ROW MAPPERS
 // ─────────────────────────────────────────────────────────────
+
+/** Maps one BookingRoomRow (from nested JOIN) to the BookingRoom frontend type. */
+function mapBookingRoom(row: BookingRoomRow): BookingRoom {
+  return {
+    id:           row.id,
+    bookingId:    row.booking_id,
+    roomId:       row.room_id,
+    roomNumber:   row.rooms?.room_number ?? "",
+    roomCategory: cap(row.room_category),
+    checkIn:      formatDateForDisplay(row.check_in_date),
+    checkOut:     formatDateForDisplay(row.check_out_date),
+    checkInISO:   row.check_in_date,
+    checkOutISO:  row.check_out_date,
+    nights:       row.nights,
+    bookingRate:  row.booking_rate,
+    status:       DB_TO_BOOKING_ROOM_STATUS[row.status] ?? "Confirmed",
+    actualCheckoutDate:   row.actual_checkout_date  ?? undefined,
+    earlyNightsDeducted:  row.early_nights_deducted,
+    earlyDeductionAmount: row.early_deduction_amount,
+    confirmedAt:  row.confirmed_at  ?? undefined,
+    checkedInAt:  row.checked_in_at  ?? undefined,
+    checkedOutAt: row.checked_out_at ?? undefined,
+    cancelledAt:  row.cancelled_at   ?? undefined,
+  };
+}
 
 function mapBooking(row: BookingRow): MockBooking {
   const override: CheckoutOverride | undefined = row.override_checkout
@@ -151,6 +221,27 @@ function mapBooking(row: BookingRow): MockBooking {
       }
     : undefined;
 
+  // ── Map per-room junction rows ────────────────────────────
+  const rooms: BookingRoom[] = (row.booking_rooms ?? []).map(mapBookingRoom);
+
+  // ── Map extra charges ─────────────────────────────────────
+  const extraCharges: BookingExtraCharge[] = (row.booking_extra_charges ?? [])
+    .map(ec => ({
+      id:             ec.id,
+      bookingId:      row.id,
+      bookingRoomId:  ec.booking_room_id ?? undefined,
+      amount:         ec.amount,
+      reason:         ec.reason,
+      chargeType:     ec.charge_type ?? undefined,
+      appliedAt:      ec.applied_at,
+    }));
+
+  // ── Backward-compat shims — sourced from rooms[0] ─────────
+  // For single-room bookings (rooms.length === 1) these match
+  // existing behaviour exactly. For multi-room bookings, callers
+  // that need per-room detail should read booking.rooms[i] directly.
+  const r0 = rooms[0];
+
   return {
     id:           row.booking_ref,
     guestName:    row.guests?.name    ?? "",
@@ -159,13 +250,22 @@ function mapBooking(row: BookingRow): MockBooking {
                     ? row.guests.email
                     : undefined,
     guestId:      row.guests?.id ?? undefined,
-    roomNumber:   row.rooms?.room_number ?? "",
-    roomCategory: cap(row.room_category_at_booking),
-    checkIn:      formatDateForDisplay(row.check_in_date),
-    checkOut:     formatDateForDisplay(row.check_out_date),
-    checkInISO:   row.check_in_date  ?? undefined,
-    checkOutISO:  row.check_out_date ?? undefined,
-    nights:       row.nights,
+
+    // ── New multi-room fields ─────────────────────────────────
+    rooms,
+    extraCharges,
+
+    // ── Backward-compat shims (sourced from rooms[0]) ─────────
+    roomNumber:   r0?.roomNumber   ?? "",
+    roomCategory: r0?.roomCategory ?? cap(row.room_category_at_booking),
+    checkIn:      r0?.checkIn      ?? formatDateForDisplay(row.check_in_date),
+    checkOut:     r0?.checkOut     ?? formatDateForDisplay(row.check_out_date),
+    checkInISO:   r0?.checkInISO   ?? row.check_in_date  ?? undefined,
+    checkOutISO:  r0?.checkOutISO  ?? row.check_out_date ?? undefined,
+    nights:       r0?.nights       ?? row.nights,
+    bookingRate:  r0?.bookingRate  ?? row.booking_rate   ?? undefined,
+
+    // ── Fields that remain on the bookings table ──────────────
     status:       DB_TO_BOOKING_STATUS[row.status] ?? "Confirmed",
     payment:      DB_TO_PAYMENT_STATUS[row.payment_status] ?? "Unpaid",
     totalAmount:  row.total_amount,
@@ -177,15 +277,25 @@ function mapBooking(row: BookingRow): MockBooking {
       .map(g => ({ name: g.name, nationality: g.nationality ?? "" })),
     checkoutOverride: override,
     fixedRate:          row.fixed_rate          ?? undefined,
-    bookingRate:        row.booking_rate        ?? undefined,
+    // Legacy scalar extra-charge columns — kept during transition.
+    // New charges are in extraCharges[] (from booking_extra_charges table).
     extraChargeAmount:  row.extra_charge_amount ?? undefined,
     extraChargeReason:  row.extra_charge_reason ?? undefined,
     createdAt:    row.created_at,
     checkedInAt:  row.checked_in_at  ?? undefined,
     checkedOutAt: row.checked_out_at ?? undefined,
-    actualCheckoutDate:       row.actual_checkout_date       ?? undefined,
-    earlyNightsDeducted:      row.early_nights_deducted      ?? undefined,
-    earlyDeductionAmount:     row.early_deduction_amount     ?? undefined,
+
+    // ── Early checkout shims (preferred source: rooms[0]) ─────
+    // Falls back to legacy bookings columns for robustness (e.g.
+    // if booking_rooms JOIN returns empty for an edge-case row).
+    actualCheckoutDate:   r0?.actualCheckoutDate
+                            ?? row.actual_checkout_date   ?? undefined,
+    earlyNightsDeducted:  r0 ? r0.earlyNightsDeducted
+                             : (row.early_nights_deducted  ?? undefined),
+    earlyDeductionAmount: r0 ? r0.earlyDeductionAmount
+                             : (row.early_deduction_amount ?? undefined),
+
+    // ── Additional discount (bookings table only) ─────────────
     additionalDiscountAmount: row.additional_discount_amount ?? undefined,
     additionalDiscountReason: row.additional_discount_reason ?? undefined,
     additionalDiscountBy:     row.additional_discount_by     ?? undefined,
@@ -198,11 +308,22 @@ function mapBooking(row: BookingRow): MockBooking {
 // ─────────────────────────────────────────────────────────────
 // SELECT FRAGMENT  (reused across queries)
 // ─────────────────────────────────────────────────────────────
+// rooms!room_id is intentionally dropped — room data now comes
+// from the booking_rooms nested join. The bookings.room_id column
+// is kept as a legacy backward-compat column but not joined here.
 const BOOKING_SELECT = `
   *,
-  rooms!room_id ( room_number, category ),
   guests!primary_guest_id ( id, name, phone, email ),
-  booking_guests ( name, nationality, sort_order )
+  booking_guests ( name, nationality, sort_order ),
+  booking_rooms (
+    id, booking_id, room_id,
+    check_in_date, check_out_date, nights,
+    room_category, booking_rate, status,
+    actual_checkout_date, early_nights_deducted, early_deduction_amount,
+    confirmed_at, checked_in_at, checked_out_at, cancelled_at,
+    rooms ( room_number, category )
+  ),
+  booking_extra_charges ( id, booking_room_id, amount, reason, charge_type, applied_at )
 `;
 
 // ─────────────────────────────────────────────────────────────

@@ -917,6 +917,9 @@ export default function BookingsClient({ initialRoom }: Props) {
       // Ensure count is never less than actual named guests + primary
       totalGuests:      Math.max(form.totalGuests, cleanedExtras.length + 1),
       additionalGuests: cleanedExtras,
+      // Optimistic placeholder — populated from DB on re-fetch after createBooking resolves.
+      rooms:            [],
+      extraCharges:     [],
       createdAt:        new Date().toISOString(),
       isNew:            true,
     };

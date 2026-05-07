@@ -101,25 +101,6 @@ export type AdditionalGuest = {
 };
 
 /**
- * Room record.
- * Field naming matches the future database schema so the swap is a
- * straight 1-to-1 replacement (mock array → Supabase rows).
- *
- * Fields marked "placeholder" are populated with demo values now but
- * will be managed via the admin UI / database later.
- */
-export type MockRoom = {
-  id:         string;       // e.g. "room-101"  →  future db primary key (uuid)
-  roomNumber: string;       // display label, e.g. "101"
-  floor:      string;       // "Floor 1" | "Floor 2" | "Floor 3" | "Floor 4"
-  category:   string;       // "Single" | "Double" | "Deluxe" | "Suite" | "Family"
-  status:     RoomStatus;   // live occupancy state
-  price:      number;       // nightly rate in USD  [placeholder — editable later]
-  capacity:   number;       // max guests           [placeholder — editable later]
-  amenities:  string[];     // feature list for the Rooms page
-};
-
-/**
  * Audit record stamped onto a booking when an admin overrides a blocked checkout.
  * Kept as a nested object so it's easy to query / index later in Supabase.
  * TODO: When auth is added, replace `by: string` with `by: UserId`.
@@ -145,6 +126,123 @@ export const HOTEL_POLICY = {
   graceMinutes:   30,
 } as const;
 
+// ─────────────────────────────────────────────────────────────
+// BOOKING ROOM — per-room stay record (booking_rooms junction)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Room-level lifecycle status.
+ * Extends BookingStatus with 'Checked Out Early' — a room-level-only value
+ * that occurs when a guest departs before the scheduled check_out_date.
+ * booking.status (booking-level) never uses 'Checked Out Early'.
+ */
+export type BookingRoomStatus = BookingStatus | "Checked Out Early";
+
+/**
+ * One room's stay within a booking.
+ * Corresponds to a single booking_rooms row, with room_number joined from rooms.
+ *
+ * For single-room bookings (booking.rooms.length === 1) all fields mirror
+ * the backward-compat shims on MockBooking. For multi-room bookings,
+ * read booking.rooms[i] directly for per-room detail.
+ */
+export interface BookingRoom {
+  id:           string;   // booking_rooms.id UUID
+  bookingId:    string;   // booking_rooms.booking_id UUID
+  roomId:       string;   // booking_rooms.room_id UUID (internal — not shown in UI)
+  roomNumber:   string;   // from rooms JOIN, e.g. "204"
+  roomCategory: string;   // capitalised for UI, e.g. "Deluxe"
+  checkIn:      string;   // display string: "Jul 10, 2026"
+  checkOut:     string;   // display string: "Jul 13, 2026"
+  checkInISO:   string;   // "2026-07-10"
+  checkOutISO:  string;   // "2026-07-13"
+  nights:       number;
+  bookingRate:  number;   // negotiated rate per night for this room
+  status:       BookingRoomStatus;
+  // Early checkout (0 / undefined when on-time or late)
+  actualCheckoutDate?:   string;   // ISO date — set only when checked out early or on early departure
+  earlyNightsDeducted:   number;   // 0 for on-time or late checkout
+  earlyDeductionAmount:  number;   // 0 for on-time or late checkout
+  // Lifecycle timestamps (ISO 8601)
+  confirmedAt?:  string;
+  checkedInAt?:  string;
+  checkedOutAt?: string;
+  cancelledAt?:  string;
+}
+
+/**
+ * An itemised extra charge applied to a booking, optionally attributed to a room.
+ * Corresponds to a booking_extra_charges row.
+ */
+export interface BookingExtraCharge {
+  id:             string;
+  bookingId:      string;
+  bookingRoomId?: string;   // undefined = booking-level charge; set = per-room charge
+  roomNumber?:    string;   // denormalised for display — set when bookingRoomId is present
+  amount:         number;   // always > 0
+  reason:         string;
+  chargeType?:    string;   // 'mini_bar' | 'laundry' | 'damage' | 'other'
+  appliedAt:      string;   // ISO 8601 timestamp
+}
+
+// ─────────────────────────────────────────────────────────────
+// REFUND
+// ─────────────────────────────────────────────────────────────
+
+/** Refund lifecycle status. */
+export type RefundStatus = "pending" | "disbursed" | "denied";
+
+/**
+ * A refund record raised at booking cancellation or early checkout.
+ * Two-step lifecycle: pending (created) → disbursed (money returned) or denied.
+ *
+ * bookings.paid_amount is NOT decremented on refund — effective balance is
+ * computed in the app layer via calcEffectiveBalance() in lib/invoiceUtils.ts.
+ */
+export interface Refund {
+  id:                  string;
+  bookingId:           string;
+  bookingRoomId:       string | null;   // null = whole-booking refund
+  amount:              number;
+  reason:              string | null;
+  status:              RefundStatus;
+  createdAt:           string;          // ISO 8601
+  createdBy:           string | null;   // auth.users UUID
+  disbursedAt:         string | null;
+  disbursedBy:         string | null;   // auth.users UUID
+  disbursementMethod:  PaymentMethod | null;
+  notes:               string | null;
+}
+
+// ─────────────────────────────────────────────────────────────
+// MOCK ROOM
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Room record.
+ * Field naming matches the future database schema so the swap is a
+ * straight 1-to-1 replacement (mock array → Supabase rows).
+ *
+ * Fields marked "placeholder" are populated with demo values now but
+ * will be managed via the admin UI / database later.
+ */
+export type MockRoom = {
+  id:         string;       // e.g. "room-101"  →  future db primary key (uuid)
+  roomNumber: string;       // display label, e.g. "101"
+  floor:      string;       // "Floor 1" | "Floor 2" | "Floor 3" | "Floor 4"
+  category:   string;       // "Single" | "Double" | "Deluxe" | "Suite" | "Family"
+  status:     RoomStatus;   // live occupancy state
+  price:      number;       // nightly rate in USD  [placeholder — editable later]
+  capacity:   number;       // max guests           [placeholder — editable later]
+  amenities:  string[];     // feature list for the Rooms page
+};
+
+/**
+ * Audit record stamped onto a booking when an admin overrides a blocked checkout.
+ * Kept as a nested object so it's easy to query / index later in Supabase.
+ * TODO: When auth is added, replace `by: string` with `by: UserId`.
+ */
+
 /**
  * Booking record.
  * Core fields match the user's spec; extended fields (nights, payment,
@@ -154,10 +252,54 @@ export type MockBooking = {
   id:           string;          // e.g. "BK-1041"  →  future db primary key
   guestName:    string;          // full guest name
   phone:        string;          // contact number
+  /**
+   * UUID of the primary guest record in the `guests` table.
+   * Populated from the JOIN in mapBooking(). Used during booking edit
+   * to UPDATE the guest row directly (name/phone/email) without going
+   * through findOrCreateGuest — which would create a new record instead
+   * of modifying the existing one.
+   */
+  guestId?:      string;
+  // ── Multi-room fields (Phase 3+) ─────────────────────────────────────
+  // Authoritative per-room data. Always populated from booking_rooms via
+  // mapBooking(). Single-room bookings have rooms.length === 1. For future
+  // multi-room bookings, iterate booking.rooms[i] for per-room detail
+  // instead of the backward-compat shim fields below.
+  rooms:         BookingRoom[];
+  extraCharges:  BookingExtraCharge[];
+  // ── Backward-compat shims (populated from rooms[0] at mapBooking time) ─
+  // All existing callsites continue to work unchanged for single-room
+  // bookings (rooms.length === 1). For multi-room bookings prefer reading
+  // booking.rooms[i] directly.
+  /**
+   * Backward-compat shim: returns rooms[0]'s value. For
+   * multi-room bookings (rooms.length > 1), prefer reading
+   * booking.rooms[i] directly. Will be removed in a future phase.
+   */
   roomNumber:   string;          // which room, e.g. "204"
+  /**
+   * Backward-compat shim: returns rooms[0]'s value. For
+   * multi-room bookings (rooms.length > 1), prefer reading
+   * booking.rooms[i] directly. Will be removed in a future phase.
+   */
   roomCategory: string;          // room type at time of booking
+  /**
+   * Backward-compat shim: returns rooms[0]'s value. For
+   * multi-room bookings (rooms.length > 1), prefer reading
+   * booking.rooms[i] directly. Will be removed in a future phase.
+   */
   checkIn:      string;          // formatted, e.g. "Apr 21, 2025"
+  /**
+   * Backward-compat shim: returns rooms[0]'s value. For
+   * multi-room bookings (rooms.length > 1), prefer reading
+   * booking.rooms[i] directly. Will be removed in a future phase.
+   */
   checkOut:     string;
+  /**
+   * Backward-compat shim: returns rooms[0]'s value. For
+   * multi-room bookings (rooms.length > 1), prefer reading
+   * booking.rooms[i] directly. Will be removed in a future phase.
+   */
   nights:       number;
   status:       BookingStatus;
   payment:      PaymentStatus;   // auto-derived from totalAmount vs amountPaid
@@ -179,9 +321,15 @@ export type MockBooking = {
   // When bookingRate < fixedRate → a discount was applied.
   // totalAmount is always computed from bookingRate × nights.
   fixedRate?:    number;   // standard published rate per night
+  /**
+   * Backward-compat shim: returns rooms[0]'s value. For
+   * multi-room bookings (rooms.length > 1), prefer reading
+   * booking.rooms[i] directly. Will be removed in a future phase.
+   */
   bookingRate?:  number;   // actual rate charged per night (may differ)
   // ── Extra charges stamped at checkout ────────────────────
-  // Recorded when staff adds damage / mini-bar / late-checkout fees, etc.
+  // Legacy scalar columns on bookings table — kept during transition.
+  // New charges are written to booking_extra_charges (see extraCharges field above).
   // finalPayable = (totalAmount + extraChargeAmount) - earlyDeductionAmount - additionalDiscountAmount - amountPaid
   extraChargeAmount?: number;   // total extra charge applied at checkout
   extraChargeReason?: string;   // e.g. "Mini-bar - 3 soft drinks"
@@ -194,13 +342,26 @@ export type MockBooking = {
   // ── Checkout timing (Step 1 — display only) ──────────────────────────────
   actualChargedNights?: number;   // nights charged (same as planned for now)
   lateCheckoutMinutes?: number;   // minutes past scheduled checkout (negative = early)
-  // ── Early checkout billing (Step 2) ──────────────────────────────────────
-  // Computed at checkout time from calendar-date comparison (no clock comparison).
-  // earlyNightsDeducted = max(0, plannedCheckoutDate − actualCheckoutDate)
-  // earlyDeductionAmount = earlyNightsDeducted × bookingRate
-  // Both are 0 for on-time and late checkouts.
+  // ── Early checkout billing shims (populated from rooms[0]) ───────────────
+  // For single-room bookings these match the booking_rooms row exactly.
+  // For multi-room bookings, read booking.rooms[i].earlyDeductionAmount etc. directly.
+  /**
+   * Backward-compat shim: returns rooms[0]'s value. For
+   * multi-room bookings (rooms.length > 1), prefer reading
+   * booking.rooms[i] directly. Will be removed in a future phase.
+   */
   actualCheckoutDate?:       string;   // ISO date (YYYY-MM-DD) guest actually vacated
+  /**
+   * Backward-compat shim: returns rooms[0]'s value. For
+   * multi-room bookings (rooms.length > 1), prefer reading
+   * booking.rooms[i] directly. Will be removed in a future phase.
+   */
   earlyNightsDeducted?:      number;   // unused nights deducted from the bill
+  /**
+   * Backward-compat shim: returns rooms[0]'s value. For
+   * multi-room bookings (rooms.length > 1), prefer reading
+   * booking.rooms[i] directly. Will be removed in a future phase.
+   */
   earlyDeductionAmount?:     number;   // total deduction in BDT (earlyNightsDeducted × bookingRate)
   // ── Additional discount at checkout (Step 2) ─────────────────────────────
   // Ad-hoc discount negotiated at checkout. No role restriction — staff or admin.
@@ -216,17 +377,19 @@ export type MockBooking = {
   lastPaymentMethod?: PaymentMethod | "online" | "other";
   // ── Guest contact ─────────────────────────────────────────────────────────
   email?:        string;   // real email if captured; absent / placeholder → hide in UI
-  // ── ISO dates (used for date-range filtering — no display-string parsing) ─
-  checkInISO?:   string;   // "YYYY-MM-DD" from DB check_in_date
-  checkOutISO?:  string;   // "YYYY-MM-DD" from DB check_out_date
+  // ── ISO dates (backward-compat shims) ───────────────────────────────────
   /**
-   * UUID of the primary guest record in the `guests` table.
-   * Populated from the JOIN in mapBooking(). Used during booking edit
-   * to UPDATE the guest row directly (name/phone/email) without going
-   * through findOrCreateGuest — which would create a new record instead
-   * of modifying the existing one.
+   * Backward-compat shim: returns rooms[0]'s value. For
+   * multi-room bookings (rooms.length > 1), prefer reading
+   * booking.rooms[i] directly. Will be removed in a future phase.
    */
-  guestId?:      string;
+  checkInISO?:   string;   // "YYYY-MM-DD" from DB check_in_date
+  /**
+   * Backward-compat shim: returns rooms[0]'s value. For
+   * multi-room bookings (rooms.length > 1), prefer reading
+   * booking.rooms[i] directly. Will be removed in a future phase.
+   */
+  checkOutISO?:  string;   // "YYYY-MM-DD" from DB check_out_date
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -372,6 +535,7 @@ export const MOCK_BOOKINGS: MockBooking[] = [
     checkIn: "Apr 22, 2026", checkOut: "Apr 25, 2026", nights: 3,
     status: "Confirmed", payment: "Unpaid", totalAmount: 537, amountPaid: 0,
     totalGuests: 1, additionalGuests: [],
+    rooms: [], extraCharges: [],
     createdAt: "2026-04-18T10:30:00.000Z",
   },
   {
@@ -384,6 +548,7 @@ export const MOCK_BOOKINGS: MockBooking[] = [
     additionalGuests: [
       { name: "Arjun Nair", nationality: "Indian" },
     ],
+    rooms: [], extraCharges: [],
     createdAt: "2026-04-15T14:20:00.000Z",
   },
   {
@@ -393,6 +558,7 @@ export const MOCK_BOOKINGS: MockBooking[] = [
     checkIn: "Apr 20, 2026", checkOut: "Apr 22, 2026", nights: 2,
     status: "Checked In", payment: "Partial", totalAmount: 258, amountPaid: 129,
     totalGuests: 1, additionalGuests: [],
+    rooms: [], extraCharges: [],
     createdAt: "2026-04-17T09:00:00.000Z",
     checkedInAt: "2026-04-20T14:30:00.000Z",
   },
@@ -408,6 +574,7 @@ export const MOCK_BOOKINGS: MockBooking[] = [
       { name: "Elise Laurent",  nationality: "French"  },
       { name: "Lucas Laurent",  nationality: "French"  },
     ],
+    rooms: [], extraCharges: [],
     createdAt: "2026-04-10T11:15:00.000Z",
     checkedInAt: "2026-04-20T15:45:00.000Z",
   },
@@ -418,6 +585,7 @@ export const MOCK_BOOKINGS: MockBooking[] = [
     checkIn: "Apr 19, 2026", checkOut: "Apr 21, 2026", nights: 2,
     status: "Checked Out", payment: "Paid", totalAmount: 178, amountPaid: 178,
     totalGuests: 1, additionalGuests: [],
+    rooms: [], extraCharges: [],
     createdAt: "2026-04-16T08:00:00.000Z",
     checkedInAt: "2026-04-19T12:00:00.000Z",
     checkedOutAt: "2026-04-21T11:30:00.000Z",
@@ -429,6 +597,7 @@ export const MOCK_BOOKINGS: MockBooking[] = [
     checkIn: "Apr 17, 2026", checkOut: "Apr 21, 2026", nights: 4,
     status: "Checked Out", payment: "Paid", totalAmount: 516, amountPaid: 516,
     totalGuests: 1, additionalGuests: [],
+    rooms: [], extraCharges: [],
     createdAt: "2026-04-10T16:30:00.000Z",
     checkedInAt: "2026-04-17T13:00:00.000Z",
     checkedOutAt: "2026-04-21T10:15:00.000Z",
@@ -440,6 +609,7 @@ export const MOCK_BOOKINGS: MockBooking[] = [
     checkIn: "Apr 22, 2026", checkOut: "Apr 25, 2026", nights: 3,
     status: "Confirmed", payment: "Unpaid", totalAmount: 537, amountPaid: 0,
     totalGuests: 1, additionalGuests: [],
+    rooms: [], extraCharges: [],
     createdAt: "2026-04-20T07:45:00.000Z",
   },
   {
@@ -449,6 +619,7 @@ export const MOCK_BOOKINGS: MockBooking[] = [
     checkIn: "Apr 15, 2026", checkOut: "Apr 20, 2026", nights: 5,
     status: "Cancelled", payment: "Paid", totalAmount: 2745, amountPaid: 2745,
     totalGuests: 1, additionalGuests: [],
+    rooms: [], extraCharges: [],
     createdAt: "2026-04-05T19:00:00.000Z",
   },
 ];
