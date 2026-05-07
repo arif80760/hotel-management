@@ -7,6 +7,8 @@
 --   • Observed app behaviour — all CRUD routes use the
 --     service role key, which bypasses RLS; RLS therefore
 --     acts as a safety net rather than primary auth gate)
+-- Updated:  2026-05-08  — Added RLS for booking_rooms,
+--           booking_extra_charges, and refunds tables.
 --
 -- Current security model:
 --   • Service role key  — bypasses RLS entirely (used by app)
@@ -21,14 +23,17 @@
 
 
 -- ── RLS on / off ─────────────────────────────────────────────
-ALTER TABLE public.rooms              ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.guests             ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.profiles           ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.employees          ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.bookings           ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.payments           ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.booking_guests     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.booking_documents  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.rooms                  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.guests                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.employees              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.bookings               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.payments               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.booking_guests         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.booking_documents      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.booking_rooms          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.booking_extra_charges  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.refunds                ENABLE ROW LEVEL SECURITY;
 
 
 -- ─────────────────────────────────────────────────────────────
@@ -150,3 +155,53 @@ CREATE POLICY "Authenticated can insert booking documents"
 
 CREATE POLICY "Authenticated can delete booking documents"
   ON public.booking_documents FOR DELETE TO authenticated USING (true);
+
+
+-- ─────────────────────────────────────────────────────────────
+-- booking_rooms
+-- Added: 2026-05-08 via migration 2026-05-08-multi-room-foundation.sql
+-- ─────────────────────────────────────────────────────────────
+CREATE POLICY "Authenticated can read booking_rooms"
+  ON public.booking_rooms FOR SELECT TO authenticated USING (true);
+
+CREATE POLICY "Authenticated can insert booking_rooms"
+  ON public.booking_rooms FOR INSERT TO authenticated WITH CHECK (true);
+
+CREATE POLICY "Authenticated can update booking_rooms"
+  ON public.booking_rooms FOR UPDATE TO authenticated USING (true);
+
+CREATE POLICY "Authenticated can delete booking_rooms"
+  ON public.booking_rooms FOR DELETE TO authenticated USING (true);
+
+
+-- ─────────────────────────────────────────────────────────────
+-- booking_extra_charges
+-- Added: 2026-05-08 via migration 2026-05-08-multi-room-foundation.sql
+-- ─────────────────────────────────────────────────────────────
+CREATE POLICY "Authenticated can read booking_extra_charges"
+  ON public.booking_extra_charges FOR SELECT TO authenticated USING (true);
+
+CREATE POLICY "Authenticated can insert booking_extra_charges"
+  ON public.booking_extra_charges FOR INSERT TO authenticated WITH CHECK (true);
+
+CREATE POLICY "Authenticated can update booking_extra_charges"
+  ON public.booking_extra_charges FOR UPDATE TO authenticated USING (true);
+
+CREATE POLICY "Authenticated can delete booking_extra_charges"
+  ON public.booking_extra_charges FOR DELETE TO authenticated USING (true);
+
+
+-- ─────────────────────────────────────────────────────────────
+-- refunds
+-- Added: 2026-05-08 via migration 2026-05-08-multi-room-foundation.sql
+-- No DELETE policy — refund records are permanent for audit purposes.
+-- Disbursement is tracked via status UPDATE, not row deletion.
+-- ─────────────────────────────────────────────────────────────
+CREATE POLICY "Authenticated can read refunds"
+  ON public.refunds FOR SELECT TO authenticated USING (true);
+
+CREATE POLICY "Authenticated can insert refunds"
+  ON public.refunds FOR INSERT TO authenticated WITH CHECK (true);
+
+CREATE POLICY "Authenticated can update refunds"
+  ON public.refunds FOR UPDATE TO authenticated USING (true);

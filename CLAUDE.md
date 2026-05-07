@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-05-06 (rev 8)
+Last updated: 2026-05-08 (rev 9)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -60,12 +60,25 @@ hotel-management/
 │   ├── supabase.ts              # Supabase browser client (HMR singleton on globalThis)
 │   └── supabaseAdmin.ts         # Supabase service-role admin client (server-only)
 │
-├── sql/                         # Manual migration SQL files (run once in Supabase SQL Editor)
-│   ├── add_booking_rate_columns.sql
-│   ├── add_extra_charge_columns.sql
-│   ├── create_booking_documents_table.sql
-│   ├── add_early_checkout_and_discount_columns.sql   # Step 2: early deduction + additional discount
-│   └── add_payment_method_extras.sql                 # Adds bkash/nagad enum values + last_payment_method column + sync trigger
+├── sql/                         # All SQL — schema snapshots + migration history
+│   ├── schema/                  # Authoritative current-state schema files (keep in sync with DB)
+│   │   ├── 01-types.sql         # Custom enum types
+│   │   ├── 02-tables.sql        # All CREATE TABLE definitions
+│   │   ├── 03-functions.sql     # RPC functions (booking_ref generator, etc.)
+│   │   ├── 04-indexes.sql       # Supplemental indexes (beyond PK/UNIQUE auto-indexes)
+│   │   ├── 05-triggers.sql      # Trigger functions + bindings
+│   │   └── 06-rls-policies.sql  # Row Level Security policies
+│   ├── migrations/              # Ordered migration history — apply once in Supabase SQL Editor
+│   │   ├── add_booking_rate_columns.sql
+│   │   ├── add_extra_charge_columns.sql
+│   │   ├── create_booking_documents_table.sql
+│   │   ├── add_early_checkout_and_discount_columns.sql
+│   │   ├── add_payment_method_extras.sql
+│   │   ├── 2026-05-08-multi-room-enum-prep.sql       # APPLY FIRST (separate session): adds checked_out_early to booking_status
+│   │   ├── 2026-05-08-multi-room-foundation.sql      # Creates booking_rooms, booking_extra_charges, refunds + backfill
+│   │   ├── 2026-05-08-multi-room-foundation-rollback.sql  # Rollback script for foundation migration
+│   │   └── 2026-05-08-multi-room-rpc.sql             # RPC functions: create_booking_with_rooms, cancel_booking_room, etc.
+│   └── add_payment_method_extras.sql                 # (legacy location — superseded by sql/migrations/)
 │
 ├── public/                      # Static assets
 ├── components/                  # (shared UI components, if any)
@@ -210,7 +223,7 @@ DB triggers on INSERT automatically update `bookings.paid_amount`, re-derive `bo
 | Trigger | Table | Effect |
 |---|---|---|
 | fn_stamp_booking_timestamps | bookings | Stamps confirmed_at / checked_in_at / checked_out_at / cancelled_at on status change |
-| fn_sync_room_status | bookings | Updates rooms.status when booking status changes |
+| ~~fn_sync_room_status~~ | ~~bookings~~ | **RETIRED 2026-05-08** — replaced by app-layer RPCs (checkout_booking_room, cancel_booking_room, create_booking_with_rooms). Multi-room support requires per-room room status control; a single booking.status → room mapping no longer works for bookings covering N rooms. |
 | fn_sync_paid_amount | payments | Adds payment.amount to bookings.paid_amount on INSERT |
 | fn_sync_payment_status | bookings | Re-derives payment_status from paid_amount vs total_amount |
 | fn_sync_last_payment_method | payments | On INSERT: copies payments.method to bookings.last_payment_method |
@@ -231,14 +244,66 @@ DB triggers on INSERT automatically update `bookings.paid_amount`, re-derive `bo
 - `booking_documents`: authenticated can SELECT/INSERT/DELETE.
 - Storage bucket `guest-documents`: authenticated can INSERT and DELETE; public read (bucket is public).
 
+### `booking_rooms`
+Added: 2026-05-08 — multi-room junction table. Each row is one room's stay within a booking.
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto-generated |
+| booking_id | UUID FK → bookings.id | ON DELETE CASCADE |
+| room_id | UUID FK → rooms.id | ON DELETE RESTRICT |
+| check_in_date | DATE | NOT NULL |
+| check_out_date | DATE | NOT NULL, must be > check_in_date |
+| nights | SMALLINT | NOT NULL — stored (not generated); set by app/RPC |
+| room_category | room_category enum | NOT NULL — snapshot at booking time |
+| booking_rate | NUMERIC(10,2) | NOT NULL — negotiated rate per night for this room |
+| status | booking_status enum | NOT NULL DEFAULT 'confirmed'; never uses 'checked_out_early' — that is room-level only |
+| actual_checkout_date | DATE | nullable — set by checkout/cancel RPCs |
+| early_nights_deducted | INTEGER | NOT NULL DEFAULT 0 |
+| early_deduction_amount | NUMERIC(10,2) | NOT NULL DEFAULT 0 |
+| confirmed_at / checked_in_at / checked_out_at / cancelled_at | TIMESTAMPTZ | nullable lifecycle timestamps |
+| created_at / updated_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() |
+| UNIQUE (booking_id, room_id) | — | one row per room per booking |
+
+### `booking_extra_charges`
+Added: 2026-05-08 — per-booking (optionally per-room) extra charge line items.
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | |
+| booking_id | UUID FK → bookings.id | ON DELETE CASCADE |
+| booking_room_id | UUID FK → booking_rooms.id | nullable — links to specific room if charge is per-room |
+| amount | NUMERIC(10,2) | NOT NULL, > 0 |
+| reason | TEXT | NOT NULL |
+| recorded_by | UUID | nullable — auth.users UUID |
+| created_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() |
+
+### `refunds`
+Added: 2026-05-08 — refund requests raised on booking cancellation or early checkout.
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | |
+| booking_id | UUID FK → bookings.id | ON DELETE CASCADE |
+| amount | NUMERIC(10,2) | NOT NULL, > 0 |
+| reason | TEXT | NOT NULL |
+| status | TEXT | 'pending' or 'disbursed' DEFAULT 'pending' |
+| method | payment_method enum | nullable — method used for disbursement |
+| disbursed_by | UUID | nullable — auth.users UUID of admin who disbursed |
+| disbursed_at | TIMESTAMPTZ | nullable |
+| notes | TEXT | nullable |
+| created_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() |
+| updated_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() |
+
 ### Key Relationships
 ```
 auth.users ──1:1──> profiles (id = auth.users.id)
 auth.users ──1:1──> employees (auth_user_id)
-bookings   ──N:1──> rooms  (room_id)
+bookings   ──N:1──> rooms  (room_id)            [legacy compat — see booking_rooms]
 bookings   ──N:1──> guests (primary_guest_id)
 bookings   ──1:N──> booking_guests (booking_id)
 bookings   ──1:N──> payments (booking_id)
+bookings   ──1:N──> booking_rooms (booking_id)  [multi-room junction — added 2026-05-08]
+bookings   ──1:N──> booking_extra_charges (booking_id)
+bookings   ──1:N──> refunds (booking_id)
+booking_rooms ──1:N──> booking_extra_charges (booking_room_id)  [nullable — per-room charges]
 booking_documents links to bookings via TEXT booking_ref (loose coupling — no FK)
 ```
 
@@ -295,7 +360,7 @@ Confirmed → Checked In → Checked Out
          ↓
       Cancelled   (from Confirmed only)
 ```
-- Room status syncs automatically: Confirmed→Reserved, Checked In→Occupied, Checked Out→Cleaning, Cancelled→Available
+- Room status is set by app-layer RPCs and HotelContext: Confirmed→Reserved, Checked In→Occupied, Checked Out→Cleaning, Cancelled→Available (the DB trigger `fn_sync_room_status` that previously handled this was retired 2026-05-08)
 
 ### Checkout Gate Formula
 ```
@@ -580,7 +645,7 @@ Priority: Low. Does not manifest in current app behaviour. Revisit when admin pa
 
   Discovered during Feature B testing on 2026-05-06. The dynamic room block now surfaces stale bookings visually when staff navigates past dates (Room Board shows "Available" for stale Confirmed bookings).
 
-- **Dual-writer for Cleaning status**: When staff checks out a guest, `HotelContext.checkoutNormal/checkoutWithOverride` sets room status to `"Cleaning"` optimistically AND the DB trigger `fn_sync_room_status` does the same. Both writers produce the same value, so there is no conflict today. Future: when the trigger is revised (e.g., to skip Cleaning for certain room types), the optimistic write in HotelContext must stay in sync.
+- **Cleaning status writer**: When staff checks out a guest, `HotelContext.checkoutNormal/checkoutWithOverride` sets `rooms.status` to `"Cleaning"` optimistically AND calls `roomsService.setRoomStatus()` to persist it. The retired `fn_sync_room_status` trigger previously did the same server-side but was dropped on 2026-05-08 (multi-room migration). App-layer RPCs (`checkout_booking_room`) now set `rooms.status` directly — `HotelContext` must stay in sync when any new RPC is wired up.
 
 - **Maintenance flag does not block bookings**: `room.status === "Maintenance"` is a display-only flag today. The booking overlap check queries by `room_number` and ignores room status — a Maintenance room can still be booked. Housekeeping UI is intentionally deferred (see Future Planned → Intentionally deferred).
 
@@ -589,7 +654,7 @@ Priority: Low. Does not manifest in current app behaviour. Revisit when admin pa
 ### Cleaning / Maintenance Lifecycle (as of Block 2)
 
 **Cleaning:**
-- Auto-set on checkout: both `HotelContext.checkoutNormal/checkoutWithOverride` optimistically set the room to `"Cleaning"`, and the DB trigger `fn_sync_room_status` does the same server-side.
+- Auto-set on checkout: `HotelContext.checkoutNormal/checkoutWithOverride` optimistically sets the room to `"Cleaning"` + persists via `roomsService.setRoomStatus()`. The DB trigger `fn_sync_room_status` that previously mirrored this was **retired 2026-05-08** — app layer is now the sole writer of `rooms.status`.
 - Manual clear: staff clicks "Mark Available" on a Cleaning card in today's Room Board view → calls `markRoomAvailable(roomNumber)` → optimistic flip + `roomsService.setRoomStatus()` persist.
 - Rationale for manual clear: time-based auto-clear risks delivering a dirty room to the next guest if housekeeping runs late. Manual confirmation is the safer default until a housekeeping queue is built.
 
@@ -762,9 +827,23 @@ npm run lint         # Run ESLint
 ### Database Migrations (manual)
 There is no automated migration runner. Apply schema changes manually:
 1. Open Supabase Dashboard → SQL Editor → New query
-2. Paste the SQL from `sql/*.sql`
+2. Paste the SQL from `sql/migrations/*.sql`
 3. Click Run
-4. Keep the `.sql` file in `sql/` as a record
+4. Keep the `.sql` file in `sql/migrations/` as a record
+
+### Migration History
+| Date | File | What it does | Status |
+|---|---|---|---|
+| pre-2026-05-08 | `add_booking_rate_columns.sql` | Adds `fixed_rate`, `booking_rate` to bookings | ✅ Applied |
+| pre-2026-05-08 | `add_extra_charge_columns.sql` | Adds `extra_charge_amount`, `extra_charge_reason` to bookings | ✅ Applied |
+| pre-2026-05-08 | `create_booking_documents_table.sql` | Creates `booking_documents` table + storage bucket policies | ✅ Applied |
+| pre-2026-05-08 | `add_early_checkout_and_discount_columns.sql` | Adds early-deduction + additional-discount columns to bookings | ✅ Applied |
+| pre-2026-05-08 | `add_payment_method_extras.sql` | Adds `bkash`/`nagad` enum values + `last_payment_method` column + sync trigger | ✅ Applied |
+| 2026-05-08 | `2026-05-08-multi-room-enum-prep.sql` | Adds `checked_out_early` to `booking_status` enum — **run in separate session first** | ✅ Applied |
+| 2026-05-08 | `2026-05-08-multi-room-foundation.sql` | Creates `booking_rooms`, `booking_extra_charges`, `refunds`; backfills `booking_rooms` from `bookings`; drops `fn_sync_room_status` trigger | ✅ Applied |
+| 2026-05-08 | `2026-05-08-multi-room-rpc.sql` | Adds RPCs: `update_booking_total`, `create_booking_with_rooms`, `checkout_booking_room`, `checkin_booking_room`, `cancel_booking_room`, `extend_booking_room` | ✅ Applied |
+
+**Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`. PostgreSQL 12+ auto-commits `ALTER TYPE ADD VALUE` but the new enum value cannot be used in the same session — applying both in the same window will throw ERROR 55P04.
 
 ---
 

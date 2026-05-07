@@ -3,6 +3,8 @@
 -- Custom PostgreSQL enum types used across all tables.
 --
 -- Exported: 2026-05-07  (reconstructed from observed schema)
+-- Updated:  2026-05-08  — booking_status extended with 'checked_out_early'
+--                         via migration 2026-05-08-multi-room-enum-prep.sql
 --
 -- All types live in the public schema.
 -- Changes to enum values require ALTER TYPE … ADD VALUE — you
@@ -22,7 +24,8 @@ CREATE TYPE public.room_category AS ENUM (
 
 -- ── room_status ──────────────────────────────────────────────
 -- Occupancy state of a physical room.
--- Maintained automatically by trigger fn_sync_room_status.
+-- Previously maintained by trigger fn_sync_room_status (retired 2026-05-08).
+-- Now maintained by app-layer RPCs (checkout_booking_room, cancel_booking_room, etc.).
 CREATE TYPE public.room_status AS ENUM (
   'available',
   'reserved',    -- confirmed booking, guest not yet arrived
@@ -32,13 +35,22 @@ CREATE TYPE public.room_status AS ENUM (
 );
 
 -- ── booking_status ───────────────────────────────────────────
--- Lifecycle state of a booking record.
--- Transitions: confirmed → checked_in → checked_out
---                       ↘ cancelled
+-- Lifecycle state of a booking record (bookings.status) and
+-- per-room stay record (booking_rooms.status).
+-- 'checked_out_early' added 2026-05-08 via multi-room-enum-prep.sql.
+--
+-- Booking-level transitions:
+--   confirmed → checked_in → checked_out
+--            ↘ cancelled
+--
+-- Room-level transitions (booking_rooms.status):
+--   confirmed → checked_in → checked_out
+--            ↘ cancelled          ↘ checked_out_early
 CREATE TYPE public.booking_status AS ENUM (
   'confirmed',
   'checked_in',
   'checked_out',
+  'checked_out_early',   -- room-level only: guest departed before scheduled check_out_date
   'cancelled'
 );
 

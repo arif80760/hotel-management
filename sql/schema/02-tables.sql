@@ -4,16 +4,21 @@
 --
 -- Exported: 2026-05-07  (reconstructed from PostgREST OpenAPI
 --           spec + existing sql/ migration files + TS types)
+-- Updated:  2026-05-08  — Added booking_rooms, booking_extra_charges,
+--           refunds from migration 2026-05-08-multi-room-foundation.sql
 --
 -- Dependency order:
---   1. rooms            (no FK deps)
---   2. guests           (no FK deps)
---   3. profiles         (refs auth.users)
---   4. employees        (refs auth.users)
---   5. bookings         (refs rooms, guests, auth.users)
---   6. payments         (refs bookings, auth.users)
---   7. booking_guests   (refs bookings, guests)
---   8. booking_documents (no table FK — uses booking_ref text)
+--   1. rooms                  (no FK deps)
+--   2. guests                 (no FK deps)
+--   3. profiles               (refs auth.users)
+--   4. employees              (refs auth.users)
+--   5. bookings               (refs rooms, guests, auth.users)
+--   6. payments               (refs bookings, auth.users)
+--   7. booking_guests         (refs bookings, guests)
+--   8. booking_documents      (no table FK — uses booking_ref text)
+--   9. booking_rooms          (refs bookings, rooms)
+--  10. booking_extra_charges  (refs bookings, booking_rooms, auth.users)
+--  11. refunds                (refs bookings, booking_rooms, auth.users)
 -- =============================================================
 
 
@@ -273,3 +278,130 @@ COMMENT ON TABLE  public.booking_documents IS 'Guest identity documents uploaded
 COMMENT ON COLUMN public.booking_documents.booking_ref   IS 'Matches bookings.booking_ref (e.g. BK-1041)';
 COMMENT ON COLUMN public.booking_documents.storage_path  IS 'Object key in the guest-documents Storage bucket';
 COMMENT ON COLUMN public.booking_documents.document_type IS 'National ID Card | Passport | Driving License | Wedding Certificate | Other';
+
+
+-- ──────────────────────────────────────────────────────────────
+-- 9. booking_rooms
+-- Per-room stay record for multi-room booking support.
+-- One row per room per booking. Financial unit remains bookings.
+-- Added: 2026-05-08 via migration 2026-05-08-multi-room-foundation.sql.
+--
+-- Legacy columns (room_id, check_in_date, check_out_date, nights,
+-- room_category_at_booking, booking_rate) are retained on bookings
+-- for backward-compat until Phase 3 migration removes them.
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.booking_rooms (
+  id                     UUID                  PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id             UUID                  NOT NULL
+                           REFERENCES public.bookings(id) ON DELETE CASCADE,
+  room_id                UUID                  NOT NULL
+                           REFERENCES public.rooms(id)   ON DELETE RESTRICT,
+  check_in_date          DATE                  NOT NULL,
+  check_out_date         DATE                  NOT NULL,
+  nights                 SMALLINT              NOT NULL,
+  room_category          public.room_category  NOT NULL,
+  booking_rate           NUMERIC(10, 2)         NOT NULL,
+  status                 public.booking_status NOT NULL DEFAULT 'confirmed',
+  actual_checkout_date   DATE,
+  early_nights_deducted  INTEGER               NOT NULL DEFAULT 0,
+  early_deduction_amount NUMERIC(10, 2)         NOT NULL DEFAULT 0,
+  confirmed_at           TIMESTAMPTZ,
+  checked_in_at          TIMESTAMPTZ,
+  checked_out_at         TIMESTAMPTZ,
+  cancelled_at           TIMESTAMPTZ,
+  created_at             TIMESTAMPTZ           NOT NULL DEFAULT NOW(),
+  updated_at             TIMESTAMPTZ           NOT NULL DEFAULT NOW(),
+  CONSTRAINT chk_br_dates      CHECK (check_out_date > check_in_date),
+  CONSTRAINT chk_br_nights     CHECK (nights > 0),
+  CONSTRAINT chk_br_deduction  CHECK (early_deduction_amount >= 0),
+  CONSTRAINT uq_booking_room   UNIQUE (booking_id, room_id)
+);
+
+COMMENT ON TABLE  public.booking_rooms
+  IS 'Per-room stay records for a booking. One row per room per booking. Financial unit (total_amount, paid_amount) remains on bookings.';
+COMMENT ON COLUMN public.booking_rooms.nights
+  IS 'Computed as check_out_date − check_in_date at write time. Must be updated whenever check_out_date changes.';
+COMMENT ON COLUMN public.booking_rooms.booking_rate
+  IS 'Negotiated rate per night for this specific room in this booking.';
+COMMENT ON COLUMN public.booking_rooms.status
+  IS 'confirmed | checked_in | checked_out | checked_out_early | cancelled';
+COMMENT ON COLUMN public.booking_rooms.actual_checkout_date
+  IS 'Calendar date guest actually vacated this room. May be before check_out_date on early departure. NULL for active rooms.';
+COMMENT ON COLUMN public.booking_rooms.early_deduction_amount
+  IS 'early_nights_deducted × booking_rate. Deducted from bookings.total_amount on early departure.';
+
+
+-- ──────────────────────────────────────────────────────────────
+-- 10. booking_extra_charges
+-- Itemized extra charges per booking, optionally attributed to
+-- a specific room. Replaces scalar bookings.extra_charge_amount
+-- (kept on bookings during transition period).
+-- Added: 2026-05-08 via migration 2026-05-08-multi-room-foundation.sql.
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.booking_extra_charges (
+  id              UUID              PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id      UUID              NOT NULL
+                    REFERENCES public.bookings(id)      ON DELETE CASCADE,
+  booking_room_id UUID
+                    REFERENCES public.booking_rooms(id) ON DELETE SET NULL,
+  amount          NUMERIC(10, 2)    NOT NULL CHECK (amount > 0),
+  reason          TEXT              NOT NULL,
+  charge_type     TEXT,
+  applied_by      UUID              REFERENCES auth.users(id) ON DELETE SET NULL,
+  applied_at      TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
+  created_at      TIMESTAMPTZ       NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE  public.booking_extra_charges
+  IS 'Itemized extra charges per booking, optionally attributed to a specific room';
+COMMENT ON COLUMN public.booking_extra_charges.booking_room_id
+  IS 'NULL = booking-level charge; non-null = attributed to a specific room';
+COMMENT ON COLUMN public.booking_extra_charges.charge_type
+  IS 'Enum-like tag: mini_bar | laundry | damage | other';
+COMMENT ON COLUMN public.booking_extra_charges.amount
+  IS 'Must be > 0. Negative adjustments (credits) are not supported here — use refunds table.';
+
+
+-- ──────────────────────────────────────────────────────────────
+-- 11. refunds
+-- Two-step refund lifecycle: pending (created at cancellation)
+-- → disbursed (admin confirms money returned) or denied.
+-- bookings.paid_amount is NOT decremented on refund — effective
+-- balance is computed in app layer via calcEffectiveBalance().
+-- Added: 2026-05-08 via migration 2026-05-08-multi-room-foundation.sql.
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.refunds (
+  id                   UUID              PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id           UUID              NOT NULL
+                         REFERENCES public.bookings(id)      ON DELETE CASCADE,
+  booking_room_id      UUID
+                         REFERENCES public.booking_rooms(id) ON DELETE SET NULL,
+  amount               NUMERIC(10, 2)    NOT NULL CHECK (amount > 0),
+  reason               TEXT,
+  status               TEXT              NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending', 'disbursed', 'denied')),
+  created_at           TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
+  created_by           UUID              REFERENCES auth.users(id) ON DELETE SET NULL,
+  disbursed_at         TIMESTAMPTZ,
+  disbursed_by         UUID              REFERENCES auth.users(id) ON DELETE SET NULL,
+  disbursement_method  TEXT
+                         CHECK (disbursement_method IS NULL OR
+                                disbursement_method IN
+                                  ('cash', 'bkash', 'nagad', 'bank_transfer', 'card')),
+  notes                TEXT
+);
+
+COMMENT ON TABLE  public.refunds
+  IS 'Refund records for cancelled bookings or early departures. Two-step: pending → disbursed (or denied).';
+COMMENT ON COLUMN public.refunds.booking_room_id
+  IS 'NULL = whole-booking refund; non-null = per-room refund (early departure).';
+COMMENT ON COLUMN public.refunds.amount
+  IS 'Amount agreed at cancellation time. Cannot be edited — deny and create a new row to correct.';
+COMMENT ON COLUMN public.refunds.status
+  IS 'pending: awaiting disbursement | disbursed: money returned to guest | denied: rejected';
+COMMENT ON COLUMN public.refunds.created_by
+  IS 'Staff member who processed the cancellation and agreed the refund amount';
+COMMENT ON COLUMN public.refunds.disbursed_by
+  IS 'Admin who confirmed the physical money was returned to the guest';
+COMMENT ON COLUMN public.refunds.disbursement_method
+  IS 'How money was returned: cash | bkash | nagad | bank_transfer | card';

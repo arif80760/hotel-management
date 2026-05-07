@@ -7,15 +7,19 @@
 -- fn_sync_last_payment_method was already authoritative from
 -- sql/add_payment_method_extras.sql.
 --
--- Functions defined here:
---   1. fn_sync_room_status         — AFTER UPDATE OF status ON bookings
---   2. fn_stamp_booking_timestamps — BEFORE UPDATE OF status ON bookings
---   3. fn_sync_paid_amount         — AFTER INSERT ON payments
---   4. fn_sync_payment_status      — BEFORE UPDATE OF paid_amount, total_amount ON bookings
---   5. fn_sync_last_payment_method — AFTER INSERT ON payments
+-- Updated: 2026-05-08 — fn_sync_room_status RETIRED.
+--   Dropped by migration 2026-05-08-multi-room-foundation.sql.
+--   Replaced by app-layer RPCs (checkout_booking_room,
+--   cancel_booking_room, create_booking_with_rooms, etc.) which
+--   set rooms.status directly. See sql/migrations/2026-05-08-multi-room-rpc.sql.
 --
--- NOTE — binding corrections vs initial reconstruction:
---   trg_sync_room_status      was INSERT OR UPDATE OR DELETE → UPDATE OF status only
+-- Active functions (4 remain):
+--   1. fn_stamp_booking_timestamps — BEFORE UPDATE OF status ON bookings
+--   2. fn_sync_paid_amount         — AFTER INSERT ON payments
+--   3. fn_sync_payment_status      — BEFORE UPDATE OF paid_amount, total_amount ON bookings
+--   4. fn_sync_last_payment_method — AFTER INSERT ON payments
+--
+-- NOTE — binding corrections vs initial reconstruction (2026-05-07):
 --   trg_stamp_booking_timestamps was INSERT OR UPDATE → UPDATE OF status only
 --   trg_sync_paid_amount      was INSERT OR UPDATE OR DELETE → INSERT only
 --                             Body also changed: incremental (+=) not re-aggregate (SUM)
@@ -24,43 +28,22 @@
 
 
 -- ─────────────────────────────────────────────────────────────
--- 1. fn_sync_room_status
--- Fires: AFTER UPDATE OF status ON bookings
+-- RETIRED — fn_sync_room_status
 --
--- Maps booking status → room status via a CASE expression.
--- Only acts when status actually changes (IS DISTINCT FROM).
+-- Previously: AFTER UPDATE OF status ON bookings
+-- Mapped booking.status → rooms.status via CASE expression.
 --
--- Implication of UPDATE-only binding: the service layer must
--- manually set room status on booking INSERT and DELETE
--- (createBooking Step 3, updateBooking Step 6).
+-- Retired: 2026-05-08 — migration 2026-05-08-multi-room-foundation.sql
+-- Reason:  Multi-room support requires per-room room status control.
+--          A single booking.status → single room mapping no longer
+--          works when a booking covers N rooms in different states.
+--          App-layer RPCs now own rooms.status directly.
+-- Rollback: see 2026-05-08-multi-room-foundation-rollback.sql
 -- ─────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION public.fn_sync_room_status()
-RETURNS TRIGGER AS $$
-BEGIN
-  IF NEW.status IS DISTINCT FROM OLD.status THEN
-    UPDATE rooms
-    SET    status = CASE NEW.status
-                     WHEN 'confirmed'   THEN 'reserved'::room_status
-                     WHEN 'checked_in'  THEN 'occupied'::room_status
-                     WHEN 'checked_out' THEN 'cleaning'::room_status
-                     WHEN 'cancelled'   THEN 'available'::room_status
-                   END
-    WHERE  id = NEW.room_id;
-  END IF;
-
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_sync_room_status ON public.bookings;
-CREATE TRIGGER trg_sync_room_status
-AFTER UPDATE OF status ON public.bookings
-FOR EACH ROW
-EXECUTE FUNCTION public.fn_sync_room_status();
 
 
 -- ─────────────────────────────────────────────────────────────
--- 2. fn_stamp_booking_timestamps
+-- 1. fn_stamp_booking_timestamps
 -- Fires: BEFORE UPDATE OF status ON bookings
 --
 -- Sets the appropriate lifecycle timestamp (once) when a booking
@@ -69,7 +52,8 @@ EXECUTE FUNCTION public.fn_sync_room_status();
 --
 -- Implication of UPDATE-only binding: confirmed_at is NOT stamped
 -- automatically on INSERT (new booking creation).  The service
--- layer passes confirmed_at = NOW() explicitly in createBooking.
+-- layer passes confirmed_at = NOW() explicitly in createBooking
+-- and create_booking_with_rooms RPC.
 -- ─────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.fn_stamp_booking_timestamps()
 RETURNS TRIGGER AS $$
@@ -107,7 +91,7 @@ EXECUTE FUNCTION public.fn_stamp_booking_timestamps();
 
 
 -- ─────────────────────────────────────────────────────────────
--- 3. fn_sync_paid_amount
+-- 2. fn_sync_paid_amount
 -- Fires: AFTER INSERT ON payments
 --
 -- Increments bookings.paid_amount by the new payment's amount.
@@ -139,7 +123,7 @@ EXECUTE FUNCTION public.fn_sync_paid_amount();
 
 
 -- ─────────────────────────────────────────────────────────────
--- 4. fn_sync_payment_status
+-- 3. fn_sync_payment_status
 -- Fires: BEFORE UPDATE OF paid_amount, total_amount ON bookings
 --
 -- Derives payment_status from paid_amount vs total_amount.
@@ -179,7 +163,7 @@ EXECUTE FUNCTION public.fn_sync_payment_status();
 
 
 -- ─────────────────────────────────────────────────────────────
--- 5. fn_sync_last_payment_method   ← AUTHORITATIVE
+-- 4. fn_sync_last_payment_method   ← AUTHORITATIVE
 -- Source: sql/add_payment_method_extras.sql (committed 2026-04-30)
 --
 -- Fires: AFTER INSERT ON payments
