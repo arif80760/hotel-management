@@ -393,6 +393,61 @@ export type MockBooking = {
 };
 
 // ─────────────────────────────────────────────────────────────
+// BOOKING CREATION INPUT  (write-path types)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * One room's input data for booking creation.
+ *
+ * All date fields use ISO format (YYYY-MM-DD) — the form hands these
+ * directly from `<input type="date">` values so no display-format
+ * parsing is needed in the service layer.
+ */
+export type RoomInput = {
+  roomNumber:   string;   // e.g. "204" — used to look up room UUID in service Step 2
+  roomCategory: string;   // e.g. "Deluxe" — resolved from rooms table; stored for audit
+  fixedRate:    number;   // published nightly rate at time of booking
+  bookingRate:  number;   // actual negotiated rate (≤ fixedRate for discounts)
+  checkIn:      string;   // ISO date "YYYY-MM-DD" — shared across rooms in v1
+  checkOut:     string;   // ISO date "YYYY-MM-DD"
+  nights:       number;   // checkOut − checkIn in calendar days
+};
+
+/**
+ * Write-path input for booking creation.
+ *
+ * Deliberately separate from MockBooking, which is the READ / DISPLAY shape
+ * populated by mapBooking() from DB JOINs. MockBooking is the source of truth
+ * for all display, filtering, and checkout logic. CreateBookingInput is
+ * constructed only by the booking form and consumed only by:
+ *   • bookingsService.createBooking()
+ *   • HotelContext.createBooking() (which bridges from MockBooking in Phase 5.1,
+ *     then accepts CreateBookingInput directly from Phase 5.2 onward)
+ *
+ * The rooms[] array maps directly to the p_rooms parameter of the
+ * create_booking_with_rooms Supabase RPC.
+ */
+export type CreateBookingInput = {
+  /** Client-generated optimistic booking ref, e.g. "BK-1042". */
+  id:               string;
+  primaryGuest: {
+    name:   string;
+    phone:  string;
+    email?: string;
+  };
+  additionalGuests: AdditionalGuest[];
+  totalGuests:      number;
+  /** One or more rooms — minimum 1. Maps 1-to-1 to p_rooms[] in the RPC. */
+  rooms:            RoomInput[];
+  /** Sum of all rooms' (bookingRate × nights). Auto-computed by the form. */
+  totalAmount:      number;
+  amountPaid:       number;
+  /** Payment method for the initial deposit (used when amountPaid > 0). */
+  amountPaidMethod: PaymentMethod;
+  status:           BookingStatus;
+};
+
+// ─────────────────────────────────────────────────────────────
 // ROOM CATALOG
 // A fast lookup: roomNumber → { category, price }.
 // Used by the booking form for inline type hints and total estimates.

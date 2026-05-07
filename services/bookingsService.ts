@@ -31,6 +31,7 @@ import {
   type RoomStatus,
   type CheckoutOverride,
   type AdditionalGuest,
+  type CreateBookingInput,
   isPlaceholderEmail,
 } from "@/lib/mockData";
 
@@ -556,145 +557,156 @@ async function findOrCreateGuest(
 /**
  * Create a booking in Supabase.
  *
+ * Accepts a CreateBookingInput (the write-path type) rather than MockBooking
+ * (the read/display type). This allows multi-room bookings: input.rooms[] maps
+ * directly to the p_rooms[] parameter of create_booking_with_rooms RPC.
+ *
  * Steps:
- *   1. Find or create the primary guest profile.
- *   2. Look up the room UUID from room_number; check for overlapping bookings.
- *   3. Call create_booking_with_rooms RPC (booking + booking_rooms + payment atomically).
- *   3.5. UPDATE bookings.fixed_rate (non-fatal; RPC does not own this column).
- *   4. Insert any additional guests into booking_guests.
- *   5. Return the full booking (re-fetched with joins).
+ *   1.   Find or create the primary guest profile.
+ *   2.   Resolve room UUID(s) from room_number(s) via a single IN query.
+ *   2.5. Overlap check for every room in the booking.
+ *   3.   Call create_booking_with_rooms RPC (booking + booking_rooms + rooms.status
+ *        + initial payment — all in one atomic transaction).
+ *   3.5. Non-fatal UPDATE bookings.fixed_rate (RPC doesn't write this column).
+ *   4.   Insert additional guests into booking_guests.
+ *   5.   Re-fetch with all joins and return mapBooking().
  */
 export async function createBooking(
-  booking: MockBooking,
-  initialPaymentMethod: PaymentMethod = "cash",
+  input: CreateBookingInput,
 ): Promise<MockBooking> {
-  console.log("[createBooking] Starting — booking_ref (client-assigned):", booking.id, "| guest:", booking.guestName, "| room:", booking.roomNumber);
+  console.log(
+    "[createBooking] Starting — booking_ref (client-assigned):", input.id,
+    "| guest:", input.primaryGuest.name,
+    "| rooms:", input.rooms.map(r => r.roomNumber).join(", "),
+  );
 
-  // ── Step 1 — Resolve primary guest UUID ───────────────────
-  const guestId = await findOrCreateGuest(booking.guestName, booking.phone, booking.email);
+  // ── Step 1 — Resolve primary guest UUID ───────────────────────────────────
+  const guestId = await findOrCreateGuest(
+    input.primaryGuest.name,
+    input.primaryGuest.phone,
+    input.primaryGuest.email,
+  );
 
-  // ── Step 2 — Resolve room UUID ─────────────────────────────
-  console.log("[createBooking] Step 2 — looking up room_number:", booking.roomNumber);
+  // ── Step 2 — Resolve room UUID(s) via single IN query ─────────────────────
+  const roomNumbers = input.rooms.map(r => r.roomNumber);
+  console.log("[createBooking] Step 2 — looking up rooms:", roomNumbers.join(", "));
 
-  const { data: roomRow, error: roomErr, status: roomStatus, statusText: roomStatusText } = await supabase
+  const {
+    data:       roomRows,
+    error:      roomErr,
+    status:     roomStatus,
+    statusText: roomStatusText,
+  } = await supabase
     .from("rooms")
-    .select("id")
-    .eq("room_number", booking.roomNumber)
-    .single();
+    .select("id, room_number")
+    .in("room_number", roomNumbers);
 
-  if (roomErr || !roomRow) {
+  if (roomErr) {
     logSupabaseError(
-      `Step 2 — SELECT rooms (room_number=${booking.roomNumber})`,
-      roomErr,
-      roomStatus,
-      roomStatusText,
+      `Step 2 — SELECT rooms (room_numbers: ${roomNumbers.join(", ")})`,
+      roomErr, roomStatus, roomStatusText,
     );
   }
 
-  console.log("[createBooking] Step 2 — room UUID:", roomRow!.id);
+  // Build roomNumber → UUID map; verify every requested room was found
+  const roomUUIDMap = new Map<string, string>(
+    (roomRows ?? []).map(r => [r.room_number as string, r.id as string]),
+  );
+  for (const r of input.rooms) {
+    if (!roomUUIDMap.has(r.roomNumber)) {
+      logSupabaseError(
+        `Step 2 — room not found (room_number=${r.roomNumber})`,
+        null, undefined, undefined,
+      );
+    }
+  }
+  console.log("[createBooking] Step 2 — resolved UUIDs:", Object.fromEntries(roomUUIDMap));
 
-  // ── Step 2.5 — Overlap / double-booking check ──────────────
+  // ── Step 2.5 — Overlap / double-booking check (per room) ──────────────────
   //
-  // Query the DB for any active booking on this room whose dates overlap
-  // with the requested range using the half-open interval rule:
-  //
+  // Query booking_rooms for any active row on each room whose dates overlap
+  // the requested range using the half-open interval rule:
   //   existing.check_in_date  < new.check_out_date   (existing starts before new ends)
   //   existing.check_out_date > new.check_in_date    (existing ends after new starts)
   //
-  // "Checked Out" and "Cancelled" are excluded so past/cancelled bookings
-  // never block new ones.  Same-day checkout → check-in is intentionally ALLOWED
-  // because check_in_date of the new booking equals check_out_date of the old
-  // one, which means `existing.check_out_date > new.check_in_date` is FALSE
-  // (equal, not greater), so the query returns no row.
+  // "Checked Out" and "Cancelled" are excluded. Same-day checkout→check-in is
+  // ALLOWED: check_in_date of the new booking equals check_out_date of the old,
+  // so `existing.check_out_date > new.check_in_date` is FALSE (equal, not >).
   //
-  // Layer A (UI useMemo) and Layer B (handleSubmit guard) should already have
-  // blocked here; this is the final database-level safeguard that catches race
-  // conditions (e.g. two staff submitting the same room simultaneously).
-  //
-  // NOTE: A PostgreSQL EXCLUSION CONSTRAINT on (room_id, tsrange(check_in_date,
-  //   check_out_date)) would enforce this at the DB engine level with no extra
-  //   round-trip.  Recommended for production.  The SQL is:
-  //   ALTER TABLE bookings ADD CONSTRAINT no_overlapping_bookings
-  //     EXCLUDE USING gist (
-  //       room_id WITH =,
-  //       tsrange(check_in_date::timestamp, check_out_date::timestamp) WITH &&
-  //     )
-  //     WHERE (status IN ('confirmed', 'checked_in'));
-
-  const checkInISO  = parseDisplayDate(booking.checkIn);
-  const checkOutISO = parseDisplayDate(booking.checkOut);
-
-  console.log(
-    `[createBooking] Step 2.5 — overlap check: room ${booking.roomNumber}` +
-    ` (uuid: ${roomRow!.id}) ${checkInISO} → ${checkOutISO}`
-  );
-
-  const {
-    data:  conflictRows,
-    error: conflictErr,
-  } = await supabase
-    .from("booking_rooms")
-    .select("check_in_date, check_out_date, status, bookings!booking_id(booking_ref)")
-    .eq("room_id", roomRow!.id)
-    .in("status", ["confirmed", "checked_in"])
-    .lt("check_in_date", checkOutISO)   // existing starts before new ends
-    .gt("check_out_date", checkInISO);  // existing ends after new starts
-
-  if (conflictErr) {
-    // Non-fatal: log and continue — the UI layers already ran their checks.
-    console.warn(
-      "[createBooking] Step 2.5 — overlap query failed, proceeding:",
-      conflictErr.message
+  // Layer A (UI useMemo) and Layer B (handleSubmit guard) have already run;
+  // this is the final DB-level guard against race conditions.
+  for (const roomInput of input.rooms) {
+    const roomUUID = roomUUIDMap.get(roomInput.roomNumber)!;
+    console.log(
+      `[createBooking] Step 2.5 — overlap check: room ${roomInput.roomNumber}` +
+      ` (uuid: ${roomUUID}) ${roomInput.checkIn} → ${roomInput.checkOut}`,
     );
-  } else if (conflictRows && conflictRows.length > 0) {
-    const c = conflictRows[0];
-    const cBookings = c.bookings as Array<{ booking_ref: string }>;
-    const msg =
-      `Room is unavailable for this date range. ` +
-      `Existing booking ${cBookings[0]?.booking_ref ?? "unknown"} covers ${c.check_in_date} – ${c.check_out_date}` +
-      ` (status: ${c.status}). Please select another room or different dates.`;
-    console.error("[createBooking] Step 2.5 — BLOCKED:", msg);
-    throw new Error(msg);
-  } else {
-    console.log(`[createBooking] Step 2.5 — room ${booking.roomNumber} is available`);
+
+    const { data: conflictRows, error: conflictErr } = await supabase
+      .from("booking_rooms")
+      .select("check_in_date, check_out_date, status, bookings!booking_id(booking_ref)")
+      .eq("room_id", roomUUID)
+      .in("status", ["confirmed", "checked_in"])
+      .lt("check_in_date", roomInput.checkOut)   // existing starts before new ends
+      .gt("check_out_date", roomInput.checkIn);  // existing ends after new starts
+
+    if (conflictErr) {
+      // Non-fatal: UI layers already checked; log and proceed.
+      console.warn(
+        `[createBooking] Step 2.5 — overlap query failed for room ${roomInput.roomNumber}, proceeding:`,
+        conflictErr.message,
+      );
+    } else if (conflictRows && conflictRows.length > 0) {
+      const c = conflictRows[0];
+      const cBookings = c.bookings as Array<{ booking_ref: string }>;
+      const msg =
+        `Room ${roomInput.roomNumber} is unavailable for this date range. ` +
+        `Existing booking ${cBookings[0]?.booking_ref ?? "unknown"} covers ` +
+        `${c.check_in_date} – ${c.check_out_date} (status: ${c.status}). ` +
+        `Please select another room or different dates.`;
+      console.error("[createBooking] Step 2.5 — BLOCKED:", msg);
+      throw new Error(msg);
+    } else {
+      console.log(`[createBooking] Step 2.5 — room ${roomInput.roomNumber} is available`);
+    }
   }
 
   // ── Step 3 — create_booking_with_rooms RPC ───────────────────────────────
   // Atomically INSERTs:
-  //   • bookings row   (status = confirmed, booking_ref = booking.id)
+  //   • bookings row        (status = confirmed, booking_ref = input.id)
   //   • booking_rooms row(s) with per-room rate, dates, and nights
-  //   • rooms.status → reserved for each room
-  //   • payments row   (when p_initial_payment > 0 AND p_payment_method IS NOT NULL)
+  //   • rooms.status        → reserved for each room
+  //   • payments row        (when p_initial_payment > 0 AND p_payment_method IS NOT NULL)
   // Returns the new booking UUID.
   //
   // NOTE: The RPC does NOT write fixed_rate (no booking_rooms equivalent).
   //       Step 3.5 below handles that as a non-fatal follow-up UPDATE.
-  const roomsPayload = [{
-    room_id:        roomRow!.id,
-    check_in_date:  checkInISO,
-    check_out_date: checkOutISO,
-    nights:         booking.nights,
-    category:       booking.roomCategory.toLowerCase(),
-    rate:           booking.bookingRate ?? booking.fixedRate ?? 0,
-  }];
+  const roomsPayload = input.rooms.map(roomInput => ({
+    room_id:        roomUUIDMap.get(roomInput.roomNumber)!,
+    check_in_date:  roomInput.checkIn,
+    check_out_date: roomInput.checkOut,
+    nights:         roomInput.nights,
+    category:       roomInput.roomCategory.toLowerCase(),
+    rate:           roomInput.bookingRate ?? roomInput.fixedRate ?? 0,
+  }));
 
   console.log(
     "[createBooking] Step 3 — RPC create_booking_with_rooms" +
-    ` | booking_ref: ${booking.id}` +
-    ` | total_amount: ${booking.totalAmount}` +
+    ` | booking_ref: ${input.id}` +
+    ` | total_amount: ${input.totalAmount}` +
     ` | rooms:`, roomsPayload,
   );
 
   const { data: bookingUUID, error: rpcErr } = await supabase.rpc(
     "create_booking_with_rooms",
     {
-      p_booking_ref:      booking.id,
+      p_booking_ref:      input.id,
       p_primary_guest_id: guestId,
-      p_total_guests:     booking.totalGuests,
+      p_total_guests:     input.totalGuests,
       p_rooms:            roomsPayload,
-      p_total_amount:     booking.totalAmount,
-      p_initial_payment:  booking.amountPaid > 0 ? booking.amountPaid   : 0,
-      p_payment_method:   booking.amountPaid > 0 ? initialPaymentMethod : null,
+      p_total_amount:     input.totalAmount,
+      p_initial_payment:  input.amountPaid > 0 ? input.amountPaid        : 0,
+      p_payment_method:   input.amountPaid > 0 ? input.amountPaidMethod  : null,
       p_recorded_by:      null,
     },
   );
@@ -705,39 +717,41 @@ export async function createBooking(
       rpcErr,
       undefined,
       undefined,
-      { p_booking_ref: booking.id, rooms: roomsPayload },
+      { p_booking_ref: input.id, rooms: roomsPayload },
     );
   }
 
   console.log("[createBooking] Step 3 — RPC succeeded, booking UUID:", bookingUUID);
 
   // ── Step 3.5 — UPDATE bookings.fixed_rate (non-fatal) ─────────────────────
-  // The RPC INSERT does not include fixed_rate (no booking_rooms equivalent).
-  // mapBooking() reads row.fixed_rate directly (`fixedRate: row.fixed_rate ?? undefined`),
-  // so it must be written separately. Non-fatal: the booking is already committed;
-  // leaving fixedRate undefined is tolerable until the next page reload sets it.
-  if (booking.fixedRate != null) {
+  // fixed_rate is a booking-level concept with no booking_rooms equivalent.
+  // mapBooking() reads row.fixed_rate directly, so it must be written here.
+  // For multi-room bookings we use rooms[0]'s fixedRate — a v1 simplification
+  // (all rooms share one published-rate audit entry on the bookings row).
+  // Non-fatal: the booking is already committed; a missed fixed_rate is
+  // cosmetic — it resolves on next page load via mapBooking's fallback chain.
+  const primaryFixedRate = input.rooms[0]?.fixedRate;
+  if (primaryFixedRate != null && primaryFixedRate > 0) {
     const { error: frErr } = await supabase
       .from("bookings")
-      .update({ fixed_rate: booking.fixedRate })
+      .update({ fixed_rate: primaryFixedRate })
       .eq("id", bookingUUID as string);
 
     if (frErr) {
       console.warn(
         "[createBooking] Step 3.5 — UPDATE bookings.fixed_rate FAILED (non-fatal):",
-        frErr.message,
-        "| booking UUID:", bookingUUID,
+        frErr.message, "| booking UUID:", bookingUUID,
       );
     } else {
-      console.log("[createBooking] Step 3.5 — fixed_rate written:", booking.fixedRate);
+      console.log("[createBooking] Step 3.5 — fixed_rate written:", primaryFixedRate);
     }
   } else {
     console.log("[createBooking] Step 3.5 — no fixed_rate to write, skipping");
   }
 
   // ── Step 4 — Insert additional guests ─────────────────────────────────────
-  if (booking.additionalGuests.length > 0) {
-    const guestRows = booking.additionalGuests.map((g, i) => ({
+  if (input.additionalGuests.length > 0) {
+    const guestRows = input.additionalGuests.map((g, i) => ({
       booking_id:  bookingUUID as string,
       name:        g.name,
       nationality: g.nationality || null,

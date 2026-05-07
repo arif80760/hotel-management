@@ -31,6 +31,7 @@ import type {
   PaymentStatus,
   PaymentMethod,
   CheckoutOverride,
+  CreateBookingInput,
 } from "@/lib/mockData";
 
 import * as roomsService    from "@/services/roomsService";
@@ -171,7 +172,36 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     // bookingsService.createBooking() runs a DB-level overlap check (Layer C)
     // before the INSERT.  On any failure (including double-booking), we roll
     // back the optimistic update so the phantom booking never stays in the UI.
-    bookingsService.createBooking(booking, initialPaymentMethod).catch(err => {
+    //
+    // Phase 5.1 bridge: HotelContext still receives MockBooking (public API
+    // unchanged) and converts it to CreateBookingInput before calling the service.
+    // Phase 5.2 will move this conversion to the form (BookingsClient) and update
+    // the context's public signature to accept CreateBookingInput directly.
+    const serviceInput: CreateBookingInput = {
+      id:           booking.id,
+      primaryGuest: {
+        name:  booking.guestName,
+        phone: booking.phone,
+        email: booking.email,
+      },
+      additionalGuests: booking.additionalGuests,
+      totalGuests:      booking.totalGuests,
+      rooms: [{
+        roomNumber:   booking.roomNumber,
+        roomCategory: booking.roomCategory,
+        fixedRate:    booking.fixedRate    ?? 0,
+        bookingRate:  booking.bookingRate  ?? booking.fixedRate ?? 0,
+        checkIn:      booking.checkInISO   ?? "",
+        checkOut:     booking.checkOutISO  ?? "",
+        nights:       booking.nights,
+      }],
+      totalAmount:      booking.totalAmount,
+      amountPaid:       booking.amountPaid,
+      amountPaidMethod: initialPaymentMethod,
+      status:           booking.status,
+    };
+
+    bookingsService.createBooking(serviceInput).catch(err => {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[HotelContext createBooking] failed — rolling back optimistic update:", msg);
 
