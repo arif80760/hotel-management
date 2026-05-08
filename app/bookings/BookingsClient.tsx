@@ -28,6 +28,7 @@ import {
   type MockBooking as Booking,
   type AdditionalGuest,
   type BookingDocument,
+  type BookingRoom,
   type CreateBookingInput,
   HOTEL_POLICY,
   PAYMENT_METHODS,
@@ -116,6 +117,23 @@ function calcNights(checkIn: string, checkOut: string): number {
 /** Convenience wrapper — number of nights for a RoomFormRow. */
 function rowNights(r: RoomFormRow): number {
   return calcNights(r.checkIn, r.checkOut);
+}
+
+/**
+ * Derives the two display strings for the Room cell in the bookings table.
+ *
+ * - 1 room  : "Room 204" / "Suite"
+ * - 2–5 rooms: "201 · 202 · 305" / "3 × Suite"  or  "Mixed (3)"
+ * - 6+ rooms : "6 rooms"          / "6 × Suite"  or  "Mixed (6)"
+ */
+function roomCellDisplay(bRooms: BookingRoom[]): { top: string; sub: string } {
+  const n = bRooms.length;
+  if (n === 0) return { top: "—", sub: "" };
+  if (n === 1) return { top: `Room ${bRooms[0].roomNumber}`, sub: bRooms[0].roomCategory };
+  const cats = [...new Set(bRooms.map(r => r.roomCategory))];
+  const sub  = cats.length === 1 ? `${n} × ${cats[0]}` : `Mixed (${n})`;
+  const top  = n <= 5 ? bRooms.map(r => r.roomNumber).join(" · ") : `${n} rooms`;
+  return { top, sub };
 }
 
 function formatDate(iso: string): string {
@@ -2683,8 +2701,15 @@ export default function BookingsClient({ initialRoom }: Props) {
 
                     {/* Room */}
                     <td className="px-5 py-3.5">
-                      <p className="font-semibold text-slate-800">Room {b.roomNumber}</p>
-                      <p className="text-[11px] text-slate-400">{b.roomCategory}</p>
+                      {(() => {
+                        const { top, sub } = roomCellDisplay(b.rooms);
+                        return (
+                          <>
+                            <p className="font-semibold text-slate-800">{top}</p>
+                            {sub && <p className="text-[11px] text-slate-400">{sub}</p>}
+                          </>
+                        );
+                      })()}
                     </td>
 
                     {/* ── Guests column ────────────────────────────────────
@@ -3098,8 +3123,15 @@ export default function BookingsClient({ initialRoom }: Props) {
 
                         {/* Room */}
                         <td className="px-5 py-3.5">
-                          <p className="font-semibold text-slate-800">Room {b.roomNumber}</p>
-                          <p className="text-[11px] text-slate-400">{b.roomCategory}</p>
+                          {(() => {
+                            const { top, sub } = roomCellDisplay(b.rooms);
+                            return (
+                              <>
+                                <p className="font-semibold text-slate-800">{top}</p>
+                                {sub && <p className="text-[11px] text-slate-400">{sub}</p>}
+                              </>
+                            );
+                          })()}
                         </td>
 
                         {/* Dates */}
@@ -4298,9 +4330,11 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </div>
                   <div className="min-w-0">
                     <p className="text-[13px] font-semibold text-slate-800 truncate">{b.guestName}</p>
-                    <p className="text-[11.5px] text-slate-500">
-                      Room {b.roomNumber} · {b.checkIn} → {b.checkOut}
-                    </p>
+                    {b.rooms.map(r => (
+                      <p key={r.id} className="text-[11.5px] text-slate-500">
+                        Room {r.roomNumber} · {r.checkIn} → {r.checkOut}
+                      </p>
+                    ))}
                     {displayEmail(b.email) && (
                       <p className="text-[11px] text-slate-400 truncate">{displayEmail(b.email)}</p>
                     )}
