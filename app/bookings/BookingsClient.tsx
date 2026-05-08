@@ -1923,7 +1923,11 @@ export default function BookingsClient({ initialRoom }: Props) {
     for (const r of editForm.rooms) {
       if (r.locked) continue;   // locked rows are display-only, skip validation
       const re: { room?: string; checkIn?: string; checkOut?: string; bookingRate?: string } = {};
-      if (!r.room.trim())  re.room     = "Room number is required.";
+      if (!r.room.trim()) {
+        re.room = "Room number is required.";
+      } else if (!rooms.some(hr => hr.roomNumber === r.room.trim())) {
+        re.room = `Room ${r.room.trim()} does not exist.`;
+      }
       if (!r.checkIn)      re.checkIn  = "Check-in date is required.";
       if (!r.checkOut)     re.checkOut = "Check-out date is required.";
       if (r.checkIn && r.checkOut && calcNights(r.checkIn, r.checkOut) <= 0)

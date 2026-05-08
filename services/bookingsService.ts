@@ -898,17 +898,25 @@ export async function updateBooking(
   // Always excludes the current booking itself via .neq(booking_id, current.id).
   if (changes.rooms && changes.rooms.length > 0) {
     for (const roomChange of changes.rooms) {
-      // Resolve new room UUID from room_number
+      // Resolve new room UUID from room_number.
+      // maybeSingle() returns null (not an error) when 0 rows match,
+      // giving a clean "does not exist" message instead of a Postgres error.
       const { data: roomRow, error: roomErr } = await supabase
         .from("rooms")
         .select("id")
         .eq("room_number", roomChange.roomNumber)
-        .single();
+        .maybeSingle();
 
-      if (roomErr || !roomRow) {
-        const msg = roomErr?.message ?? "not found";
-        console.error("[updateBooking] Step 2 — SELECT rooms FAILED:", msg);
-        throw new Error(`[updateBooking] Room ${roomChange.roomNumber} not found: ${msg}`);
+      if (roomErr) {
+        console.error("[updateBooking] Step 2 — SELECT rooms FAILED:", roomErr.message);
+        throw new Error(
+          `[updateBooking] Could not look up room ${roomChange.roomNumber}: ${roomErr.message}`
+        );
+      }
+      if (!roomRow) {
+        throw new Error(
+          `Room ${roomChange.roomNumber} does not exist in the rooms catalog.`
+        );
       }
 
       const targetRoomId = roomRow.id;
@@ -1019,32 +1027,47 @@ export async function updateBooking(
   // updated, and mapBooking's fallback chain will self-heal on re-fetch).
   if (changes.rooms && changes.rooms.length > 0) {
     for (const roomChange of changes.rooms) {
-      // Resolve room UUID for this room_number
+      // Resolve room UUID for this room_number.
+      // maybeSingle() returns null (not an error) for 0 rows — gives a
+      // clean log message instead of an opaque Postgres coerce error.
       const { data: roomRow, error: roomErr } = await supabase
         .from("rooms")
         .select("id")
         .eq("room_number", roomChange.roomNumber)
-        .single();
+        .maybeSingle();
 
-      if (roomErr || !roomRow) {
+      if (roomErr) {
         console.error("[updateBooking] Step 5.5 — SELECT rooms FAILED for",
-          roomChange.roomNumber, ":", roomErr?.message);
+          roomChange.roomNumber, ":", roomErr.message);
         continue;   // skip this row — non-fatal, logged above
+      }
+      if (!roomRow) {
+        console.error("[updateBooking] Step 5.5 — room does not exist in catalog:",
+          roomChange.roomNumber);
+        continue;   // skip this row — UI validation should have caught this
       }
 
       const newRoomUUID = roomRow.id;
 
-      // Fetch the current booking_rooms row to detect room_id change
+      // Fetch the current booking_rooms row to detect room_id change.
+      // maybeSingle() so a missing UUID gives a clean log rather than a
+      // Postgres coerce error (shouldn't happen in practice — the id comes
+      // from the live booking — but handles any race condition cleanly).
       const { data: currentBR, error: currentBRErr } = await supabase
         .from("booking_rooms")
         .select("id, room_id, status")
         .eq("id", roomChange.id)
         .eq("booking_id", current.id)   // defensive: ensure row belongs to this booking
-        .single();
+        .maybeSingle();
 
-      if (currentBRErr || !currentBR) {
+      if (currentBRErr) {
         console.error("[updateBooking] Step 5.5 — SELECT booking_rooms FAILED for id",
-          roomChange.id, ":", currentBRErr?.message ?? "not found");
+          roomChange.id, ":", currentBRErr.message);
+        continue;
+      }
+      if (!currentBR) {
+        console.error("[updateBooking] Step 5.5 — booking_rooms row not found for id",
+          roomChange.id, "(not in booking", current.id, ")");
         continue;
       }
 
