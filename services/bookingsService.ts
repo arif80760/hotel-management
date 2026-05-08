@@ -816,7 +816,8 @@ export type EditRoomInput = {
   checkOutISO:  string;   // YYYY-MM-DD
   nights:       number;
   bookingRate:  number;
-  fixedRate:    number;
+  // NOTE: fixed_rate is NOT a booking_rooms column — it lives on bookings (catalog-level).
+  // Do not add it here; the service will reject the write with a schema-cache error.
 };
 
 /**
@@ -1059,7 +1060,7 @@ export async function updateBooking(
         check_in_date:  roomChange.checkInISO,
         check_out_date: roomChange.checkOutISO,
         booking_rate:   roomChange.bookingRate,
-        fixed_rate:     roomChange.fixedRate,
+        // fixed_rate is NOT a booking_rooms column — lives on bookings only. Do not write.
         // nights is a GENERATED column — not written
       };
 

@@ -1984,7 +1984,7 @@ export default function BookingsClient({ initialRoom }: Props) {
         checkOutISO:  r.checkOut,
         nights:       calcNights(r.checkIn, r.checkOut),
         bookingRate:  parseFloat(r.bookingRate),
-        fixedRate:    parseFloat(r.fixedRate) || parseFloat(r.bookingRate),
+        // fixedRate intentionally omitted — not a booking_rooms column
       });
     }
     if (roomChanges.length > 0) {
