@@ -17,8 +17,7 @@
 //   Checked Out→ Cleaning
 //   Cancelled  → Available
 
-import { useState, useEffect, useMemo } from "react";
-import ReactDOM from "react-dom";
+import { useState, useEffect, useMemo, Fragment } from "react";
 import Link from "next/link";
 import { useHotel } from "@/contexts/HotelContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -523,12 +522,9 @@ export default function BookingsClient({ initialRoom }: Props) {
   // null = closed; set to a booking to show that booking's full timeline.
   const [timelineModal, setTimelineModal] = useState<Booking | null>(null);
 
-  // ── Room-detail popover ──────────────────────────────────────
-  // Portal-rendered so it escapes the table's overflow-hidden + overflow-x-auto
-  // ancestors. Position is computed from getBoundingClientRect() on click and
-  // stored here; the popover renders fixed at that position.
-  const [openRoomPopoverBookingId, setOpenRoomPopoverBookingId] = useState<string | null>(null);
-  const [roomPopoverPos, setRoomPopoverPos] = useState<{ top: number; left: number } | null>(null);
+  // ── Room-detail expanded row ─────────────────────────────────
+  // Clicking a multi-room cell toggles an inline <tr> drawer below that row.
+  const [expandedBookingId, setExpandedBookingId] = useState<string | null>(null);
 
   // ── Page view ───────────────────────────────────────────────
   // "bookings" = full booking list (existing)
@@ -770,46 +766,19 @@ export default function BookingsClient({ initialRoom }: Props) {
     return () => document.removeEventListener("keydown", onKey);
   }, [docsModal]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Close room-detail popover on Escape, outside click, scroll, or resize
+  // Collapse expanded room-detail row on Escape
   useEffect(() => {
-    if (!openRoomPopoverBookingId) return;
-    function close() {
-      setOpenRoomPopoverBookingId(null);
-      setRoomPopoverPos(null);
-    }
+    if (!expandedBookingId) return;
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") close();
+      if (e.key === "Escape") setExpandedBookingId(null);
     }
-    function onMouseDown(e: MouseEvent) {
-      if (!(e.target as Element).closest("[data-room-popover]")) close();
-    }
-    document.addEventListener("keydown",   onKey);
-    document.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("scroll",      close, { capture: true });
-    window.addEventListener("resize",      close);
-    return () => {
-      document.removeEventListener("keydown",   onKey);
-      document.removeEventListener("mousedown", onMouseDown);
-      window.removeEventListener("scroll",      close, { capture: true });
-      window.removeEventListener("resize",      close);
-    };
-  }, [openRoomPopoverBookingId]);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [expandedBookingId]);
 
-  // ── Room-detail popover open handler ───────────────────────
-  function openRoomPopover(e: React.MouseEvent<HTMLTableCellElement>, bookingId: string) {
-    if (openRoomPopoverBookingId === bookingId) {
-      setOpenRoomPopoverBookingId(null);
-      setRoomPopoverPos(null);
-      return;
-    }
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const POPOVER_WIDTH = 320;
-    let left = rect.left;
-    if (left + POPOVER_WIDTH > window.innerWidth) {
-      left = rect.right - POPOVER_WIDTH;
-    }
-    setRoomPopoverPos({ top: rect.bottom + 4, left });
-    setOpenRoomPopoverBookingId(bookingId);
+  // ── Room-detail row toggle ──────────────────────────────────
+  function toggleExpandedBooking(bookingId: string) {
+    setExpandedBookingId(prev => prev === bookingId ? null : bookingId);
   }
 
   // Pre-fill edit form fields when a booking is selected for editing
@@ -2714,8 +2683,8 @@ export default function BookingsClient({ initialRoom }: Props) {
                 const due     = calcTrueDue(b);
                 const isFutureCheckIn = action?.next === "Checked In" && !canCheckInToday(b.checkInISO);
                 return (
+                  <Fragment key={b.id}>
                   <tr
-                    key={b.id}
                     className={`transition-colors ${
                       b.isNew ? "bg-emerald-50/60 hover:bg-emerald-50" : "hover:bg-slate-50/70"
                     }`}
@@ -2747,19 +2716,19 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </div>
                     </td>
 
-                    {/* Room — multi-room cells are clickable; popover portalled below */}
+                    {/* Room — multi-room cells toggle an inline detail row */}
                     {(() => {
                       const { top, sub, multi } = roomCellDisplay(b.rooms);
+                      const expanded = expandedBookingId === b.id;
                       return (
                         <td
                           className={`px-5 py-3.5 ${multi ? "cursor-pointer select-none" : ""}`}
-                          data-room-popover={multi ? b.id : undefined}
-                          onClick={multi ? e => openRoomPopover(e, b.id) : undefined}
+                          onClick={multi ? () => toggleExpandedBooking(b.id) : undefined}
                         >
                           <div className="flex items-center gap-1">
                             <p className="font-semibold text-slate-800 whitespace-nowrap">{top}</p>
                             {multi && (
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}>
                                 <path d="M6 9l6 6 6-6"/>
                               </svg>
                             )}
@@ -2960,6 +2929,40 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </div>
                     </td>
                   </tr>
+
+                  {/* ── Inline room-detail drawer ─────────────────────── */}
+                  {expandedBookingId === b.id && (
+                    <tr>
+                      <td colSpan={13} className="px-0 pt-0 pb-0">
+                        <div className="bg-slate-50/70 border-t border-slate-100 px-6 py-3">
+                          {/* Header strip */}
+                          <div className="flex items-center gap-2 flex-wrap mb-2 pb-2 border-b border-slate-100">
+                            <span className="text-[11.5px] font-semibold text-slate-700 font-mono">{b.id}</span>
+                            <span className="text-slate-300">·</span>
+                            <span className="text-[11.5px] text-slate-500">{b.rooms.length} rooms</span>
+                            <span className="text-slate-300">·</span>
+                            <span className="text-[11.5px] font-semibold text-slate-700">৳{b.totalAmount.toLocaleString()}</span>
+                          </div>
+                          {/* Per-room list */}
+                          <div className="divide-y divide-slate-100">
+                            {b.rooms.map(r => {
+                              const subtotal = r.bookingRate * r.nights;
+                              return (
+                                <div key={r.id} className="flex items-center gap-4 py-2">
+                                  <span className="text-[13px] font-semibold text-slate-800 w-20 shrink-0">Room {r.roomNumber}</span>
+                                  <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">{r.roomCategory}</span>
+                                  <span className="text-[11.5px] text-slate-500 flex-1 whitespace-nowrap">{r.checkIn} → {r.checkOut} <span className="text-slate-400">· {r.nights} nt</span></span>
+                                  <span className="text-[11px] text-slate-400 whitespace-nowrap">৳{r.bookingRate.toLocaleString()}/nt</span>
+                                  <span className="text-[12px] font-semibold text-slate-700 whitespace-nowrap w-24 text-right">৳{subtotal.toLocaleString()}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -3149,8 +3152,8 @@ export default function BookingsClient({ initialRoom }: Props) {
                     const due       = calcTrueDue(b);
                     const isHighDue = due >= HIGH_DUE_THRESHOLD;
                     return (
+                      <Fragment key={b.id}>
                       <tr
-                        key={b.id}
                         className={`transition-colors ${
                           isHighDue
                             ? "bg-rose-50/50 hover:bg-rose-50/80"
@@ -3178,19 +3181,19 @@ export default function BookingsClient({ initialRoom }: Props) {
                           </div>
                         </td>
 
-                        {/* Room — multi-room cells are clickable; popover portalled below */}
+                        {/* Room — multi-room cells toggle an inline detail row */}
                         {(() => {
                           const { top, sub, multi } = roomCellDisplay(b.rooms);
+                          const expanded = expandedBookingId === b.id;
                           return (
                             <td
                               className={`px-5 py-3.5 ${multi ? "cursor-pointer select-none" : ""}`}
-                              data-room-popover={multi ? b.id : undefined}
-                              onClick={multi ? e => openRoomPopover(e, b.id) : undefined}
+                              onClick={multi ? () => toggleExpandedBooking(b.id) : undefined}
                             >
                               <div className="flex items-center gap-1">
                                 <p className="font-semibold text-slate-800 whitespace-nowrap">{top}</p>
                                 {multi && (
-                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0">
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}>
                                     <path d="M6 9l6 6 6-6"/>
                                   </svg>
                                 )}
@@ -3313,6 +3316,40 @@ export default function BookingsClient({ initialRoom }: Props) {
                           })()}
                         </td>
                       </tr>
+
+                      {/* ── Inline room-detail drawer ───────────────────── */}
+                      {expandedBookingId === b.id && (
+                        <tr>
+                          <td colSpan={13} className="px-0 pt-0 pb-0">
+                            <div className="bg-slate-50/70 border-t border-slate-100 px-6 py-3">
+                              {/* Header strip */}
+                              <div className="flex items-center gap-2 flex-wrap mb-2 pb-2 border-b border-slate-100">
+                                <span className="text-[11.5px] font-semibold text-slate-700 font-mono">{b.id}</span>
+                                <span className="text-slate-300">·</span>
+                                <span className="text-[11.5px] text-slate-500">{b.rooms.length} rooms</span>
+                                <span className="text-slate-300">·</span>
+                                <span className="text-[11.5px] font-semibold text-slate-700">৳{b.totalAmount.toLocaleString()}</span>
+                              </div>
+                              {/* Per-room list */}
+                              <div className="divide-y divide-slate-100">
+                                {b.rooms.map(r => {
+                                  const subtotal = r.bookingRate * r.nights;
+                                  return (
+                                    <div key={r.id} className="flex items-center gap-4 py-2">
+                                      <span className="text-[13px] font-semibold text-slate-800 w-20 shrink-0">Room {r.roomNumber}</span>
+                                      <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">{r.roomCategory}</span>
+                                      <span className="text-[11.5px] text-slate-500 flex-1 whitespace-nowrap">{r.checkIn} → {r.checkOut} <span className="text-slate-400">· {r.nights} nt</span></span>
+                                      <span className="text-[11px] text-slate-400 whitespace-nowrap">৳{r.bookingRate.toLocaleString()}/nt</span>
+                                      <span className="text-[12px] font-semibold text-slate-700 whitespace-nowrap w-24 text-right">৳{subtotal.toLocaleString()}</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     );
                   })}
                 </tbody>
@@ -5022,71 +5059,6 @@ export default function BookingsClient({ initialRoom }: Props) {
         );
       })()}
 
-      {/* ── Room-detail popover (portal) ────────────────────────────────────
-          Rendered into document.body with position:fixed so it escapes every
-          overflow-hidden / overflow-x-auto ancestor on both table cards.
-      ──────────────────────────────────────────────────────────────────────── */}
-      {openRoomPopoverBookingId && roomPopoverPos && (() => {
-        const popoverBooking = bookings.find(bk => bk.id === openRoomPopoverBookingId);
-        if (!popoverBooking) return null;
-        return ReactDOM.createPortal(
-          <div
-            data-room-popover={openRoomPopoverBookingId}
-            style={{ position: "fixed", top: roomPopoverPos.top, left: roomPopoverPos.left }}
-            className="z-50 w-80 bg-white border border-slate-200 rounded-xl shadow-lg overflow-hidden"
-          >
-            {/* Header */}
-            <div className="px-4 py-3 bg-slate-50 border-b border-slate-100 flex items-center gap-2 flex-wrap">
-              <span className="text-[11.5px] font-semibold text-slate-700 font-mono">
-                {popoverBooking.id}
-              </span>
-              <span className="text-slate-300">·</span>
-              <span className="text-[11.5px] text-slate-500">
-                {popoverBooking.rooms.length} rooms
-              </span>
-              <span className="text-slate-300">·</span>
-              <span className="text-[11.5px] font-semibold text-slate-700">
-                ৳{popoverBooking.totalAmount.toLocaleString()}
-              </span>
-            </div>
-
-            {/* Per-room list */}
-            <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto">
-              {popoverBooking.rooms.map(r => {
-                const subtotal = r.bookingRate * r.nights;
-                return (
-                  <div key={r.id} className="px-4 py-3">
-                    {/* Line 1: room number + category badge */}
-                    <div className="flex items-center justify-between gap-2 mb-1">
-                      <span className="text-[13px] font-semibold text-slate-800">
-                        Room {r.roomNumber}
-                      </span>
-                      <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">
-                        {r.roomCategory}
-                      </span>
-                    </div>
-                    {/* Line 2: dates + nights */}
-                    <p className="text-[11.5px] text-slate-500">
-                      {r.checkIn} → {r.checkOut}
-                      <span className="ml-2 text-slate-400">· {r.nights} nt</span>
-                    </p>
-                    {/* Line 3: rate + subtotal (right-aligned) */}
-                    <div className="flex items-center justify-end gap-3 mt-1">
-                      <span className="text-[11px] text-slate-400">
-                        ৳{r.bookingRate.toLocaleString()}/nt
-                      </span>
-                      <span className="text-[12px] font-semibold text-slate-700">
-                        ৳{subtotal.toLocaleString()}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>,
-          document.body
-        );
-      })()}
     </div>
   );
 }
