@@ -804,11 +804,11 @@ export default function BookingsClient({ initialRoom }: Props) {
     }
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const POPOVER_WIDTH = 320;
-    let left = rect.left + window.scrollX;
+    let left = rect.left;
     if (left + POPOVER_WIDTH > window.innerWidth) {
-      left = rect.right + window.scrollX - POPOVER_WIDTH;
+      left = rect.right - POPOVER_WIDTH;
     }
-    setRoomPopoverPos({ top: rect.bottom + window.scrollY + 4, left });
+    setRoomPopoverPos({ top: rect.bottom + 4, left });
     setOpenRoomPopoverBookingId(bookingId);
   }
 
