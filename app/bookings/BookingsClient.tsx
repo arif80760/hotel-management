@@ -410,9 +410,13 @@ function findRoomConflict(
   if (!roomNumber || !checkIn || !checkOut) return undefined;
   return bookings.find(b => {
     if (excludeId && b.id === excludeId) return false;
-    if (b.roomNumber.trim() !== roomNumber.trim()) return false;
     if (!BLOCKING_STATUSES.has(b.status)) return false;
-    return bookingDatesOverlap(b.checkIn, b.checkOut, checkIn, checkOut);
+    // Iterate all rooms in the booking — the legacy shim b.roomNumber only
+    // reflects rooms[0] and silently misses conflicts against rooms 2+.
+    return b.rooms.some(br =>
+      br.roomNumber.trim() === roomNumber.trim() &&
+      bookingDatesOverlap(br.checkInISO, br.checkOutISO, checkIn, checkOut)
+    );
   });
 }
 
