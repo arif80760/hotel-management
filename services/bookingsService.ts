@@ -805,24 +805,36 @@ export async function createBooking(
 // ─────────────────────────────────────────────────────────────
 
 /**
+ * Per-room update for a single booking_rooms row.
+ * id must be the booking_rooms.id UUID — never a new UUID.
+ */
+export type EditRoomInput = {
+  id:           string;   // booking_rooms.id — identifies the row to UPDATE
+  roomNumber:   string;
+  roomCategory: string;
+  checkInISO:   string;   // YYYY-MM-DD
+  checkOutISO:  string;   // YYYY-MM-DD
+  nights:       number;
+  bookingRate:  number;
+  fixedRate:    number;
+};
+
+/**
  * All editable booking fields — all optional so callers only pass what changed.
  * ISO date strings ("YYYY-MM-DD") for dates; no display-format parsing needed.
+ *
+ * Phase 6: per-room edits are now carried in rooms[]. The legacy single-room
+ * fields (roomNumber, roomCategory, checkInISO, checkOutISO, fixedRate,
+ * bookingRate) are REMOVED — room changes must go through rooms[].
  */
 export type UpdateBookingPayload = {
-  guestName?:    string;
-  phone?:        string;
-  email?:        string;       // empty string = leave email unchanged (not cleared to placeholder)
-  roomNumber?:   string;
-  checkInISO?:   string;       // YYYY-MM-DD
-  checkOutISO?:  string;       // YYYY-MM-DD
-  // nights is omitted — it is a PostgreSQL GENERATED column (check_out_date - check_in_date).
-  // Writing to it produces error 23508. Dates are sent instead; the DB recomputes nights.
-  totalAmount?:  number;
-  fixedRate?:    number | null;
-  bookingRate?:  number | null;
+  guestName?:          string;
+  phone?:              string;
+  email?:              string;    // empty string = leave email unchanged
+  totalAmount?:        number;
   totalGuests?:        number;
   additionalGuests?:   AdditionalGuest[];
-  roomCategory?: string;
+  rooms?:              EditRoomInput[];   // per-room updates by booking_rooms.id
 };
 
 /** A single payment transaction row from the `payments` table. */
@@ -843,16 +855,16 @@ export type Payment = {
  *
  * Steps:
  *   1. Fetch current booking (UUID, room_id, paid_amount, dates, status).
- *   2. If room or dates changed: overlap check (current booking excluded via .neq).
- *   3. Build bookings UPDATE payload.
+ *   2. Per-room overlap checks (for each room in changes.rooms[] that changed
+ *      room or dates, excluding the current booking via .neq).
+ *   3. Build bookings UPDATE payload (booking-level fields only).
  *   4. If totalAmount changed: derive payment_status manually
  *      (fn_sync_payment_status fires on paid_amount changes only, not total_amount).
  *   5. Execute bookings UPDATE.
- *   6. If room_id changed: cascade old-room and new-room statuses manually
- *      (fn_sync_room_status fires on status column changes only, not room_id changes).
- *   7. If guest fields changed and currentGuestId known: UPDATE guests row directly;
- *      23505 (email taken) → throw, not silent.
- *   8. Re-fetch with all joins, return mapBooking().
+ *   5.5. Per-room UPDATE on booking_rooms rows (for each row in changes.rooms[]).
+ *        Also cascades room status when room_id changes.
+ *   6. Guest fields UPDATE if changed and guestId known.
+ *   7. Re-fetch with all joins, return mapBooking().
  */
 export async function updateBooking(
   bookingRef: string,
@@ -879,82 +891,67 @@ export async function updateBooking(
     "| paid:", current.paid_amount, "/ total:", current.total_amount,
     "| status:", current.status);
 
-  // ── Step 2 — Overlap check (room changed, or dates changed, or both) ────
-  // Always exclude the current booking itself via .neq so it doesn't block itself.
-  const roomChanged  = changes.roomNumber !== undefined;
-  const datesChanged = changes.checkInISO !== undefined || changes.checkOutISO !== undefined;
-
-  let resolvedRoomId: string | undefined;   // set here if roomChanged; used in Steps 3 + 6
-
-  if (roomChanged || datesChanged) {
-    if (roomChanged) {
-      // Resolve new room UUID
+  // ── Step 2 — Per-room overlap checks ───────────────────────────────────
+  // For each room in changes.rooms[] that has a changed room number or dates,
+  // verify no other active booking covers that room+date window.
+  // Always excludes the current booking itself via .neq(booking_id, current.id).
+  if (changes.rooms && changes.rooms.length > 0) {
+    for (const roomChange of changes.rooms) {
+      // Resolve new room UUID from room_number
       const { data: roomRow, error: roomErr } = await supabase
         .from("rooms")
         .select("id")
-        .eq("room_number", changes.roomNumber!)
+        .eq("room_number", roomChange.roomNumber)
         .single();
 
       if (roomErr || !roomRow) {
         const msg = roomErr?.message ?? "not found";
         console.error("[updateBooking] Step 2 — SELECT rooms FAILED:", msg);
-        throw new Error(`[updateBooking] Room ${changes.roomNumber} not found: ${msg}`);
+        throw new Error(`[updateBooking] Room ${roomChange.roomNumber} not found: ${msg}`);
       }
 
-      resolvedRoomId = roomRow.id;
-      console.log("[updateBooking] Step 2 — new room UUID:", resolvedRoomId);
-    }
+      const targetRoomId = roomRow.id;
+      const ciISO = roomChange.checkInISO;
+      const coISO = roomChange.checkOutISO;
 
-    const targetRoomId = resolvedRoomId ?? current.room_id;   // new room or same room
-    const ciISO = changes.checkInISO  ?? current.check_in_date;
-    const coISO = changes.checkOutISO ?? current.check_out_date;
-
-    console.log(
-      `[updateBooking] Step 2 — overlap check: room_id ${targetRoomId}` +
-      ` | ${ciISO} → ${coISO} (excluding ${bookingRef})`
-    );
-
-    const { data: conflicts, error: conflictErr } = await supabase
-      .from("booking_rooms")
-      .select("check_in_date, check_out_date, status, bookings!booking_id(booking_ref)")
-      .eq("room_id", targetRoomId)
-      .in("status", ["confirmed", "checked_in"])
-      .lt("check_in_date", coISO)
-      .gt("check_out_date", ciISO)
-      .neq("booking_id", current.id);    // ← exclude current booking by UUID
-
-    if (conflictErr) {
-      // Proceeding on overlap query failure risks a double-booking — throw instead.
-      console.error("[updateBooking] Step 2 — overlap query FAILED:", conflictErr);
-      throw new Error(
-        "[updateBooking] Could not verify room availability — " + conflictErr.message
+      console.log(
+        `[updateBooking] Step 2 — overlap check: room ${roomChange.roomNumber}` +
+        ` (${targetRoomId}) | ${ciISO} → ${coISO} (excluding ${bookingRef})`
       );
-    }
 
-    if (conflicts && conflicts.length > 0) {
-      const c = conflicts[0];
-      const cBookings = c.bookings as Array<{ booking_ref: string }>;
-      throw new Error(
-        `Room is unavailable for ${ciISO} – ${coISO}. ` +
-        `Booking ${cBookings[0]?.booking_ref ?? "unknown"} covers ${c.check_in_date} – ${c.check_out_date} (${c.status}).`
-      );
-    }
+      const { data: conflicts, error: conflictErr } = await supabase
+        .from("booking_rooms")
+        .select("check_in_date, check_out_date, status, bookings!booking_id(booking_ref)")
+        .eq("room_id", targetRoomId)
+        .in("status", ["confirmed", "checked_in"])
+        .lt("check_in_date", coISO)
+        .gt("check_out_date", ciISO)
+        .neq("booking_id", current.id);    // ← exclude current booking by UUID
 
-    console.log("[updateBooking] Step 2 — no conflicts found");
+      if (conflictErr) {
+        console.error("[updateBooking] Step 2 — overlap query FAILED:", conflictErr);
+        throw new Error(
+          "[updateBooking] Could not verify room availability — " + conflictErr.message
+        );
+      }
+
+      if (conflicts && conflicts.length > 0) {
+        const c = conflicts[0];
+        const cBookings = c.bookings as Array<{ booking_ref: string }>;
+        throw new Error(
+          `Room ${roomChange.roomNumber} is unavailable for ${ciISO} – ${coISO}. ` +
+          `Booking ${cBookings[0]?.booking_ref ?? "unknown"} covers ${c.check_in_date} – ${c.check_out_date} (${c.status}).`
+        );
+      }
+
+      console.log(`[updateBooking] Step 2 — no conflicts for room ${roomChange.roomNumber}`);
+    }
   }
 
-  // ── Step 3 — Build bookings UPDATE payload ──────────────────────────────
+  // ── Step 3 — Build bookings UPDATE payload (booking-level only) ─────────
   const bookingUpdate: Record<string, unknown> = {};
-  if (resolvedRoomId             !== undefined) bookingUpdate.room_id                  = resolvedRoomId;
-  if (changes.checkInISO         !== undefined) bookingUpdate.check_in_date            = changes.checkInISO;
-  if (changes.checkOutISO        !== undefined) bookingUpdate.check_out_date           = changes.checkOutISO;
-  // nights is GENERATED — never written (error 23508). DB recomputes from dates automatically.
-  if (changes.totalAmount        !== undefined) bookingUpdate.total_amount             = changes.totalAmount;
-  if (changes.fixedRate          !== undefined) bookingUpdate.fixed_rate               = changes.fixedRate;
-  if (changes.bookingRate        !== undefined) bookingUpdate.booking_rate             = changes.bookingRate;
-  if (changes.totalGuests        !== undefined) bookingUpdate.total_guests             = changes.totalGuests;
-  if (changes.roomCategory       !== undefined)
-    bookingUpdate.room_category_at_booking = changes.roomCategory.toLowerCase();
+  if (changes.totalAmount  !== undefined) bookingUpdate.total_amount  = changes.totalAmount;
+  if (changes.totalGuests  !== undefined) bookingUpdate.total_guests  = changes.totalGuests;
 
   // ── Step 4 — Manually sync payment_status when total_amount changes ──────
   // fn_sync_payment_status fires on paid_amount changes only (payments INSERT chain).
@@ -1011,91 +1008,115 @@ export async function updateBooking(
     console.log("[updateBooking] Step 5 — no booking-level changes, skipping UPDATE");
   }
 
-  // ── Step 5.5 — Mirror field changes to booking_rooms ──────────────────────
-  // Phase 4.4: the bookings table is the legacy write path; booking_rooms is the
-  // authoritative source that mapBooking() reads from (via the r0 shim). Any edit
-  // that touches room, dates, rate, or category must also update the booking_rooms
-  // row so the re-fetch in Step 8 returns the correct values.
+  // ── Step 5.5 — Per-room booking_rooms UPDATE ────────────────────────────
+  // Phase 6: each EditRoomInput is matched to its booking_rooms row by id.
+  // If room_number changed, resolve the new room UUID and cascade room statuses.
   //
-  // Current edit UI only supports single-room edits. We update ALL booking_rooms
-  // rows for this booking (there is normally exactly one) because if the room, dates
-  // or rate changed, they changed for the whole booking. When the multi-room add/remove
-  // UI lands (Phase 5+), this block will be replaced with per-room RPC calls.
-  const brRoomFields =
-    resolvedRoomId             !== undefined ||
-    changes.checkInISO         !== undefined ||
-    changes.checkOutISO        !== undefined ||
-    changes.bookingRate        !== undefined ||
-    changes.roomCategory       !== undefined;
+  // NOTE: These UPDATEs run sequentially without a transaction. A future
+  // update_booking_with_rooms() RPC will wrap them atomically. For now any
+  // partial failure is logged loudly but does not abort (booking row is already
+  // updated, and mapBooking's fallback chain will self-heal on re-fetch).
+  if (changes.rooms && changes.rooms.length > 0) {
+    for (const roomChange of changes.rooms) {
+      // Resolve room UUID for this room_number
+      const { data: roomRow, error: roomErr } = await supabase
+        .from("rooms")
+        .select("id")
+        .eq("room_number", roomChange.roomNumber)
+        .single();
 
-  if (brRoomFields) {
-    const brPayload: Record<string, unknown> = {};
-    if (resolvedRoomId       !== undefined) brPayload.room_id        = resolvedRoomId;
-    if (changes.checkInISO   !== undefined) brPayload.check_in_date  = changes.checkInISO;
-    if (changes.checkOutISO  !== undefined) brPayload.check_out_date = changes.checkOutISO;
-    if (changes.bookingRate  !== undefined) brPayload.booking_rate   = changes.bookingRate;
-    if (changes.roomCategory !== undefined)
-      brPayload.room_category = changes.roomCategory.toLowerCase();
+      if (roomErr || !roomRow) {
+        console.error("[updateBooking] Step 5.5 — SELECT rooms FAILED for",
+          roomChange.roomNumber, ":", roomErr?.message);
+        continue;   // skip this row — non-fatal, logged above
+      }
 
-    // Derive the booking UUID (already in scope as current.id)
-    console.log("[updateBooking] Step 5.5 — UPDATE booking_rooms, booking_id:", current.id, "| payload:", brPayload);
+      const newRoomUUID = roomRow.id;
 
-    const { error: brErr } = await supabase
-      .from("booking_rooms")
-      .update(brPayload)
-      .eq("booking_id", current.id);
+      // Fetch the current booking_rooms row to detect room_id change
+      const { data: currentBR, error: currentBRErr } = await supabase
+        .from("booking_rooms")
+        .select("id, room_id, status")
+        .eq("id", roomChange.id)
+        .eq("booking_id", current.id)   // defensive: ensure row belongs to this booking
+        .single();
 
-    if (brErr) {
-      // Non-fatal: booking row is already updated; log loudly but don't abort.
-      // The bookings table is source-of-truth for legacy columns; booking_rooms
-      // will be corrected on next page load via mapBooking's fallback chain.
-      console.error("[updateBooking] Step 5.5 — UPDATE booking_rooms FAILED:", brErr.message,
-        "| booking_id:", current.id, "| payload:", brPayload);
-    } else {
-      console.log("[updateBooking] Step 5.5 — booking_rooms updated successfully");
+      if (currentBRErr || !currentBR) {
+        console.error("[updateBooking] Step 5.5 — SELECT booking_rooms FAILED for id",
+          roomChange.id, ":", currentBRErr?.message ?? "not found");
+        continue;
+      }
+
+      if (currentBR.status !== "confirmed") {
+        console.warn("[updateBooking] Step 5.5 — SKIPPED locked row",
+          roomChange.id, "| status:", currentBR.status);
+        continue;   // defense in depth — UI should have blocked locked rows
+      }
+
+      const brPayload: Record<string, unknown> = {
+        room_id:        newRoomUUID,
+        room_category:  roomChange.roomCategory.toLowerCase(),
+        check_in_date:  roomChange.checkInISO,
+        check_out_date: roomChange.checkOutISO,
+        booking_rate:   roomChange.bookingRate,
+        fixed_rate:     roomChange.fixedRate,
+        // nights is a GENERATED column — not written
+      };
+
+      console.log("[updateBooking] Step 5.5 — UPDATE booking_rooms id:", roomChange.id,
+        "| payload:", brPayload);
+
+      const { error: brErr } = await supabase
+        .from("booking_rooms")
+        .update(brPayload)
+        .eq("id", roomChange.id)
+        .eq("booking_id", current.id);   // extra safety: scope to this booking
+
+      if (brErr) {
+        console.error("[updateBooking] Step 5.5 — UPDATE booking_rooms FAILED:",
+          brErr.message, "| row id:", roomChange.id);
+      } else {
+        console.log("[updateBooking] Step 5.5 — booking_rooms row updated:", roomChange.id);
+      }
+
+      // Room status cascade when room_id changed
+      if (newRoomUUID !== currentBR.room_id) {
+        // Old room: free if no other active booking holds it
+        const { data: otherRows, error: otherErr } = await supabase
+          .from("booking_rooms")
+          .select("id")
+          .eq("room_id", currentBR.room_id)
+          .in("status", ["confirmed", "checked_in"])
+          .neq("booking_id", current.id)
+          .limit(1);
+
+        if (otherErr) {
+          console.error("[updateBooking] Step 5.5 cascade — other-bookings check failed:", otherErr.message);
+        }
+        const oldRoomStatus = (otherRows && otherRows.length > 0) ? "reserved" : "available";
+        const { error: oldRoomErr } = await supabase
+          .from("rooms").update({ status: oldRoomStatus }).eq("id", currentBR.room_id);
+        if (oldRoomErr)
+          console.error("[updateBooking] Step 5.5 cascade — UPDATE old room FAILED:", oldRoomErr.message);
+        else
+          console.log("[updateBooking] Step 5.5 cascade — old room", currentBR.room_id, "→", oldRoomStatus);
+
+        // New room: derive status from booking's current status
+        const bookingStatus = DB_TO_BOOKING_STATUS[current.status] ?? "Confirmed";
+        const newRoomStatus = (bookingToRoomStatus(bookingStatus) ?? "Reserved").toLowerCase();
+        const { error: newRoomErr } = await supabase
+          .from("rooms").update({ status: newRoomStatus }).eq("id", newRoomUUID);
+        if (newRoomErr)
+          console.error("[updateBooking] Step 5.5 cascade — UPDATE new room FAILED:", newRoomErr.message);
+        else
+          console.log("[updateBooking] Step 5.5 cascade — new room", newRoomUUID, "→", newRoomStatus);
+      }
     }
   } else {
     console.log("[updateBooking] Step 5.5 — no room-level changes, skipping booking_rooms UPDATE");
   }
 
-  // TODO: Wrap booking UPDATE + room cascade in a Postgres transaction (RPC function)
-  //       for true atomicity. For now we log loudly on partial failures.
-  //
-  // ── Step 6 — Room status cascade (only when room_id actually changed) ────
-  // fn_sync_room_status fires on bookings.status changes ONLY — not room_id changes.
-  // When a booking moves rooms we must manually fix both the old and new room rows.
-  if (resolvedRoomId !== undefined && resolvedRoomId !== current.room_id) {
-    // 6a — Old room: check if any other active booking still holds it
-    const { data: otherRows, error: otherErr } = await supabase
-      .from("bookings")
-      .select("booking_ref")
-      .eq("room_id", current.room_id)
-      .in("status", ["confirmed", "checked_in"])
-      .neq("booking_ref", bookingRef)
-      .limit(1);
-
-    if (otherErr) {
-      console.error("[updateBooking] Step 6a — other-bookings check failed:", otherErr.message);
-    }
-
-    const oldRoomStatus = (otherRows && otherRows.length > 0) ? "reserved" : "available";
-    console.log("[updateBooking] Step 6a — old room_id:", current.room_id, "→", oldRoomStatus);
-
-    const { error: oldErr } = await supabase
-      .from("rooms").update({ status: oldRoomStatus }).eq("id", current.room_id);
-    if (oldErr) console.error("[updateBooking] Step 6a — UPDATE old room failed:", oldErr.message);
-
-    // 6b — New room: derive status from booking's current status
-    const bookingStatus = DB_TO_BOOKING_STATUS[current.status] ?? "Confirmed";
-    const newRoomStatus = (bookingToRoomStatus(bookingStatus) ?? "Reserved").toLowerCase();
-    console.log("[updateBooking] Step 6b — new room_id:", resolvedRoomId, "→", newRoomStatus);
-
-    const { error: newErr } = await supabase
-      .from("rooms").update({ status: newRoomStatus }).eq("id", resolvedRoomId);
-    if (newErr) console.error("[updateBooking] Step 6b — UPDATE new room failed:", newErr.message);
-  }
-
-  // ── Step 7 — Update guest record ────────────────────────────────────────
+  // ── Step 6 — Guest record UPDATE ────────────────────────────────────────
   // Direct UPDATE by guestId — no find-or-create (that would create a duplicate profile).
   // Email: empty string in changes.email is treated as "leave unchanged" — placeholder
   // generation is a creation-time concern only, not applicable on edit.

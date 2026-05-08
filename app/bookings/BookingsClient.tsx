@@ -23,6 +23,7 @@ import { useHotel } from "@/contexts/HotelContext";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   type BookingStatus,
+  type BookingRoomStatus,
   type PaymentStatus,
   type PaymentMethod,
   type MockBooking as Booking,
@@ -116,20 +117,42 @@ type FormErrors = {
   rooms?: Record<string, { room?: string; checkIn?: string; checkOut?: string; bookingRate?: string; }>;
 };
 
+/** One room row in the Edit Booking modal — mirrors one booking_rooms DB row. */
+type EditRoomRow = {
+  id:           string;           // booking_rooms.id UUID — used to UPDATE the specific row
+  room:         string;           // current room number (editable when !locked)
+  originalRoom: string;           // room number at prefill — used for diff detection
+  checkIn:      string;           // YYYY-MM-DD
+  checkOut:     string;           // YYYY-MM-DD
+  fixedRate:    string;           // published rate (from rooms catalog; display only)
+  bookingRate:  string;           // negotiated rate (editable when !locked)
+  status:       BookingRoomStatus;
+  locked:       boolean;          // true when status !== 'confirmed' — inputs disabled
+};
+
 /** Form state for the Edit Booking modal. All number inputs stored as strings. */
 type EditFormData = {
   guestName:        string;
   phone:            string;
   email:            string;
-  room:             string;
-  checkIn:          string;   // YYYY-MM-DD
-  checkOut:         string;   // YYYY-MM-DD
   totalGuests:      number;
   additionalGuests: AdditionalGuest[];
-  fixedRate:        string;
-  bookingRate:      string;
-  totalAmount:      string;
-  amountPaid:       string;   // display-only read-only context (not sent to service)
+  rooms:            EditRoomRow[];
+  amountPaid:       string;   // display-only — not sent to service
+};
+
+/** Validation errors for the Edit Booking modal.
+ *  Per-room errors are keyed by booking_rooms.id (EditRoomRow.id). */
+type EditFormErrors = {
+  guestName?: string;
+  email?:     string;
+  _form?:     string;   // booking-level error (e.g. partial-paid guard)
+  rooms?:     Record<string, {
+    room?:        string;
+    checkIn?:     string;
+    checkOut?:    string;
+    bookingRate?: string;
+  }>;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -366,9 +389,9 @@ const EMPTY_FORM: FormData = {
 };
 
 const EMPTY_EDIT_FORM: EditFormData = {
-  guestName: "", phone: "", email: "", room: "", checkIn: "", checkOut: "",
+  guestName: "", phone: "", email: "",
   totalGuests: 1, additionalGuests: [],
-  fixedRate: "", bookingRate: "", totalAmount: "", amountPaid: "0",
+  rooms: [], amountPaid: "0",
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -639,7 +662,7 @@ export default function BookingsClient({ initialRoom }: Props) {
   // editTarget: the booking currently being edited (null = modal closed)
   const [editTarget,  setEditTarget]  = useState<Booking | null>(null);
   const [editForm,    setEditForm]    = useState<EditFormData>({ ...EMPTY_EDIT_FORM });
-  const [editErrors,  setEditErrors]  = useState<Partial<Record<keyof EditFormData, string>>>({});
+  const [editErrors,  setEditErrors]  = useState<EditFormErrors>({});
   const [editSaving,  setEditSaving]  = useState<boolean>(false);
 
   // ── Edit confirmation modal state (risky-change review step) ─
@@ -784,38 +807,75 @@ export default function BookingsClient({ initialRoom }: Props) {
   const HIGH_DUE_THRESHOLD = 500;
 
   // ── Edit modal derived values ──────────────────────────────
-  const editNights = calcNights(editForm.checkIn, editForm.checkOut);
 
-  const editRoomConflict = useMemo((): Booking | null => {
-    if (!editTarget) return null;
-    const room = editForm.room.trim();
-    if (!room || !editForm.checkIn || !editForm.checkOut) return null;
-    if (editNights <= 0) return null;
-    return findRoomConflict(bookings, room, editForm.checkIn, editForm.checkOut, editTarget.id) ?? null;
-  }, [bookings, editForm.room, editForm.checkIn, editForm.checkOut, editTarget?.id, editNights]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** Grand total across all editable rooms: Σ bookingRate × nights. */
+  const editGrandTotal = useMemo(
+    () => editForm.rooms.reduce((sum, r) => {
+      const n    = calcNights(r.checkIn, r.checkOut);
+      const rate = parseFloat(r.bookingRate) || 0;
+      return sum + n * rate;
+    }, 0),
+    [editForm.rooms],
+  );
 
-  const editFixedRateNum     = parseFloat(editForm.fixedRate)   || 0;
-  const editBookingRateNum   = parseFloat(editForm.bookingRate)  || editFixedRateNum;
-  const editDiscountPerNight = editFixedRateNum > 0 && editBookingRateNum < editFixedRateNum
-    ? editFixedRateNum - editBookingRateNum : 0;
-  const editDiscountPct      = editFixedRateNum > 0 && editDiscountPerNight > 0
-    ? Math.round((editDiscountPerNight / editFixedRateNum) * 100) : 0;
-  const editTotalSaving      = editDiscountPerNight > 0 && editNights > 0
-    ? editDiscountPerNight * editNights : 0;
+  /** Total nights across all rooms (including locked). */
+  const editTotalNights = useMemo(
+    () => editForm.rooms.reduce((sum, r) => sum + calcNights(r.checkIn, r.checkOut), 0),
+    [editForm.rooms],
+  );
+
+  /** Per-row conflict against existing bookings. Keyed by EditRoomRow.id. */
+  const editRoomConflicts = useMemo((): Record<string, Booking | null> => {
+    if (!editTarget) return {};
+    const result: Record<string, Booking | null> = {};
+    for (const r of editForm.rooms) {
+      if (r.locked || !r.room.trim() || !r.checkIn || !r.checkOut) { result[r.id] = null; continue; }
+      if (calcNights(r.checkIn, r.checkOut) <= 0)                   { result[r.id] = null; continue; }
+      result[r.id] = findRoomConflict(bookings, r.room.trim(), r.checkIn, r.checkOut, editTarget.id) ?? null;
+    }
+    return result;
+  }, [bookings, editForm.rooms, editTarget?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Per-row duplicate conflict — same room number with overlapping dates in sibling rows.
+   *  Locked rows participate (an editable row must not duplicate a locked sibling). */
+  const editDuplicateConflicts = useMemo((): Record<string, EditRoomRow | null> => {
+    const result: Record<string, EditRoomRow | null> = {};
+    for (const r of editForm.rooms) {
+      if (!r.room.trim() || !r.checkIn || !r.checkOut || calcNights(r.checkIn, r.checkOut) <= 0) {
+        result[r.id] = null; continue;
+      }
+      const sibling = editForm.rooms.find(other =>
+        other.id !== r.id &&
+        other.room.trim() !== "" &&
+        other.room.trim() === r.room.trim() &&
+        bookingDatesOverlap(other.checkIn, other.checkOut, r.checkIn, r.checkOut)
+      ) ?? null;
+      result[r.id] = sibling;
+    }
+    return result;
+  }, [editForm.rooms]);
+
+  const editHasConflicts =
+    Object.values(editRoomConflicts).some(Boolean) ||
+    Object.values(editDuplicateConflicts).some(Boolean);
 
   const editHasChanges = editTarget !== null && (
-    editForm.guestName   !== editTarget.guestName                                     ||
-    editForm.phone       !== (editTarget.phone ?? "")                                 ||
-    editForm.email       !== (editTarget.email ?? "")                                 ||
-    editForm.room        !== editTarget.roomNumber                                    ||
-    editForm.checkIn     !== (editTarget.checkInISO  ?? "")                           ||
-    editForm.checkOut    !== (editTarget.checkOutISO ?? "")                           ||
-    editForm.totalGuests !== editTarget.totalGuests                                   ||
+    editForm.guestName   !== editTarget.guestName                   ||
+    editForm.phone       !== (editTarget.phone ?? "")               ||
+    editForm.email       !== (editTarget.email ?? "")               ||
+    editForm.totalGuests !== editTarget.totalGuests                 ||
     JSON.stringify(editForm.additionalGuests) !==
-      JSON.stringify(editTarget.additionalGuests ?? [])                               ||
-    parseFloat(editForm.totalAmount) !== editTarget.totalAmount                       ||
-    parseFloat(editForm.fixedRate)   !== (editTarget.fixedRate   ?? 0)                ||
-    parseFloat(editForm.bookingRate) !== (editTarget.bookingRate ?? 0)
+      JSON.stringify(editTarget.additionalGuests ?? [])             ||
+    editForm.rooms.some(r => {
+      const orig = editTarget.rooms.find(br => br.id === r.id);
+      if (!orig || r.locked) return false;
+      return (
+        r.room.trim()     !== orig.roomNumber     ||
+        r.checkIn         !== orig.checkInISO     ||
+        r.checkOut        !== orig.checkOutISO    ||
+        parseFloat(r.bookingRate) !== orig.bookingRate
+      );
+    })
   );
 
   // ── Effects ────────────────────────────────────────────────
@@ -884,21 +944,31 @@ export default function BookingsClient({ initialRoom }: Props) {
     setExpandedBookingId(prev => prev === bookingId ? null : bookingId);
   }
 
-  // Pre-fill edit form fields when a booking is selected for editing
+  // Pre-fill edit form from editTarget.rooms[] when a booking is selected
   useEffect(() => {
     if (!editTarget) return;
+    const editRooms: EditRoomRow[] = editTarget.rooms.map(br => {
+      // Look up published rate from hotel rooms catalog; fall back to bookingRate
+      const catalogRoom = rooms.find(hr => hr.roomNumber === br.roomNumber);
+      return {
+        id:           br.id,
+        room:         br.roomNumber,
+        originalRoom: br.roomNumber,
+        checkIn:      br.checkInISO,
+        checkOut:     br.checkOutISO,
+        fixedRate:    String(catalogRoom?.price ?? br.bookingRate),
+        bookingRate:  String(br.bookingRate),
+        status:       br.status,
+        locked:       br.status !== "Confirmed",
+      };
+    });
     setEditForm({
       guestName:        editTarget.guestName,
-      phone:            editTarget.phone         ?? "",
-      email:            editTarget.email         ?? "",
-      room:             editTarget.roomNumber,
-      checkIn:          editTarget.checkInISO    ?? "",
-      checkOut:         editTarget.checkOutISO   ?? "",
+      phone:            editTarget.phone            ?? "",
+      email:            editTarget.email            ?? "",
       totalGuests:      editTarget.totalGuests,
       additionalGuests: editTarget.additionalGuests ?? [],
-      fixedRate:        String(editTarget.fixedRate   ?? ""),
-      bookingRate:      String(editTarget.bookingRate ?? ""),
-      totalAmount:      String(editTarget.totalAmount),
+      rooms:            editRooms,
       amountPaid:       String(editTarget.amountPaid),
     });
     setEditErrors({});
@@ -935,18 +1005,9 @@ export default function BookingsClient({ initialRoom }: Props) {
     return () => { document.body.style.overflow = ""; };
   }, [editTarget]);
 
-  // Edit form: auto-recompute totalAmount when bookingRate or dates change.
-  // Mirrors the create form behavior above. Pre-existing gap — edit form was
-  // never wired for live recalc (surfaced during Phase 4 smoke testing).
-  // Staff can still override totalAmount directly after the auto-fill.
-  useEffect(() => {
-    if (!editTarget) return;
-    const rate = parseFloat(editForm.bookingRate) || 0;
-    if (rate > 0 && editNights > 0) {
-      setEditForm(prev => ({ ...prev, totalAmount: String(rate * editNights) }));
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editForm.bookingRate, editNights, editTarget?.id]);
+  // Note: editGrandTotal (useMemo above) replaces the old per-room totalAmount
+  // auto-recompute effect. No separate useEffect needed — the memo recomputes
+  // reactively whenever editForm.rooms changes.
 
   // ── Core form field handler (booking-level fields only) ────
   type BookingLevelField = "guest" | "phone" | "email" | "status" | "totalGuests" | "additionalGuests" | "amountPaid";
@@ -1800,13 +1861,9 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   /** Returns true when any field that warrants a risky-change review step is changing. */
   function isRiskyEdit(changes: import("@/services/bookingsService").UpdateBookingPayload): boolean {
-    return (
-      changes.bookingRate  !== undefined ||
-      changes.fixedRate    !== undefined ||
-      changes.roomNumber   !== undefined ||
-      changes.checkInISO   !== undefined ||
-      changes.checkOutISO  !== undefined
-    );
+    if (!changes.rooms || changes.rooms.length === 0) return false;
+    // Any per-room change to room number, dates, or rate triggers the review step.
+    return changes.rooms.some(rc => true);  // all room changes are considered risky
   }
 
   function handleConfirmCancel() {
@@ -1856,27 +1913,29 @@ export default function BookingsClient({ initialRoom }: Props) {
   }
 
   function validateEdit(): boolean {
-    const e: Partial<Record<keyof EditFormData, string>> = {};
+    const e: EditFormErrors = {};
+
     if (!editForm.guestName.trim()) e.guestName = "Guest name is required.";
-    if (!editForm.room.trim())      e.room      = "Room number is required.";
-    if (!editForm.checkIn)          e.checkIn   = "Check-in date is required.";
-    if (!editForm.checkOut)         e.checkOut  = "Check-out date is required.";
-    if (editForm.checkIn && editForm.checkOut && calcNights(editForm.checkIn, editForm.checkOut) <= 0)
-      e.checkOut = "Check-out must be after check-in.";
-    if (editForm.email.trim()) {
-      const em  = editForm.email.trim();
-      const at  = em.indexOf("@");
-      const dot = em.lastIndexOf(".");
-      if (at < 1 || dot < at + 2 || dot === em.length - 1)
-        e.email = "Invalid email format.";
+    if (editForm.email.trim() && !/^.+@.+\..+$/.test(editForm.email.trim()))
+      e.email = "Enter a valid email address.";
+
+    const rowErrors: NonNullable<EditFormErrors["rooms"]> = {};
+    for (const r of editForm.rooms) {
+      if (r.locked) continue;   // locked rows are display-only, skip validation
+      const re: { room?: string; checkIn?: string; checkOut?: string; bookingRate?: string } = {};
+      if (!r.room.trim())  re.room     = "Room number is required.";
+      if (!r.checkIn)      re.checkIn  = "Check-in date is required.";
+      if (!r.checkOut)     re.checkOut = "Check-out date is required.";
+      if (r.checkIn && r.checkOut && calcNights(r.checkIn, r.checkOut) <= 0)
+        re.checkOut = "Check-out must be after check-in.";
+      const rate = parseFloat(r.bookingRate);
+      if (isNaN(rate) || rate <= 0) re.bookingRate = "Rate must be greater than 0.";
+      if (Object.keys(re).length > 0) rowErrors[r.id] = re;
     }
-    // Guard: amountPaid cannot exceed totalAmount — prevents phantom "Paid" status.
-    const editAmountPaidNum  = parseFloat(editForm.amountPaid)  || 0;
-    const editTotalAmountNum = parseFloat(editForm.totalAmount) || 0;
-    if (editAmountPaidNum > editTotalAmountNum && editTotalAmountNum > 0)
-      e.amountPaid = `Amount paid (৳${editAmountPaidNum.toLocaleString()}) cannot exceed total amount (৳${editTotalAmountNum.toLocaleString()}).`;
+    if (Object.keys(rowErrors).length > 0) e.rooms = rowErrors;
+
     setEditErrors(e);
-    return Object.keys(e).length === 0;
+    return !e.guestName && !e.email && !e.rooms;
   }
 
   function handleEditSubmit() {
@@ -1886,6 +1945,7 @@ export default function BookingsClient({ initialRoom }: Props) {
 
     const changes: import("@/services/bookingsService").UpdateBookingPayload = {};
 
+    // ── Booking-level diffs ───────────────────────────────────
     if (editForm.guestName !== editTarget.guestName)
       changes.guestName = editForm.guestName.trim();
 
@@ -1894,40 +1954,6 @@ export default function BookingsClient({ initialRoom }: Props) {
 
     if (editForm.email.trim() !== "" && editForm.email !== (editTarget.email ?? ""))
       changes.email = editForm.email.trim();
-
-    if (editForm.room !== editTarget.roomNumber) {
-      const editedRoomInfo = rooms.find(r => r.roomNumber === editForm.room.trim());
-      changes.roomNumber   = editForm.room.trim();
-      changes.roomCategory = (editedRoomInfo?.category ?? editTarget.roomCategory).toLowerCase();
-    }
-
-    if (editForm.checkIn  !== (editTarget.checkInISO  ?? "")) changes.checkInISO  = editForm.checkIn;
-    if (editForm.checkOut !== (editTarget.checkOutISO ?? "")) changes.checkOutISO = editForm.checkOut;
-
-    // Capture rate/fixed changes FIRST so the auto-recalc below can use them.
-    // Previously these were set after the auto-recalc block, meaning
-    // changes.bookingRate was always undefined when the recalc ran.
-    const newFixed = parseFloat(editForm.fixedRate);
-    if (!isNaN(newFixed) && newFixed !== (editTarget.fixedRate ?? 0))
-      changes.fixedRate = newFixed;
-
-    const newRate = parseFloat(editForm.bookingRate);
-    if (!isNaN(newRate) && newRate !== (editTarget.bookingRate ?? 0))
-      changes.bookingRate = newRate;
-
-    // Auto-recompute totalAmount when dates or rate change.
-    // nights is a DB GENERATED column and cannot be written directly (error 23508).
-    // The manual override check below lets the user's explicit totalAmount value win.
-    const ciISO = changes.checkInISO  ?? editTarget.checkInISO  ?? "";
-    const coISO = changes.checkOutISO ?? editTarget.checkOutISO ?? "";
-    if (changes.checkInISO !== undefined || changes.checkOutISO !== undefined || changes.bookingRate !== undefined) {
-      const rateForCompute = changes.bookingRate ?? editTarget.bookingRate ?? 0;
-      const newNights      = calcNights(ciISO, coISO);
-      if (rateForCompute > 0 && newNights > 0) changes.totalAmount = rateForCompute * newNights;
-    }
-    // Manual override: if user explicitly changed totalAmount, their value wins
-    const newTotal = parseFloat(editForm.totalAmount);
-    if (!isNaN(newTotal) && newTotal !== editTarget.totalAmount) changes.totalAmount = newTotal;
 
     if (editForm.totalGuests !== editTarget.totalGuests)
       changes.totalGuests = editForm.totalGuests;
@@ -1938,25 +1964,66 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (JSON.stringify(cleanedExtras) !== JSON.stringify(editTarget.additionalGuests ?? []))
       changes.additionalGuests = cleanedExtras;
 
+    // ── Per-room diffs ────────────────────────────────────────
+    const roomChanges: import("@/services/bookingsService").EditRoomInput[] = [];
+    for (const r of editForm.rooms) {
+      if (r.locked) continue;   // locked rows are never submitted
+      const orig = editTarget.rooms.find(br => br.id === r.id);
+      if (!orig) continue;
+      const roomChanged  = r.room.trim()          !== orig.roomNumber;
+      const datesChanged = r.checkIn              !== orig.checkInISO || r.checkOut !== orig.checkOutISO;
+      const rateChanged  = parseFloat(r.bookingRate) !== orig.bookingRate;
+      if (!roomChanged && !datesChanged && !rateChanged) continue;
+
+      const hotelRoom = rooms.find(hr => hr.roomNumber === r.room.trim());
+      roomChanges.push({
+        id:           r.id,
+        roomNumber:   r.room.trim(),
+        roomCategory: hotelRoom?.category ?? orig.roomCategory,
+        checkInISO:   r.checkIn,
+        checkOutISO:  r.checkOut,
+        nights:       calcNights(r.checkIn, r.checkOut),
+        bookingRate:  parseFloat(r.bookingRate),
+        fixedRate:    parseFloat(r.fixedRate) || parseFloat(r.bookingRate),
+      });
+    }
+    if (roomChanges.length > 0) {
+      changes.rooms       = roomChanges;
+      changes.totalAmount = editGrandTotal;   // recompute from per-room subtotals
+    }
+
+    // ── Partial-paid guard ────────────────────────────────────
+    // If new grand total would fall below the already-recorded paid amount,
+    // block the save — staff should use a checkout discount instead.
+    if (changes.totalAmount !== undefined && changes.totalAmount < editTarget.amountPaid) {
+      setEditErrors(prev => ({
+        ...prev,
+        _form: `Total ৳${changes.totalAmount!.toLocaleString()} would be below paid ` +
+               `৳${editTarget!.amountPaid.toLocaleString()}. Use checkout discount instead.`,
+      }));
+      return;
+    }
+
     if (Object.keys(changes).length === 0) { handleEditCancel(); return; }
 
     // ── Risky-edit review step ────────────────────────────────
-    // Room, date, and rate changes get a confirmation modal showing a diff
-    // table before the save is dispatched.
+    // Room, date, and rate changes get a confirmation modal showing a diff table.
     if (isRiskyEdit(changes)) {
       const diffs: Array<{ field: string; from: string; to: string }> = [];
-      if (changes.roomNumber  !== undefined)
-        diffs.push({ field: "Room",           from: editTarget.roomNumber,       to: changes.roomNumber });
-      if (changes.checkInISO  !== undefined)
-        diffs.push({ field: "Check-in",       from: editTarget.checkInISO  ?? "", to: changes.checkInISO });
-      if (changes.checkOutISO !== undefined)
-        diffs.push({ field: "Check-out",      from: editTarget.checkOutISO ?? "", to: changes.checkOutISO });
-      if (changes.bookingRate !== undefined)
-        diffs.push({ field: "Booking Rate",   from: `৳${editTarget.bookingRate ?? 0}`, to: `৳${changes.bookingRate}` });
-      if (changes.fixedRate   !== undefined)
-        diffs.push({ field: "Published Rate", from: `৳${editTarget.fixedRate   ?? 0}`, to: `৳${changes.fixedRate}` });
+      for (const rc of (changes.rooms ?? [])) {
+        const orig = editTarget.rooms.find(br => br.id === rc.id);
+        if (!orig) continue;
+        if (rc.roomNumber !== orig.roomNumber)
+          diffs.push({ field: `Room (${orig.roomNumber})`,      from: orig.roomNumber,   to: rc.roomNumber });
+        if (rc.checkInISO !== orig.checkInISO)
+          diffs.push({ field: `Check-in (${rc.roomNumber})`,    from: orig.checkInISO,   to: rc.checkInISO });
+        if (rc.checkOutISO !== orig.checkOutISO)
+          diffs.push({ field: `Check-out (${rc.roomNumber})`,   from: orig.checkOutISO,  to: rc.checkOutISO });
+        if (rc.bookingRate !== orig.bookingRate)
+          diffs.push({ field: `Rate (${rc.roomNumber})`,        from: `৳${orig.bookingRate}`, to: `৳${rc.bookingRate}` });
+      }
       if (changes.totalAmount !== undefined)
-        diffs.push({ field: "Total Amount",   from: `৳${editTarget.totalAmount}`,      to: `৳${changes.totalAmount}` });
+        diffs.push({ field: "Total Amount", from: `৳${editTarget.totalAmount}`, to: `৳${changes.totalAmount}` });
       setConfirmDiffs(diffs);
       setPendingChanges(changes);
       return;
@@ -5145,7 +5212,6 @@ export default function BookingsClient({ initialRoom }: Props) {
           EDIT BOOKING MODAL (fixed overlay)
           ══════════════════════════════════════════════════════ */}
       {editTarget && (() => {
-        const isCheckedIn = editTarget.status === "Checked In";
         return (
           <div
             className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-start justify-center overflow-y-auto py-8 px-4"
@@ -5176,15 +5242,16 @@ export default function BookingsClient({ initialRoom }: Props) {
                 </button>
               </div>
 
-              {/* Checked-In warning banner */}
-              {isCheckedIn && (
+              {/* Locked-rooms info banner */}
+              {editForm.rooms.some(r => r.locked) && (
                 <div className="mx-6 mt-4 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2">
                   <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
                   <p className="text-[12px] text-amber-700 leading-snug">
-                    <span className="font-semibold">Guest is checked in.</span>{" "}
-                    Contact and guest info can be updated. Room, dates, and rates are locked.
+                    <span className="font-semibold">
+                      {editForm.rooms.filter(r => r.locked).length} room{editForm.rooms.filter(r => r.locked).length !== 1 ? "s" : ""} locked
+                    </span>{" "}due to status — only Confirmed rooms can be edited.
                   </p>
                 </div>
               )}
@@ -5232,59 +5299,188 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </div>
                 </div>
 
-                {/* ── Stay Details ───────────────────────────── */}
+                {/* ── Rooms ──────────────────────────────────── */}
                 <div>
-                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">Stay Details</p>
+                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">
+                    Rooms
+                    <span className="ml-1.5 text-slate-300 font-normal normal-case tracking-normal">
+                      ({editForm.rooms.length})
+                    </span>
+                  </p>
+
+                  {/* _form error (e.g. partial-paid guard) */}
+                  {editErrors._form && (
+                    <div className="mb-3 px-3 py-2.5 bg-red-50 border border-red-200 rounded-xl text-[12px] text-red-600">
+                      {editErrors._form}
+                    </div>
+                  )}
+
                   <div className="space-y-3">
-                    <div>
-                      <label className="block text-[12px] font-medium text-slate-600 mb-1">Room Number *</label>
-                      <input
-                        type="text"
-                        value={editForm.room}
-                        onChange={e => { setEditForm(p => ({ ...p, room: e.target.value })); setEditErrors(p => ({ ...p, room: undefined })); }}
-                        disabled={isCheckedIn}
-                        className={`w-full px-3 py-2 text-[13px] rounded-xl border ${editErrors.room ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed`}
-                        placeholder="204"
-                      />
-                      {editErrors.room && <p className="mt-1 text-[11.5px] text-red-500">{editErrors.room}</p>}
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-[12px] font-medium text-slate-600 mb-1">Check-in *</label>
-                        <input
-                          type="date"
-                          value={editForm.checkIn}
-                          onChange={e => { setEditForm(p => ({ ...p, checkIn: e.target.value })); setEditErrors(p => ({ ...p, checkIn: undefined })); }}
-                          disabled={isCheckedIn}
-                          className={`w-full px-3 py-2 text-[13px] rounded-xl border ${editErrors.checkIn ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed`}
-                        />
-                        {editErrors.checkIn && <p className="mt-1 text-[11.5px] text-red-500">{editErrors.checkIn}</p>}
-                      </div>
-                      <div>
-                        <label className="block text-[12px] font-medium text-slate-600 mb-1">Check-out *</label>
-                        <input
-                          type="date"
-                          value={editForm.checkOut}
-                          onChange={e => { setEditForm(p => ({ ...p, checkOut: e.target.value })); setEditErrors(p => ({ ...p, checkOut: undefined })); }}
-                          disabled={isCheckedIn}
-                          className={`w-full px-3 py-2 text-[13px] rounded-xl border ${editErrors.checkOut ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed`}
-                        />
-                        {editErrors.checkOut && <p className="mt-1 text-[11.5px] text-red-500">{editErrors.checkOut}</p>}
-                      </div>
-                    </div>
-                    {editNights > 0 && (
-                      <p className="text-[12px] text-slate-500">
-                        <span className="font-medium text-slate-700">{editNights}</span>{" "}
-                        night{editNights !== 1 ? "s" : ""}
-                      </p>
-                    )}
-                    {editRoomConflict && (
-                      <div className="px-3 py-2 bg-red-50 border border-red-200 rounded-xl text-[12px] text-red-600">
-                        ⚠️ Room conflict with booking {editRoomConflict.id} ({editRoomConflict.checkIn} – {editRoomConflict.checkOut}).
-                      </div>
-                    )}
+                    {editForm.rooms.map((r, idx) => {
+                      const rowErr  = editErrors.rooms?.[r.id];
+                      const conflict  = editRoomConflicts[r.id];
+                      const duplicate = editDuplicateConflicts[r.id];
+                      const nights  = calcNights(r.checkIn, r.checkOut);
+                      const subtotal = nights * (parseFloat(r.bookingRate) || 0);
+                      return (
+                        <div
+                          key={r.id}
+                          className={`border rounded-xl p-4 space-y-3 ${r.locked ? "opacity-60 bg-slate-50" : "bg-white"}`}
+                        >
+                          {/* Row header */}
+                          <div className="flex items-center justify-between">
+                            <span className="text-[12px] font-semibold text-slate-700">
+                              Room {idx + 1}
+                            </span>
+                            <span className={`text-[10.5px] font-semibold px-2 py-0.5 rounded-full ${
+                              r.status === "Confirmed"          ? "bg-emerald-50 text-emerald-700" :
+                              r.status === "Checked In"         ? "bg-blue-50 text-blue-700"       :
+                              r.status === "Checked Out"        ? "bg-slate-100 text-slate-500"    :
+                              r.status === "Checked Out Early"  ? "bg-amber-50 text-amber-700"     :
+                              "bg-slate-100 text-slate-400"
+                            }`}>
+                              {r.locked ? `🔒 Locked — ${r.status}` : r.status}
+                            </span>
+                          </div>
+
+                          {/* 4-column grid: Room · Check-in · Check-out · Rate */}
+                          <div className="grid grid-cols-2 gap-2.5">
+                            <div>
+                              <label className="block text-[11.5px] font-medium text-slate-500 mb-1">Room Number *</label>
+                              <input
+                                type="text"
+                                value={r.room}
+                                disabled={r.locked}
+                                onChange={e => {
+                                  const val = e.target.value;
+                                  setEditForm(prev => ({
+                                    ...prev,
+                                    rooms: prev.rooms.map(row => row.id === r.id ? { ...row, room: val } : row),
+                                  }));
+                                  setEditErrors(prev => ({
+                                    ...prev,
+                                    rooms: { ...prev.rooms, [r.id]: { ...prev.rooms?.[r.id], room: undefined } },
+                                  }));
+                                }}
+                                className={`w-full px-3 py-1.5 text-[13px] rounded-lg border ${rowErr?.room ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed`}
+                                placeholder="204"
+                              />
+                              {rowErr?.room && <p className="mt-0.5 text-[11px] text-red-500">{rowErr.room}</p>}
+                            </div>
+                            <div>
+                              <label className="block text-[11.5px] font-medium text-slate-500 mb-1">Rate / Night *</label>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[11px] text-slate-400 pointer-events-none">৳</span>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={r.bookingRate}
+                                  disabled={r.locked}
+                                  onChange={e => {
+                                    const val = e.target.value;
+                                    setEditForm(prev => ({
+                                      ...prev,
+                                      rooms: prev.rooms.map(row => row.id === r.id ? { ...row, bookingRate: val } : row),
+                                    }));
+                                    setEditErrors(prev => ({
+                                      ...prev,
+                                      rooms: { ...prev.rooms, [r.id]: { ...prev.rooms?.[r.id], bookingRate: undefined } },
+                                    }));
+                                  }}
+                                  onWheel={e => (e.target as HTMLInputElement).blur()}
+                                  className={`w-full pl-6 pr-2 py-1.5 text-[13px] rounded-lg border ${rowErr?.bookingRate ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
+                                  placeholder="0"
+                                />
+                              </div>
+                              {rowErr?.bookingRate && <p className="mt-0.5 text-[11px] text-red-500">{rowErr.bookingRate}</p>}
+                            </div>
+                            <div>
+                              <label className="block text-[11.5px] font-medium text-slate-500 mb-1">Check-in *</label>
+                              <input
+                                type="date"
+                                value={r.checkIn}
+                                disabled={r.locked}
+                                onChange={e => {
+                                  const val = e.target.value;
+                                  setEditForm(prev => ({
+                                    ...prev,
+                                    rooms: prev.rooms.map(row => row.id === r.id ? { ...row, checkIn: val } : row),
+                                  }));
+                                  setEditErrors(prev => ({
+                                    ...prev,
+                                    rooms: { ...prev.rooms, [r.id]: { ...prev.rooms?.[r.id], checkIn: undefined } },
+                                  }));
+                                }}
+                                className={`w-full px-2.5 py-1.5 text-[13px] rounded-lg border ${rowErr?.checkIn ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed`}
+                              />
+                              {rowErr?.checkIn && <p className="mt-0.5 text-[11px] text-red-500">{rowErr.checkIn}</p>}
+                            </div>
+                            <div>
+                              <label className="block text-[11.5px] font-medium text-slate-500 mb-1">Check-out *</label>
+                              <input
+                                type="date"
+                                value={r.checkOut}
+                                disabled={r.locked}
+                                onChange={e => {
+                                  const val = e.target.value;
+                                  setEditForm(prev => ({
+                                    ...prev,
+                                    rooms: prev.rooms.map(row => row.id === r.id ? { ...row, checkOut: val } : row),
+                                  }));
+                                  setEditErrors(prev => ({
+                                    ...prev,
+                                    rooms: { ...prev.rooms, [r.id]: { ...prev.rooms?.[r.id], checkOut: undefined } },
+                                  }));
+                                }}
+                                className={`w-full px-2.5 py-1.5 text-[13px] rounded-lg border ${rowErr?.checkOut ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed`}
+                              />
+                              {rowErr?.checkOut && <p className="mt-0.5 text-[11px] text-red-500">{rowErr.checkOut}</p>}
+                            </div>
+                          </div>
+
+                          {/* Per-row summary strip */}
+                          {nights > 0 && (
+                            <p className="text-[11.5px] text-slate-400">
+                              {nights} night{nights !== 1 ? "s" : ""} × ৳{(parseFloat(r.bookingRate) || 0).toLocaleString()} = {" "}
+                              <span className="font-semibold text-slate-600">৳{subtotal.toLocaleString()}</span>
+                            </p>
+                          )}
+
+                          {/* Conflict warnings (only for unlocked rows) */}
+                          {!r.locked && conflict && (
+                            <div className="px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-[11.5px] text-red-600">
+                              ⚠️ Conflict with booking {conflict.id} ({conflict.checkIn} – {conflict.checkOut})
+                            </div>
+                          )}
+                          {!r.locked && duplicate && (
+                            <div className="px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-[11.5px] text-red-600">
+                              ⚠️ Room {r.room} already appears in this booking with overlapping dates
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
+
+                {/* ── Summary strip ──────────────────────────── */}
+                {editForm.rooms.length > 0 && (
+                  <div className="flex items-center justify-between px-4 py-3 bg-slate-50 rounded-xl border border-slate-200 text-[12px]">
+                    <span className="text-slate-500">
+                      {editForm.rooms.length} room{editForm.rooms.length !== 1 ? "s" : ""} ·{" "}
+                      {editTotalNights} night{editTotalNights !== 1 ? "s" : ""} ·{" "}
+                      {editForm.totalGuests} guest{editForm.totalGuests !== 1 ? "s" : ""}
+                    </span>
+                    <div className="text-right">
+                      <span className="font-semibold text-slate-800">৳{editGrandTotal.toLocaleString()}</span>
+                      {editTarget.amountPaid > 0 && (
+                        <span className="text-slate-400 ml-2">
+                          paid ৳{editTarget.amountPaid.toLocaleString()} · due ৳{Math.max(0, editGrandTotal - editTarget.amountPaid).toLocaleString()}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* ── Guests ─────────────────────────────────── */}
                 <div>
@@ -5346,81 +5542,6 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </div>
                 </div>
 
-                {/* ── Rates & Payment ────────────────────────── */}
-                <div>
-                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">Rates & Payment</p>
-                  <div className="space-y-3">
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-[12px] font-medium text-slate-600 mb-1">Published Rate / night</label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400">৳</span>
-                          <input
-                            type="number" min={0}
-                            value={editForm.fixedRate}
-                            onChange={e => setEditForm(p => ({ ...p, fixedRate: e.target.value }))}
-                            disabled={isCheckedIn}
-                            className="w-full pl-6 pr-3 py-2 text-[13px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed"
-                            placeholder="0"
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="block text-[12px] font-medium text-slate-600 mb-1">Booking Rate / night</label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400">৳</span>
-                          <input
-                            type="number" min={0}
-                            value={editForm.bookingRate}
-                            onChange={e => setEditForm(p => ({ ...p, bookingRate: e.target.value }))}
-                            disabled={isCheckedIn}
-                            className="w-full pl-6 pr-3 py-2 text-[13px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed"
-                            placeholder="0"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                    {editDiscountPct > 0 && (
-                      <p className="text-[11.5px] text-emerald-600">
-                        {editDiscountPct}% discount — saving ৳{editTotalSaving.toLocaleString()} total
-                        {editNights > 0 ? ` (৳${editDiscountPerNight.toLocaleString()}/night × ${editNights} nights)` : ""}
-                      </p>
-                    )}
-                    <div>
-                      <label className="block text-[12px] font-medium text-slate-600 mb-1">Total Amount</label>
-                      <div className="relative">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400">৳</span>
-                        <input
-                          type="number" min={0}
-                          value={editForm.totalAmount}
-                          onChange={e => setEditForm(p => ({ ...p, totalAmount: e.target.value }))}
-                          disabled={isCheckedIn}
-                          className="w-full pl-6 pr-3 py-2 text-[13px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed"
-                          placeholder="0"
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <label className="block text-[12px] font-medium text-slate-600 mb-1">Amount Paid at Booking</label>
-                      <div className="relative">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400">৳</span>
-                        <input
-                          type="number" min={0}
-                          max={parseFloat(editForm.totalAmount) || undefined}
-                          value={editForm.amountPaid}
-                          onChange={e => { setEditForm(p => ({ ...p, amountPaid: e.target.value })); setEditErrors(p => ({ ...p, amountPaid: undefined })); }}
-                          className={`w-full pl-6 pr-3 py-2 text-[13px] rounded-xl border ${editErrors.amountPaid ? "border-red-400 bg-red-50" : "border-slate-200"} focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400`}
-                          placeholder="0"
-                        />
-                      </div>
-                      {editErrors.amountPaid
-                        ? <p className="mt-1 text-[11.5px] text-red-500">{editErrors.amountPaid}</p>
-                        : <p className="mt-1 text-[11px] text-slate-400">Adjust via Record Payment for post-booking payments.</p>
-                      }
-                    </div>
-                  </div>
-                </div>
-
               </div>
 
               {/* Footer */}
@@ -5435,7 +5556,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 <button
                   type="button"
                   onClick={handleEditSubmit}
-                  disabled={!editHasChanges || editSaving || !!editRoomConflict}
+                  disabled={!editHasChanges || editSaving || editHasConflicts}
                   className="px-5 py-2 text-[13px] font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {editSaving ? "Saving…" : "Save Changes"}

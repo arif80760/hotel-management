@@ -526,67 +526,85 @@ export function HotelProvider({ children }: { children: ReactNode }) {
   ) {
     const prevBookings = bookings;
     const prevRooms    = rooms;
-    const roomChanged =
-      changes.roomNumber !== undefined &&
-      changes.roomNumber !== original.roomNumber;
+
+    // Rooms that changed number (for room-status cascade in optimistic update)
+    const roomNumberChanges: Array<{ from: string; to: string }> =
+      (changes.rooms ?? [])
+        .map(rc => {
+          const origRoom = original.rooms.find(br => br.id === rc.id);
+          if (!origRoom || rc.roomNumber === origRoom.roomNumber) return null;
+          return { from: origRoom.roomNumber, to: rc.roomNumber };
+        })
+        .filter((x): x is { from: string; to: string } => x !== null);
 
     setBookings(prev =>
       prev.map(b => {
         if (b.id !== bookingRef) return b;
         const patch: Partial<MockBooking> = {};
+        // Booking-level fields
         if (changes.guestName    !== undefined) patch.guestName    = changes.guestName;
         if (changes.phone        !== undefined) patch.phone        = changes.phone;
         if (changes.email !== undefined && changes.email.trim() !== "")
           patch.email = changes.email.trim();
-        if (changes.roomNumber   !== undefined) patch.roomNumber   = changes.roomNumber;
-        if (changes.roomCategory !== undefined)
-          patch.roomCategory =
-            changes.roomCategory.charAt(0).toUpperCase() + changes.roomCategory.slice(1);
-        if (changes.checkInISO !== undefined) {
-          patch.checkInISO = changes.checkInISO;
-          patch.checkIn    = new Date(`${changes.checkInISO}T12:00:00`)
-            .toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-        }
-        if (changes.checkOutISO !== undefined) {
-          patch.checkOutISO = changes.checkOutISO;
-          patch.checkOut    = new Date(`${changes.checkOutISO}T12:00:00`)
-            .toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-        }
-        // nights is a DB GENERATED column — never written directly.
-        // Derive optimistically from the new dates for immediate UI feedback.
-        if (changes.checkInISO !== undefined || changes.checkOutISO !== undefined) {
-          const ci = changes.checkInISO  ?? b.checkInISO  ?? "";
-          const co = changes.checkOutISO ?? b.checkOutISO ?? "";
-          if (ci && co) {
-            patch.nights = Math.max(0, Math.round(
-              (new Date(co + "T12:00:00").getTime() - new Date(ci + "T12:00:00").getTime()) / 86400000
-            ));
-          }
-        }
         if (changes.totalAmount  !== undefined) {
           patch.totalAmount = changes.totalAmount;
           patch.payment = bookingsService.derivePaymentStatus(changes.totalAmount, b.amountPaid);
         }
-        if (changes.fixedRate    !== undefined) patch.fixedRate    = changes.fixedRate   ?? undefined;
-        if (changes.bookingRate  !== undefined) patch.bookingRate  = changes.bookingRate ?? undefined;
-        if (changes.totalGuests       !== undefined) patch.totalGuests       = changes.totalGuests;
-        if (changes.additionalGuests  !== undefined) patch.additionalGuests  = changes.additionalGuests;
+        if (changes.totalGuests      !== undefined) patch.totalGuests      = changes.totalGuests;
+        if (changes.additionalGuests !== undefined) patch.additionalGuests = changes.additionalGuests;
+
+        // Per-room optimistic update — patch matching BookingRoom entries
+        if (changes.rooms && changes.rooms.length > 0) {
+          patch.rooms = b.rooms.map(br => {
+            const rc = changes.rooms!.find(r => r.id === br.id);
+            if (!rc) return br;
+            const newCheckIn  = rc.checkInISO;
+            const newCheckOut = rc.checkOutISO;
+            return {
+              ...br,
+              roomNumber:   rc.roomNumber,
+              roomCategory: rc.roomCategory.charAt(0).toUpperCase() + rc.roomCategory.slice(1),
+              checkInISO:   newCheckIn,
+              checkOutISO:  newCheckOut,
+              checkIn:  new Date(`${newCheckIn}T12:00:00`)
+                .toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+              checkOut: new Date(`${newCheckOut}T12:00:00`)
+                .toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+              nights:      rc.nights,
+              bookingRate: rc.bookingRate,
+            };
+          });
+          // Refresh backward-compat shims from rooms[0]
+          const r0 = patch.rooms[0];
+          if (r0) {
+            patch.roomNumber   = r0.roomNumber;
+            patch.roomCategory = r0.roomCategory;
+            patch.checkInISO   = r0.checkInISO;
+            patch.checkOutISO  = r0.checkOutISO;
+            patch.checkIn      = r0.checkIn;
+            patch.checkOut     = r0.checkOut;
+            patch.nights       = patch.rooms.reduce((s, r) => s + r.nights, 0);
+          }
+        }
+
         return { ...b, ...patch };
       })
     );
 
-    if (roomChanged) {
+    if (roomNumberChanges.length > 0) {
       setRooms(prev =>
         prev.map(r => {
-          if (r.roomNumber === original.roomNumber) {
+          const freed = roomNumberChanges.find(rc => rc.from === r.roomNumber);
+          const taken = roomNumberChanges.find(rc => rc.to   === r.roomNumber);
+          if (freed) {
             const hasOtherActive = bookings.some(
               b => b.id !== bookingRef &&
-                   b.roomNumber === original.roomNumber &&
-                   (b.status === "Confirmed" || b.status === "Checked In")
+                   b.rooms.some(br => br.roomNumber === r.roomNumber &&
+                     (br.status === "Confirmed" || br.status === "Checked In"))
             );
             return { ...r, status: (hasOtherActive ? "Reserved" : "Available") as RoomStatus };
           }
-          if (r.roomNumber === changes.roomNumber) {
+          if (taken) {
             const newStatus = bookingsService.bookingToRoomStatus(original.status) ?? "Reserved";
             return { ...r, status: newStatus };
           }
