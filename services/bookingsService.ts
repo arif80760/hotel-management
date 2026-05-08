@@ -1246,8 +1246,20 @@ export async function updateBooking(
 
 /**
  * Change a booking's status in Supabase.
- * The DB triggers fn_stamp_booking_timestamps and fn_sync_room_status
- * handle the side-effects server-side automatically.
+ *
+ * For "Confirmed" ↔ "Checked In" transitions this calls the
+ * checkin_booking_atomic RPC, which atomically updates both
+ * bookings.status and all booking_rooms.status rows in a single
+ * transaction. This prevents the Phase 6 edit-modal lock state from
+ * reading stale 'confirmed' rows after check-in.
+ *
+ * "Checked Out", "Checked Out Early", and "Cancelled" transitions are
+ * handled by their dedicated RPCs (checkout_booking_room,
+ * cancel_booking_room) which already cascade correctly. Those paths
+ * do NOT go through this function — this is called only from the
+ * booking-list "Check In" button (handleWorkflowAction → changeBookingStatus).
+ * If they ever reach here, we fall back to a bare bookings UPDATE so
+ * the existing RPC has already done the booking_rooms work upstream.
  *
  * The id parameter is the booking_ref ("BK-1041"), not the UUID.
  */
@@ -1255,9 +1267,50 @@ export async function updateBookingStatus(
   id: string,
   newStatus: BookingStatus
 ): Promise<void> {
+  const dbStatus = BOOKING_STATUS_TO_DB[newStatus];
+
+  // ── Confirmed ↔ Checked In: use atomic RPC ───────────────────────────────
+  // The RPC handles bookings.status + booking_rooms.status in one transaction.
+  if (newStatus === "Confirmed" || newStatus === "Checked In") {
+    // Step 1: resolve booking_ref → UUID (RPC requires UUID)
+    const { data: row, error: lookupErr } = await supabase
+      .from("bookings")
+      .select("id")
+      .eq("booking_ref", id)
+      .single();
+
+    if (lookupErr || !row) {
+      throw new Error(
+        `[updateBookingStatus] Booking lookup failed for ref ${id}: ` +
+        (lookupErr?.message ?? "not found")
+      );
+    }
+
+    const { error: rpcErr } = await supabase.rpc("checkin_booking_atomic", {
+      p_booking_id:    row.id,
+      p_target_status: dbStatus,   // 'confirmed' or 'checked_in'
+    });
+
+    if (rpcErr) {
+      throw new Error(
+        `[updateBookingStatus] checkin_booking_atomic RPC failed for ${id}: ` +
+        rpcErr.message +
+        (rpcErr.code    ? ` (code: ${rpcErr.code})`      : "") +
+        (rpcErr.hint    ? ` | hint: ${rpcErr.hint}`       : "") +
+        (rpcErr.details ? ` | details: ${rpcErr.details}` : "")
+      );
+    }
+
+    return;
+  }
+
+  // ── All other transitions: bare bookings UPDATE ───────────────────────────
+  // "Checked Out" / "Cancelled" arrive here only if invoked directly;
+  // the normal paths go through checkout_booking_room / cancel_booking_room
+  // which already cascade booking_rooms.status before this is called.
   const { error } = await supabase
     .from("bookings")
-    .update({ status: BOOKING_STATUS_TO_DB[newStatus] })
+    .update({ status: dbStatus })
     .eq("booking_ref", id);
 
   if (error) throw error;

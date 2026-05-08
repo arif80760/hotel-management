@@ -272,7 +272,28 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         const ts: Partial<MockBooking> = {};
         if (newStatus === "Checked In"  && !b.checkedInAt)  ts.checkedInAt  = now;
         if (newStatus === "Checked Out" && !b.checkedOutAt) ts.checkedOutAt = now;
-        return { ...b, status: newStatus, ...ts };
+
+        // Cascade booking_rooms.status for confirmed ↔ checked_in transitions.
+        // The checkin_booking_atomic RPC does this atomically in the DB; here
+        // we mirror it immediately so the edit modal lock state is correct
+        // without a full reload.
+        // For checkout/cancel the existing RPC paths own the cascade — the
+        // authoritative data arrives via the next fetch; we leave those rows
+        // alone in the optimistic layer.
+        let updatedRooms = b.rooms;
+        if (newStatus === "Checked In" || newStatus === "Confirmed") {
+          const targetRoomStatus: BookingRoomStatus =
+            newStatus === "Checked In" ? "Checked In" : "Confirmed";
+          updatedRooms = b.rooms.map(r =>
+            // Only cascade rows that are in the expected source state —
+            // same guard the RPC uses, so terminal rows (cancelled, etc.) stay.
+            (r.status === "Confirmed" || r.status === "Checked In")
+              ? { ...r, status: targetRoomStatus }
+              : r
+          );
+        }
+
+        return { ...b, status: newStatus, rooms: updatedRooms, ...ts };
       })
     );
     const newRoomStatus = bookingsService.bookingToRoomStatus(newStatus);
