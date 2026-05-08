@@ -1095,7 +1095,25 @@ export default function BookingsClient({ initialRoom }: Props) {
       }
     }
     if (newBlocks.length === 0) return;   // nothing selected
-    setForm(prev => ({ ...prev, rooms: [...prev.rooms, ...newRows] }));
+
+    // If the ONLY existing row is the default empty stub (all fields blank,
+    // no blockId), remove it before appending block rows — otherwise it
+    // blocks validation when the user goes all-blocks with no manual rooms.
+    const isCompletelyEmpty = (r: RoomFormRow) =>
+      !r.blockId         &&
+      r.room.trim() === "" &&
+      r.checkIn     === "" &&
+      r.checkOut    === "" &&
+      r.fixedRate   === "" &&
+      r.bookingRate === "";
+
+    setForm(prev => {
+      const surviving =
+        prev.rooms.length === 1 && isCompletelyEmpty(prev.rooms[0])
+          ? []
+          : prev.rooms;
+      return { ...prev, rooms: [...surviving, ...newRows] };
+    });
     setBlocks(prev => [...prev, ...newBlocks]);
     setBlockDialog(null);
   }
