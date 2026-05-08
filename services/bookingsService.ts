@@ -957,74 +957,22 @@ export async function updateBooking(
     }
   }
 
-  // ── Step 3 — Build bookings UPDATE payload (booking-level only) ─────────
+  // ── Step 3 — Build bookings UPDATE payload (booking-level fields only) ────
+  // total_amount is NOT taken from the client. It is server-computed in Step 5
+  // after booking_rooms are updated, so the source of truth is always the DB.
   const bookingUpdate: Record<string, unknown> = {};
-  if (changes.totalAmount  !== undefined) bookingUpdate.total_amount  = changes.totalAmount;
-  if (changes.totalGuests  !== undefined) bookingUpdate.total_guests  = changes.totalGuests;
+  if (changes.totalGuests !== undefined) bookingUpdate.total_guests = changes.totalGuests;
 
-  // ── Step 4 — Manually sync payment_status when total_amount changes ──────
-  // fn_sync_payment_status fires on paid_amount changes only (payments INSERT chain).
-  // Changing total_amount directly does NOT re-trigger it — must derive manually.
-  // derivePaymentStatus returns Title Case ("Unpaid"/"Partial"/"Paid") so .toLowerCase()
-  // is needed to match the DB's lowercase payment_status enum.
-  if (changes.totalAmount !== undefined) {
-    const newPmtStatus = derivePaymentStatus(changes.totalAmount, current.paid_amount);
-    bookingUpdate.payment_status = newPmtStatus.toLowerCase();
-    console.log("[updateBooking] Step 4 — totalAmount changed →", changes.totalAmount,
-      "| derived payment_status:", bookingUpdate.payment_status);
-  }
-
-  // ── Step 4.5 — Guard against phantom bookings ───────────────────────────
-  // If the new total_amount would fall below the already-recorded paid_amount,
-  // the booking would appear "Paid" but no additional payment was actually received
-  // for the gap. The UI validates this first (validateEdit), but this is the
-  // hard server-side guard.
-  if (changes.totalAmount !== undefined && changes.totalAmount < current.paid_amount) {
-    throw new Error(
-      `PHANTOM BOOKING WARNING — booking ${bookingRef}: ` +
-      `new totalAmount (${changes.totalAmount}) is less than paid_amount (${current.paid_amount}). ` +
-      `Reduce the amount paid first via a payment adjustment, then lower the total.`
-    );
-  }
-
-  // ── Step 5 — Execute bookings UPDATE ────────────────────────────────────
-  if (Object.keys(bookingUpdate).length > 0) {
-    console.log("[updateBooking] Step 5 — UPDATE bookings, payload:", bookingUpdate);
-
-    const { error: updErr, status: updStatus, statusText: updST } = await supabase
-      .from("bookings")
-      .update(bookingUpdate)
-      .eq("booking_ref", bookingRef);
-
-    if (updErr) {
-      console.error("──────────── [updateBooking] Step 5 — UPDATE bookings FAILED ────────────");
-      console.error("  message    :", updErr.message);
-      console.error("  details    :", updErr.details);
-      console.error("  hint       :", updErr.hint);
-      console.error("  code       :", updErr.code);
-      console.error("  HTTP status:", updStatus, updST);
-      console.error("  payload    :", bookingUpdate);
-      console.error("────────────────────────────────────────────────────────────────────────");
-      throw new Error(
-        `[updateBooking] UPDATE bookings failed — ${updErr.message}` +
-        (updErr.code    ? ` (code: ${updErr.code})`       : "") +
-        (updErr.hint    ? ` | hint: ${updErr.hint}`        : "") +
-        (updErr.details ? ` | details: ${updErr.details}`  : ""),
-      );
-    }
-    console.log("[updateBooking] Step 5 — booking updated");
-  } else {
-    console.log("[updateBooking] Step 5 — no booking-level changes, skipping UPDATE");
-  }
-
-  // ── Step 5.5 — Per-room booking_rooms UPDATE ────────────────────────────
+  // ── Step 4 — Per-room booking_rooms UPDATEs ─────────────────────────────
+  // Runs BEFORE the bookings UPDATE (Step 7) so that Step 5's server-side
+  // recompute reads the already-committed per-room state.
+  //
   // Phase 6: each EditRoomInput is matched to its booking_rooms row by id.
   // If room_number changed, resolve the new room UUID and cascade room statuses.
   //
   // NOTE: These UPDATEs run sequentially without a transaction. A future
   // update_booking_with_rooms() RPC will wrap them atomically. For now any
-  // partial failure is logged loudly but does not abort (booking row is already
-  // updated, and mapBooking's fallback chain will self-heal on re-fetch).
+  // partial failure is logged loudly but does not abort.
   if (changes.rooms && changes.rooms.length > 0) {
     for (const roomChange of changes.rooms) {
       // Resolve room UUID for this room_number.
@@ -1037,12 +985,12 @@ export async function updateBooking(
         .maybeSingle();
 
       if (roomErr) {
-        console.error("[updateBooking] Step 5.5 — SELECT rooms FAILED for",
+        console.error("[updateBooking] Step 4 — SELECT rooms FAILED for",
           roomChange.roomNumber, ":", roomErr.message);
         continue;   // skip this row — non-fatal, logged above
       }
       if (!roomRow) {
-        console.error("[updateBooking] Step 5.5 — room does not exist in catalog:",
+        console.error("[updateBooking] Step 4 — room does not exist in catalog:",
           roomChange.roomNumber);
         continue;   // skip this row — UI validation should have caught this
       }
@@ -1061,18 +1009,18 @@ export async function updateBooking(
         .maybeSingle();
 
       if (currentBRErr) {
-        console.error("[updateBooking] Step 5.5 — SELECT booking_rooms FAILED for id",
+        console.error("[updateBooking] Step 4 — SELECT booking_rooms FAILED for id",
           roomChange.id, ":", currentBRErr.message);
         continue;
       }
       if (!currentBR) {
-        console.error("[updateBooking] Step 5.5 — booking_rooms row not found for id",
+        console.error("[updateBooking] Step 4 — booking_rooms row not found for id",
           roomChange.id, "(not in booking", current.id, ")");
         continue;
       }
 
       if (currentBR.status !== "confirmed") {
-        console.warn("[updateBooking] Step 5.5 — SKIPPED locked row",
+        console.warn("[updateBooking] Step 4 — SKIPPED locked row",
           roomChange.id, "| status:", currentBR.status);
         continue;   // defense in depth — UI should have blocked locked rows
       }
@@ -1087,7 +1035,7 @@ export async function updateBooking(
         // nights is a GENERATED column — not written
       };
 
-      console.log("[updateBooking] Step 5.5 — UPDATE booking_rooms id:", roomChange.id,
+      console.log("[updateBooking] Step 4 — UPDATE booking_rooms id:", roomChange.id,
         "| payload:", brPayload);
 
       const { error: brErr } = await supabase
@@ -1097,10 +1045,10 @@ export async function updateBooking(
         .eq("booking_id", current.id);   // extra safety: scope to this booking
 
       if (brErr) {
-        console.error("[updateBooking] Step 5.5 — UPDATE booking_rooms FAILED:",
+        console.error("[updateBooking] Step 4 — UPDATE booking_rooms FAILED:",
           brErr.message, "| row id:", roomChange.id);
       } else {
-        console.log("[updateBooking] Step 5.5 — booking_rooms row updated:", roomChange.id);
+        console.log("[updateBooking] Step 4 — booking_rooms row updated:", roomChange.id);
       }
 
       // Room status cascade when room_id changed
@@ -1115,15 +1063,15 @@ export async function updateBooking(
           .limit(1);
 
         if (otherErr) {
-          console.error("[updateBooking] Step 5.5 cascade — other-bookings check failed:", otherErr.message);
+          console.error("[updateBooking] Step 4 cascade — other-bookings check failed:", otherErr.message);
         }
         const oldRoomStatus = (otherRows && otherRows.length > 0) ? "reserved" : "available";
         const { error: oldRoomErr } = await supabase
           .from("rooms").update({ status: oldRoomStatus }).eq("id", currentBR.room_id);
         if (oldRoomErr)
-          console.error("[updateBooking] Step 5.5 cascade — UPDATE old room FAILED:", oldRoomErr.message);
+          console.error("[updateBooking] Step 4 cascade — UPDATE old room FAILED:", oldRoomErr.message);
         else
-          console.log("[updateBooking] Step 5.5 cascade — old room", currentBR.room_id, "→", oldRoomStatus);
+          console.log("[updateBooking] Step 4 cascade — old room", currentBR.room_id, "→", oldRoomStatus);
 
         // New room: derive status from booking's current status
         const bookingStatus = DB_TO_BOOKING_STATUS[current.status] ?? "Confirmed";
@@ -1131,13 +1079,107 @@ export async function updateBooking(
         const { error: newRoomErr } = await supabase
           .from("rooms").update({ status: newRoomStatus }).eq("id", newRoomUUID);
         if (newRoomErr)
-          console.error("[updateBooking] Step 5.5 cascade — UPDATE new room FAILED:", newRoomErr.message);
+          console.error("[updateBooking] Step 4 cascade — UPDATE new room FAILED:", newRoomErr.message);
         else
-          console.log("[updateBooking] Step 5.5 cascade — new room", newRoomUUID, "→", newRoomStatus);
+          console.log("[updateBooking] Step 4 cascade — new room", newRoomUUID, "→", newRoomStatus);
       }
     }
   } else {
-    console.log("[updateBooking] Step 5.5 — no room-level changes, skipping booking_rooms UPDATE");
+    console.log("[updateBooking] Step 4 — no room-level changes, skipping booking_rooms UPDATE");
+  }
+
+  // ── Step 5 — Server-side total_amount recompute ──────────────────────────
+  // Source of truth is the current booking_rooms state (just updated in Step 4).
+  // The client's changes.totalAmount is intentionally ignored — this prevents
+  // any stale or incorrect client grandTotal from drifting bookings.total_amount.
+  //
+  // Only fires when rooms changed; booking-level-only edits (guest name, etc.)
+  // don't touch total_amount at all, which is correct — room counts and rates
+  // are unchanged in that case.
+  if (changes.rooms && changes.rooms.length > 0) {
+    const { data: roomsAfter, error: sumErr } = await supabase
+      .from("booking_rooms")
+      .select("booking_rate, nights")
+      .eq("booking_id", current.id);
+
+    if (sumErr) {
+      throw new Error(
+        `[updateBooking] Step 5 — failed to recompute total_amount for ${bookingRef}: ` +
+        sumErr.message
+      );
+    }
+
+    const computedTotal = (roomsAfter ?? []).reduce(
+      (sum, br) => sum + (Number(br.booking_rate) * Number(br.nights)),
+      0
+    );
+
+    bookingUpdate.total_amount = computedTotal;
+    console.log("[updateBooking] Step 5 — server-computed total_amount:", computedTotal,
+      "| room rows summed:", (roomsAfter ?? []).length);
+  }
+
+  // ── Step 6 — Manually sync payment_status when total_amount changes ───────
+  // fn_sync_payment_status fires on paid_amount changes only (payments INSERT chain).
+  // Changing total_amount directly does NOT re-trigger it — must derive manually.
+  // derivePaymentStatus returns Title Case ("Unpaid"/"Partial"/"Paid") so .toLowerCase()
+  // is needed to match the DB's lowercase payment_status enum.
+  if (bookingUpdate.total_amount !== undefined) {
+    const newPmtStatus = derivePaymentStatus(
+      bookingUpdate.total_amount as number, current.paid_amount
+    );
+    bookingUpdate.payment_status = newPmtStatus.toLowerCase();
+    console.log("[updateBooking] Step 6 — total_amount →", bookingUpdate.total_amount,
+      "| derived payment_status:", bookingUpdate.payment_status);
+  }
+
+  // ── Step 6.5 — Guard against phantom bookings ────────────────────────────
+  // If the new total_amount would fall below the already-recorded paid_amount,
+  // the booking would appear "Paid" but no additional payment was received for
+  // the gap. The UI validates this first (validateEdit), but this is the hard
+  // server-side guard. Uses the server-computed total, not the client's value.
+  if (
+    bookingUpdate.total_amount !== undefined &&
+    (bookingUpdate.total_amount as number) < current.paid_amount
+  ) {
+    throw new Error(
+      `PHANTOM BOOKING WARNING — booking ${bookingRef}: ` +
+      `server-computed totalAmount (${bookingUpdate.total_amount}) is less than ` +
+      `paid_amount (${current.paid_amount}). ` +
+      `Reduce the amount paid first via a payment adjustment, then lower the total.`
+    );
+  }
+
+  // ── Step 7 — Execute bookings UPDATE ─────────────────────────────────────
+  // total_amount (when present) is the server-computed value from Step 5.
+  // The optimistic value in HotelContext is replaced when the booking re-fetches.
+  if (Object.keys(bookingUpdate).length > 0) {
+    console.log("[updateBooking] Step 7 — UPDATE bookings, payload:", bookingUpdate);
+
+    const { error: updErr, status: updStatus, statusText: updST } = await supabase
+      .from("bookings")
+      .update(bookingUpdate)
+      .eq("booking_ref", bookingRef);
+
+    if (updErr) {
+      console.error("──────────── [updateBooking] Step 7 — UPDATE bookings FAILED ────────────");
+      console.error("  message    :", updErr.message);
+      console.error("  details    :", updErr.details);
+      console.error("  hint       :", updErr.hint);
+      console.error("  code       :", updErr.code);
+      console.error("  HTTP status:", updStatus, updST);
+      console.error("  payload    :", bookingUpdate);
+      console.error("────────────────────────────────────────────────────────────────────────");
+      throw new Error(
+        `[updateBooking] UPDATE bookings failed — ${updErr.message}` +
+        (updErr.code    ? ` (code: ${updErr.code})`       : "") +
+        (updErr.hint    ? ` | hint: ${updErr.hint}`        : "") +
+        (updErr.details ? ` | details: ${updErr.details}`  : ""),
+      );
+    }
+    console.log("[updateBooking] Step 7 — booking updated");
+  } else {
+    console.log("[updateBooking] Step 7 — no booking-level changes, skipping UPDATE");
   }
 
   // ── Step 6 — Guest record UPDATE ────────────────────────────────────────

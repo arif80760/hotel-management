@@ -568,6 +568,10 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         if (changes.email !== undefined && changes.email.trim() !== "")
           patch.email = changes.email.trim();
         if (changes.totalAmount  !== undefined) {
+          // NOTE: total_amount is server-computed from booking_rooms after update
+          // (updateBooking Step 5 recompute). This optimistic value is replaced
+          // when updateBooking resolves and the booking is patched with the
+          // authoritative re-fetched data in the .then() handler below.
           patch.totalAmount = changes.totalAmount;
           patch.payment = bookingsService.derivePaymentStatus(changes.totalAmount, b.amountPaid);
         }
