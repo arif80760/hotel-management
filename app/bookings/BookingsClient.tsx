@@ -83,14 +83,19 @@ type RoomBlock = {
   expanded:    boolean;  // collapsed by default
 };
 
+/** Per-category state inside the Add Block dialog. */
+type BlockDialogSection = {
+  expanded:    boolean;
+  selected:    Set<string>;   // selected room numbers
+  bookingRate: string;
+  rateEdited:  boolean;       // suppresses auto-fill when user has manually set rate
+};
+
 /** Live state of the "Add Room Block" dialog. null = dialog closed. */
 type BlockDialogData = {
-  category:    string;
-  quantity:    string;
-  checkIn:     string;
-  checkOut:    string;
-  bookingRate: string;
-  rateEdited:  boolean;  // true once user touches the rate field; suppresses auto-fill on category change
+  checkIn:  string;
+  checkOut: string;
+  sections: Record<string, BlockDialogSection>;   // keyed by category
 };
 
 type FormData = {
@@ -473,6 +478,15 @@ function findAvailableRoomsForCategory(
     .filter(rm => !formTaken.has(rm.roomNumber))
     .filter(rm => !findRoomConflict(bookings, rm.roomNumber, checkIn, checkOut))
     .sort((a, b) => a.roomNumber.localeCompare(b.roomNumber, undefined, { numeric: true }));
+}
+
+/** Returns the most common price string for a category as the default block rate. */
+function defaultRateForCategory(hotelRooms: MockRoom[], cat: string): string {
+  const catRooms = hotelRooms.filter(r => r.category === cat);
+  if (!catRooms.length) return "";
+  const counts: Record<string, number> = {};
+  catRooms.forEach(r => { counts[String(r.price)] = (counts[String(r.price)] || 0) + 1; });
+  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
 }
 
 // Next workflow action per booking status
@@ -1034,31 +1048,118 @@ export default function BookingsClient({ initialRoom }: Props) {
     const lastBlock = blocks[blocks.length - 1];
     const defaultCheckIn  = lastBlock?.checkIn  ?? form.rooms[0]?.checkIn  ?? "";
     const defaultCheckOut = lastBlock?.checkOut ?? form.rooms[0]?.checkOut ?? "";
-    setBlockDialog({ category: "", quantity: "", checkIn: defaultCheckIn, checkOut: defaultCheckOut, bookingRate: "", rateEdited: false });
+    // Build one section per unique category, sorted
+    const categories = [...new Set(rooms.map(r => r.category))].sort();
+    const sections: Record<string, BlockDialogSection> = {};
+    categories.forEach((cat, i) => {
+      sections[cat] = {
+        expanded:    i === 0,           // first category open by default
+        selected:    new Set<string>(),
+        bookingRate: defaultRateForCategory(rooms, cat),
+        rateEdited:  false,
+      };
+    });
+    setBlockDialog({ checkIn: defaultCheckIn, checkOut: defaultCheckOut, sections });
   }
 
   function confirmBlockDialog() {
-    if (!blockDialog) return;
-    const { category, quantity, checkIn, checkOut, bookingRate } = blockDialog;
-    const n = parseInt(quantity, 10);
-    if (!category || !n || n <= 0 || !checkIn || !checkOut) return;
-    const candidates = findAvailableRoomsForCategory(rooms, bookings, form.rooms, category, checkIn, checkOut);
-    if (candidates.length < n) return;
-    const picked = candidates.slice(0, n);
-    const newBlockId = crypto.randomUUID();
-    const newRows: RoomFormRow[] = picked.map(rm => ({
-      id:          crypto.randomUUID(),
-      room:        rm.roomNumber,
-      checkIn,
-      checkOut,
-      fixedRate:   String(rm.price),
-      bookingRate: bookingRate || String(rm.price),
-      blockId:     newBlockId,
-    }));
-    const newBlock: RoomBlock = { id: newBlockId, category, checkIn, checkOut, bookingRate: bookingRate || String(picked[0]?.price ?? ""), expanded: false };
+    const bd = blockDialog;
+    if (!bd) return;
+    const newBlocks: RoomBlock[] = [];
+    const newRows: RoomFormRow[] = [];
+    for (const [category, section] of Object.entries(bd.sections)) {
+      if (section.selected.size === 0) continue;
+      const blockId = crypto.randomUUID();
+      newBlocks.push({
+        id: blockId,
+        category,
+        checkIn:     bd.checkIn,
+        checkOut:    bd.checkOut,
+        bookingRate: section.bookingRate,
+        expanded:    false,
+      });
+      const sortedSelected = [...section.selected].sort((a, b) =>
+        a.localeCompare(b, undefined, { numeric: true })
+      );
+      for (const roomNumber of sortedSelected) {
+        const hotelRoom = rooms.find(r => r.roomNumber === roomNumber);
+        newRows.push({
+          id:          crypto.randomUUID(),
+          blockId,
+          room:        roomNumber,
+          checkIn:     bd.checkIn,
+          checkOut:    bd.checkOut,
+          fixedRate:   String(hotelRoom?.price ?? 0),
+          bookingRate: section.bookingRate,
+        });
+      }
+    }
+    if (newBlocks.length === 0) return;   // nothing selected
     setForm(prev => ({ ...prev, rooms: [...prev.rooms, ...newRows] }));
-    setBlocks(prev => [...prev, newBlock]);
+    setBlocks(prev => [...prev, ...newBlocks]);
     setBlockDialog(null);
+  }
+
+  // ── Block dialog helpers ─────────────────────────────────────
+
+  /** Update check-in or check-out on the block dialog; prune selections that
+   *  are no longer available under the new dates. */
+  function handleBlockDialogDateChange(field: "checkIn" | "checkOut", value: string) {
+    setBlockDialog(prev => {
+      if (!prev) return null;
+      const next = { ...prev, [field]: value };
+      const newCheckIn  = field === "checkIn"  ? value : prev.checkIn;
+      const newCheckOut = field === "checkOut" ? value : prev.checkOut;
+      if (!newCheckIn || !newCheckOut) return next;
+      // Prune selections that are no longer available
+      const updatedSections: Record<string, BlockDialogSection> = {};
+      for (const [cat, sec] of Object.entries(next.sections)) {
+        const available = findAvailableRoomsForCategory(
+          rooms, bookings, form.rooms, cat, newCheckIn, newCheckOut
+        );
+        const availSet = new Set(available.map(r => r.roomNumber));
+        const prunedSelected = new Set([...sec.selected].filter(rn => availSet.has(rn)));
+        updatedSections[cat] = {
+          ...sec,
+          selected: prunedSelected,
+          bookingRate: sec.rateEdited ? sec.bookingRate : defaultRateForCategory(rooms, cat),
+        };
+      }
+      return { ...next, sections: updatedSections };
+    });
+  }
+
+  /** Toggle the accordion expanded state for a category section. */
+  function toggleBlockDialogSection(cat: string) {
+    setBlockDialog(prev => {
+      if (!prev) return null;
+      const sec = prev.sections[cat];
+      if (!sec) return prev;
+      return {
+        ...prev,
+        sections: { ...prev.sections, [cat]: { ...sec, expanded: !sec.expanded } },
+      };
+    });
+  }
+
+  /** Select or deselect all available rooms in a category section. */
+  function toggleBlockDialogSelectAll(cat: string, checkIn: string, checkOut: string, selectAll: boolean) {
+    setBlockDialog(prev => {
+      if (!prev) return null;
+      const available = findAvailableRoomsForCategory(
+        rooms, bookings, form.rooms, cat, checkIn, checkOut
+      );
+      const newSelected = selectAll
+        ? new Set(available.map(r => r.roomNumber))
+        : new Set<string>();
+      return {
+        ...prev,
+        sections: {
+          ...prev.sections,
+          [cat]: { ...prev.sections[cat], selected: newSelected },
+        },
+      };
+    });
   }
 
   // ── Additional guests handlers ──────────────────────────────
@@ -5330,173 +5431,268 @@ export default function BookingsClient({ initialRoom }: Props) {
       {/* ══════════════════════════════════════════════════════
           ADD ROOM BLOCK DIALOG
           Fixed overlay; opens when blockDialog !== null.
+          Multi-category accordion: one section per room category,
+          each with individual room checkboxes.
       ══════════════════════════════════════════════════════ */}
       {blockDialog && (() => {
         const bd = blockDialog;
-        // Derive available categories dynamically from hotel rooms
-        const categories = [...new Set(rooms.map(r => r.category))].sort();
-        // Live availability for the current dialog inputs
-        const candidates = findAvailableRoomsForCategory(rooms, bookings, form.rooms, bd.category, bd.checkIn, bd.checkOut);
-        const have = candidates.length;
-        const need = parseInt(bd.quantity, 10) || 0;
         const blockNights = calcNights(bd.checkIn, bd.checkOut);
-        const isValid = !!bd.category && need > 0 && !!bd.checkIn && !!bd.checkOut && blockNights > 0 && have >= need;
+        const datesValid  = !!bd.checkIn && !!bd.checkOut && blockNights > 0;
 
-        // Default rate for selected category (most common price)
-        function defaultRateForCategory(cat: string): string {
-          const catRooms = rooms.filter(r => r.category === cat);
-          if (!catRooms.length) return "";
-          const counts: Record<string, number> = {};
-          catRooms.forEach(r => { counts[String(r.price)] = (counts[String(r.price)] || 0) + 1; });
-          return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
-        }
+        // Total rooms selected across all categories
+        const totalSelected = Object.values(bd.sections).reduce(
+          (sum, sec) => sum + sec.selected.size, 0
+        );
+        const isValid = datesValid && totalSelected > 0;
+
+        // Sorted category list (same order as sections keys were inserted)
+        const categories = Object.keys(bd.sections).sort();
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
-            <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden">
+            <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg flex flex-col max-h-[90vh] overflow-hidden">
 
               {/* Header */}
-              <div className="flex items-center gap-3 px-6 pt-5 pb-4 border-b border-slate-100">
-                <div className="w-9 h-9 rounded-xl bg-violet-100 flex items-center justify-center flex-shrink-0">
+              <div className="flex items-start gap-3 px-6 pt-5 pb-4 border-b border-slate-100 flex-shrink-0">
+                <div className="w-9 h-9 rounded-xl bg-violet-100 flex items-center justify-center flex-shrink-0 mt-0.5">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4.5 h-4.5 text-violet-600">
                     <rect x="2" y="3" width="20" height="5" rx="1"/><rect x="2" y="10" width="20" height="5" rx="1"/><rect x="2" y="17" width="10" height="4" rx="1"/><path d="M18 19h4M20 17v4"/>
                   </svg>
                 </div>
-                <div>
+                <div className="flex-1 min-w-0">
                   <h3 className="text-[15px] font-bold text-slate-800">Add Room Block</h3>
-                  <p className="text-[12px] text-slate-400">Allocate multiple rooms of the same category at once</p>
+                  <p className="text-[12px] text-slate-400 mt-0.5">
+                    Select rooms across categories — one block per category will be created
+                  </p>
                 </div>
-              </div>
-
-              {/* Body */}
-              <div className="px-6 py-5 space-y-4">
-
-                {/* Row 1: Category + Quantity */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                      Category <span className="text-rose-500">*</span>
-                    </label>
-                    <select
-                      value={bd.category}
-                      onChange={e => {
-                        const cat = e.target.value;
-                        const rate = !bd.rateEdited ? defaultRateForCategory(cat) : bd.bookingRate;
-                        setBlockDialog(prev => prev ? { ...prev, category: cat, bookingRate: rate } : null);
-                      }}
-                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition appearance-none cursor-pointer"
-                    >
-                      <option value="">Select category…</option>
-                      {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                      Quantity <span className="text-rose-500">*</span>
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={bd.category ? rooms.filter(r => r.category === bd.category).length : undefined}
-                      placeholder="e.g. 10"
-                      value={bd.quantity}
-                      onChange={e => setBlockDialog(prev => prev ? { ...prev, quantity: e.target.value } : null)}
-                      onWheel={e => (e.target as HTMLInputElement).blur()}
-                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                    />
-                  </div>
-                </div>
-
-                {/* Row 2: Check-in / Check-out */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                      Check-in <span className="text-rose-500">*</span>
-                    </label>
-                    <input
-                      type="date"
-                      value={bd.checkIn}
-                      onChange={e => setBlockDialog(prev => prev ? { ...prev, checkIn: e.target.value } : null)}
-                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                      Check-out <span className="text-rose-500">*</span>
-                    </label>
-                    <input
-                      type="date"
-                      min={bd.checkIn || TODAY}
-                      value={bd.checkOut}
-                      onChange={e => setBlockDialog(prev => prev ? { ...prev, checkOut: e.target.value } : null)}
-                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
-                    />
-                  </div>
-                </div>
-
-                {/* Row 3: Rate per night */}
-                <div>
-                  <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                    Rate / Night <span className="text-rose-500">*</span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none text-[13px]">৳</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      placeholder="0.00"
-                      value={bd.bookingRate}
-                      onChange={e => setBlockDialog(prev => prev ? { ...prev, bookingRate: e.target.value, rateEdited: true } : null)}
-                      onWheel={e => (e.target as HTMLInputElement).blur()}
-                      className="w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                    />
-                  </div>
-                </div>
-
-                {/* Live availability preview */}
-                {need > 0 && bd.category && bd.checkIn && bd.checkOut && blockNights > 0 && (
-                  have >= need ? (
-                    <div className="flex items-center gap-2.5 bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-2.5">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4 h-4 text-emerald-600 flex-shrink-0">
-                        <path d="M20 6L9 17l-5-5"/>
-                      </svg>
-                      <p className="text-[12px] text-emerald-800">
-                        <span className="font-semibold">Available:</span> {have} {bd.category} room{have !== 1 ? "s" : ""} — {need} will be allocated
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="flex items-start gap-2.5 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5">
-                        <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/>
-                      </svg>
-                      <p className="text-[12px] text-amber-800">
-                        <span className="font-semibold">Only {have} {bd.category} room{have !== 1 ? "s" : ""} available</span>{" "}
-                        {bd.checkIn && bd.checkOut ? `${formatDateShort(bd.checkIn)} → ${formatDateShort(bd.checkOut)}` : ""}. Need {need}. Adjust dates or reduce count.
-                      </p>
-                    </div>
-                  )
-                )}
-              </div>
-
-              {/* Footer */}
-              <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-3 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setBlockDialog(null)}
-                  className="px-4 py-2 text-[13px] font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors"
+                  className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors flex-shrink-0"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={confirmBlockDialog}
-                  disabled={!isValid}
-                  className="px-5 py-2 text-[13px] font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  Add {need > 0 ? `${need} Room${need !== 1 ? "s" : ""}` : "Block"}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4 h-4">
+                    <path d="M18 6L6 18M6 6l12 12"/>
+                  </svg>
                 </button>
               </div>
+
+              {/* Scrollable body */}
+              <div className="overflow-y-auto flex-1">
+                <div className="px-6 py-5 space-y-4">
+
+                  {/* Date row */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                        Check-in <span className="text-rose-500">*</span>
+                      </label>
+                      <input
+                        type="date"
+                        value={bd.checkIn}
+                        onChange={e => handleBlockDialogDateChange("checkIn", e.target.value)}
+                        className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                        Check-out <span className="text-rose-500">*</span>
+                      </label>
+                      <input
+                        type="date"
+                        min={bd.checkIn || TODAY}
+                        value={bd.checkOut}
+                        onChange={e => handleBlockDialogDateChange("checkOut", e.target.value)}
+                        className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Divider */}
+                  <div className="border-t border-slate-100" />
+
+                  {/* Category accordion sections */}
+                  <div className="space-y-2">
+                    {categories.map(cat => {
+                      const sec       = bd.sections[cat];
+                      const available = datesValid
+                        ? findAvailableRoomsForCategory(rooms, bookings, form.rooms, cat, bd.checkIn, bd.checkOut)
+                        : [];
+                      const allSelected = available.length > 0 && available.every(r => sec.selected.has(r.roomNumber));
+                      const noneSelected = sec.selected.size === 0;
+
+                      return (
+                        <div key={cat} className="border border-slate-200 rounded-xl overflow-hidden">
+                          {/* Section header (always visible) */}
+                          <button
+                            type="button"
+                            onClick={() => toggleBlockDialogSection(cat)}
+                            className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors"
+                          >
+                            {/* Chevron */}
+                            <svg
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.5"
+                              strokeLinecap="round"
+                              className={`w-4 h-4 text-slate-400 flex-shrink-0 transition-transform duration-150 ${sec.expanded ? "rotate-90" : ""}`}
+                            >
+                              <path d="M9 18l6-6-6-6"/>
+                            </svg>
+
+                            {/* Category name + availability badge */}
+                            <span className="flex-1 text-[13.5px] font-semibold text-slate-800">{cat}</span>
+                            {datesValid && (
+                              <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full flex-shrink-0 ${
+                                available.length > 0
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : "bg-slate-100 text-slate-400"
+                              }`}>
+                                {available.length} available
+                              </span>
+                            )}
+                            {sec.selected.size > 0 && (
+                              <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 flex-shrink-0">
+                                {sec.selected.size} selected
+                              </span>
+                            )}
+                          </button>
+
+                          {/* Expanded body */}
+                          {sec.expanded && (
+                            <div className="border-t border-slate-100 px-4 py-3 space-y-3 bg-slate-50/50">
+
+                              {/* Rate input for this category */}
+                              <div className="flex items-center gap-3">
+                                <label className="text-[11.5px] font-semibold text-slate-500 uppercase tracking-wide flex-shrink-0">
+                                  Rate / Night
+                                </label>
+                                <div className="relative w-36">
+                                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none text-[13px]">৳</span>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    step="0.01"
+                                    placeholder="0.00"
+                                    value={sec.bookingRate}
+                                    onChange={e => setBlockDialog(prev => {
+                                      if (!prev) return null;
+                                      return {
+                                        ...prev,
+                                        sections: {
+                                          ...prev.sections,
+                                          [cat]: { ...prev.sections[cat], bookingRate: e.target.value, rateEdited: true },
+                                        },
+                                      };
+                                    })}
+                                    onWheel={e => (e.target as HTMLInputElement).blur()}
+                                    className="w-full pl-7 pr-3 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                  />
+                                </div>
+                              </div>
+
+                              {/* Select all / Deselect all */}
+                              {datesValid && available.length > 0 && (
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11.5px] text-slate-500">
+                                    {available.length} room{available.length !== 1 ? "s" : ""} available
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleBlockDialogSelectAll(cat, bd.checkIn, bd.checkOut, !allSelected)}
+                                    className="text-[11.5px] font-medium text-violet-600 hover:text-violet-800 transition-colors"
+                                  >
+                                    {allSelected ? "Deselect all" : "Select all"}
+                                  </button>
+                                </div>
+                              )}
+
+                              {/* Room list */}
+                              {!datesValid ? (
+                                <p className="text-[12px] text-slate-400 italic py-1">Set dates above to see available rooms</p>
+                              ) : available.length === 0 ? (
+                                <p className="text-[12px] text-slate-400 italic py-1">No rooms available for these dates</p>
+                              ) : (
+                                <div className="space-y-1.5">
+                                  {available.map(rm => (
+                                    <label
+                                      key={rm.roomNumber}
+                                      className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors select-none ${
+                                        sec.selected.has(rm.roomNumber)
+                                          ? "bg-violet-50 border-violet-200"
+                                          : "bg-white border-slate-200 hover:bg-slate-50"
+                                      }`}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={sec.selected.has(rm.roomNumber)}
+                                        onChange={e => {
+                                          setBlockDialog(prev => {
+                                            if (!prev) return null;
+                                            const existing = prev.sections[cat].selected;
+                                            const next = new Set(existing);
+                                            if (e.target.checked) next.add(rm.roomNumber);
+                                            else next.delete(rm.roomNumber);
+                                            return {
+                                              ...prev,
+                                              sections: {
+                                                ...prev.sections,
+                                                [cat]: { ...prev.sections[cat], selected: next },
+                                              },
+                                            };
+                                          });
+                                        }}
+                                        className="w-4 h-4 rounded border-slate-300 text-violet-600 focus:ring-violet-400 focus:ring-offset-0 flex-shrink-0"
+                                      />
+                                      <span className="text-[13px] font-semibold text-slate-800 w-10 flex-shrink-0">
+                                        {rm.roomNumber}
+                                      </span>
+                                      <span className="text-[12px] text-slate-400 flex-1 truncate">
+                                        Floor {rm.floor} · {rm.capacity} pax · ৳{rm.price.toLocaleString()}
+                                      </span>
+                                    </label>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="flex-shrink-0 border-t border-slate-100">
+                {/* Selection counter */}
+                <div className="px-6 py-2.5 bg-slate-50 border-b border-slate-100">
+                  <p className="text-[12px] text-slate-500">
+                    {totalSelected === 0
+                      ? "No rooms selected — pick rooms from the categories above"
+                      : <><span className="font-semibold text-violet-700">{totalSelected} room{totalSelected !== 1 ? "s" : ""}</span> selected across {Object.values(bd.sections).filter(s => s.selected.size > 0).length} categor{Object.values(bd.sections).filter(s => s.selected.size > 0).length !== 1 ? "ies" : "y"}</>
+                    }
+                  </p>
+                </div>
+                <div className="flex items-center justify-end gap-3 px-6 py-4">
+                  <button
+                    type="button"
+                    onClick={() => setBlockDialog(null)}
+                    className="px-4 py-2 text-[13px] font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={confirmBlockDialog}
+                    disabled={!isValid}
+                    className="px-5 py-2 text-[13px] font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Add {totalSelected > 0 ? `${totalSelected} Room${totalSelected !== 1 ? "s" : ""}` : "Block"}
+                  </button>
+                </div>
+              </div>
+
             </div>
           </div>
         );
