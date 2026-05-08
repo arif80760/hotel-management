@@ -26,6 +26,7 @@ import {
   type PaymentStatus,
   type PaymentMethod,
   type MockBooking as Booking,
+  type MockRoom,
   type AdditionalGuest,
   type BookingDocument,
   type BookingRoom,
@@ -68,6 +69,28 @@ type RoomFormRow = {
   checkOut:    string;
   fixedRate:   string;   // auto-filled from room price; read-only display
   bookingRate: string;   // editable — lower than fixedRate for discounts
+  blockId?:    string;   // undefined for single-room rows; shared UUID for block rows
+};
+
+/** UI-only grouping metadata for a room block (Phase 5.4).
+ *  The DB still receives a flat RoomInput[] — blocks dissolve at submit time. */
+type RoomBlock = {
+  id:          string;   // crypto.randomUUID()
+  category:    string;
+  checkIn:     string;
+  checkOut:    string;
+  bookingRate: string;
+  expanded:    boolean;  // collapsed by default
+};
+
+/** Live state of the "Add Room Block" dialog. null = dialog closed. */
+type BlockDialogData = {
+  category:    string;
+  quantity:    string;
+  checkIn:     string;
+  checkOut:    string;
+  bookingRate: string;
+  rateEdited:  boolean;  // true once user touches the rate field; suppresses auto-fill on category change
 };
 
 type FormData = {
@@ -420,6 +443,38 @@ function findRoomConflict(
   });
 }
 
+/**
+ * Find all hotel rooms of a given category that are available for the
+ * specified date window — i.e., not conflicting with any existing booking
+ * AND not already used by another row in the current form.
+ *
+ * @param excludeBlockId  When re-allocating a block, pass its id so that its
+ *                        own rows are not treated as "already taken".
+ */
+function findAvailableRoomsForCategory(
+  hotelRooms:    MockRoom[],
+  bookings:      Booking[],
+  formRooms:     RoomFormRow[],
+  category:      string,
+  checkIn:       string,
+  checkOut:      string,
+  excludeBlockId?: string,
+): MockRoom[] {
+  if (!category || !checkIn || !checkOut) return [];
+  // Rooms occupied by current form rows (excluding the target block's own rows)
+  const formTaken = new Set(
+    formRooms
+      .filter(r => r.blockId !== excludeBlockId && bookingDatesOverlap(r.checkIn, r.checkOut, checkIn, checkOut))
+      .map(r => r.room.trim())
+      .filter(Boolean)
+  );
+  return hotelRooms
+    .filter(rm => rm.category === category)
+    .filter(rm => !formTaken.has(rm.roomNumber))
+    .filter(rm => !findRoomConflict(bookings, rm.roomNumber, checkIn, checkOut))
+    .sort((a, b) => a.roomNumber.localeCompare(b.roomNumber, undefined, { numeric: true }));
+}
+
 // Next workflow action per booking status
 type ActionDef = { label: string; next: BookingStatus; style: string } | null;
 function nextAction(status: BookingStatus): ActionDef {
@@ -525,6 +580,36 @@ export default function BookingsClient({ initialRoom }: Props) {
   // ── Timeline modal ───────────────────────────────────────────
   // null = closed; set to a booking to show that booking's full timeline.
   const [timelineModal, setTimelineModal] = useState<Booking | null>(null);
+
+  // ── Room blocks (Phase 5.4) ─────────────────────────────────
+  // blocks[] stores UI metadata; actual rows live in form.rooms[].
+  const [blocks,      setBlocks]      = useState<RoomBlock[]>([]);
+  const [blockDialog, setBlockDialog] = useState<BlockDialogData | null>(null);
+
+  // Render order — groups consecutive block rows under their block card,
+  // preserving form.rooms[] insertion order for single-room rows.
+  const renderOrder = useMemo(() => {
+    type RenderEntry =
+      | { type: "block";  block: RoomBlock; rows: RoomFormRow[] }
+      | { type: "single"; row:   RoomFormRow };
+    const result: RenderEntry[] = [];
+    const seen = new Set<string>();
+    for (const row of form.rooms) {
+      if (!row.blockId) {
+        result.push({ type: "single", row });
+      } else if (!seen.has(row.blockId)) {
+        seen.add(row.blockId);
+        const block = blocks.find(bl => bl.id === row.blockId);
+        if (block) {
+          result.push({ type: "block", block, rows: form.rooms.filter(r => r.blockId === row.blockId) });
+        } else {
+          // Orphaned block row (shouldn't happen) — render as single
+          result.push({ type: "single", row });
+        }
+      }
+    }
+    return result;
+  }, [form.rooms, blocks]);
 
   // ── Room-detail expanded row ─────────────────────────────────
   // Clicking a multi-room cell toggles an inline <tr> drawer below that row.
@@ -911,6 +996,71 @@ export default function BookingsClient({ initialRoom }: Props) {
     }
   }
 
+  // ── Block manipulation helpers ──────────────────────────────
+
+  /** Remove a block and all its rows from form.rooms[], cleaning up errors. */
+  function removeBlock(blockId: string) {
+    const toRemove = form.rooms.filter(r => r.blockId === blockId).map(r => r.id);
+    setForm(prev => ({ ...prev, rooms: prev.rooms.filter(r => r.blockId !== blockId) }));
+    setBlocks(prev => prev.filter(bl => bl.id !== blockId));
+    setErrors(prev => {
+      if (!prev.rooms) return prev;
+      const cleaned = Object.fromEntries(
+        Object.entries(prev.rooms).filter(([id]) => !toRemove.includes(id))
+      ) as NonNullable<FormErrors["rooms"]>;
+      return { ...prev, rooms: Object.keys(cleaned).length > 0 ? cleaned : undefined };
+    });
+  }
+
+  function toggleBlockExpanded(blockId: string) {
+    setBlocks(prev => prev.map(bl => bl.id === blockId ? { ...bl, expanded: !bl.expanded } : bl));
+  }
+
+  /** Remove a single row from a block; if it was the last row, remove the block too. */
+  function removeRowFromBlock(rowId: string) {
+    const row = form.rooms.find(r => r.id === rowId);
+    if (!row?.blockId) return;
+    const remaining = form.rooms.filter(r => r.blockId === row.blockId && r.id !== rowId);
+    if (remaining.length === 0) {
+      removeBlock(row.blockId);
+    } else {
+      removeRoom(rowId);   // reuses existing error-cleanup logic
+    }
+  }
+
+  // ── Block dialog open/confirm ────────────────────────────────
+
+  function openBlockDialog() {
+    const lastBlock = blocks[blocks.length - 1];
+    const defaultCheckIn  = lastBlock?.checkIn  ?? form.rooms[0]?.checkIn  ?? "";
+    const defaultCheckOut = lastBlock?.checkOut ?? form.rooms[0]?.checkOut ?? "";
+    setBlockDialog({ category: "", quantity: "", checkIn: defaultCheckIn, checkOut: defaultCheckOut, bookingRate: "", rateEdited: false });
+  }
+
+  function confirmBlockDialog() {
+    if (!blockDialog) return;
+    const { category, quantity, checkIn, checkOut, bookingRate } = blockDialog;
+    const n = parseInt(quantity, 10);
+    if (!category || !n || n <= 0 || !checkIn || !checkOut) return;
+    const candidates = findAvailableRoomsForCategory(rooms, bookings, form.rooms, category, checkIn, checkOut);
+    if (candidates.length < n) return;
+    const picked = candidates.slice(0, n);
+    const newBlockId = crypto.randomUUID();
+    const newRows: RoomFormRow[] = picked.map(rm => ({
+      id:          crypto.randomUUID(),
+      room:        rm.roomNumber,
+      checkIn,
+      checkOut,
+      fixedRate:   String(rm.price),
+      bookingRate: bookingRate || String(rm.price),
+      blockId:     newBlockId,
+    }));
+    const newBlock: RoomBlock = { id: newBlockId, category, checkIn, checkOut, bookingRate: bookingRate || String(picked[0]?.price ?? ""), expanded: false };
+    setForm(prev => ({ ...prev, rooms: [...prev.rooms, ...newRows] }));
+    setBlocks(prev => [...prev, newBlock]);
+    setBlockDialog(null);
+  }
+
   // ── Additional guests handlers ──────────────────────────────
 
   /** Append a blank guest row. Also bumps totalGuests if needed. */
@@ -1121,6 +1271,8 @@ export default function BookingsClient({ initialRoom }: Props) {
     setPendingDocs([]);
     setPendingDocError("");
     setForm({ ...EMPTY_FORM, rooms: [makeEmptyRoomRow()] });
+    setBlocks([]);
+    setBlockDialog(null);
     setBookingPayMethod("cash");
     setErrors({});
     setFormOpen(false);
@@ -1136,6 +1288,8 @@ export default function BookingsClient({ initialRoom }: Props) {
       ...EMPTY_FORM,
       rooms: initialRoom ? [{ ...makeEmptyRoomRow(), room: initialRoom }] : [makeEmptyRoomRow()],
     });
+    setBlocks([]);
+    setBlockDialog(null);
     setBookingPayMethod("cash");
     setErrors({});
     setPendingDocs([]);
@@ -1932,203 +2086,313 @@ export default function BookingsClient({ initialRoom }: Props) {
                     Rooms
                   </span>
                   <div className="flex-1 h-px bg-slate-100" />
-                  <button
-                    type="button"
-                    onClick={addRoom}
-                    className="flex items-center gap-1.5 text-[12px] font-semibold text-amber-600 hover:text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-3 py-1.5 rounded-lg transition-colors"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3.5 h-3.5">
-                      <path d="M12 5v14M5 12h14"/>
-                    </svg>
-                    Add Room
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={addRoom}
+                      className="flex items-center gap-1.5 text-[12px] font-semibold text-amber-600 hover:text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-3 py-1.5 rounded-lg transition-colors"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3.5 h-3.5">
+                        <path d="M12 5v14M5 12h14"/>
+                      </svg>
+                      Add Room
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openBlockDialog}
+                      className="flex items-center gap-1.5 text-[12px] font-semibold text-violet-600 hover:text-violet-700 bg-violet-50 hover:bg-violet-100 border border-violet-200 px-3 py-1.5 rounded-lg transition-colors"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3.5 h-3.5">
+                        <rect x="2" y="3" width="20" height="5" rx="1"/><rect x="2" y="10" width="20" height="5" rx="1"/><rect x="2" y="17" width="10" height="4" rx="1"/><path d="M18 19h4M20 17v4"/>
+                      </svg>
+                      Add Block
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-4">
-                  {form.rooms.map((r, idx) => {
-                    const rowInfo     = rooms.find(x => x.roomNumber === r.room.trim());
-                    const n           = rowNights(r);
-                    const rowConflict = roomConflicts[r.id] ?? null;
-                    const dupConflict = duplicateConflicts[r.id] ?? null;
-                    const rowErr      = errors.rooms?.[r.id];
-                    const fixedNum    = parseFloat(r.fixedRate)   || rowInfo?.price || 0;
-                    const bookingNum  = parseFloat(r.bookingRate) || fixedNum;
-                    const discPerNight = fixedNum > 0 && bookingNum < fixedNum ? fixedNum - bookingNum : 0;
-                    const discPct      = fixedNum > 0 && discPerNight > 0 ? Math.round((discPerNight / fixedNum) * 100) : 0;
-                    return (
-                      <div key={r.id} className="border border-slate-200 rounded-xl bg-slate-50/50 p-4 space-y-4">
+                  {renderOrder.map(entry => {
 
-                        {/* Card header */}
-                        <div className="flex items-center justify-between">
-                          <span className="text-[12px] font-bold text-slate-500 uppercase tracking-wide">
-                            Room {idx + 1}
-                          </span>
-                          {form.rooms.length > 1 && (
-                            <button
-                              type="button"
-                              onClick={() => removeRoom(r.id)}
-                              className="w-7 h-7 flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                              title="Remove this room"
-                            >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5">
-                                <path d="M18 6L6 18M6 6l12 12"/>
+                    // ── Helper: render one editable room card ──────────────
+                    const renderRoomCard = (r: RoomFormRow, opts: { label: string; onRemove?: () => void; inBlock?: boolean }) => {
+                      const rowInfo     = rooms.find(x => x.roomNumber === r.room.trim());
+                      const n           = rowNights(r);
+                      const rowConflict = roomConflicts[r.id] ?? null;
+                      const dupConflict = duplicateConflicts[r.id] ?? null;
+                      const rowErr      = errors.rooms?.[r.id];
+                      const fixedNum    = parseFloat(r.fixedRate)   || rowInfo?.price || 0;
+                      const bookingNum  = parseFloat(r.bookingRate) || fixedNum;
+                      const discPerNight = fixedNum > 0 && bookingNum < fixedNum ? fixedNum - bookingNum : 0;
+                      const discPct     = fixedNum > 0 && discPerNight > 0 ? Math.round((discPerNight / fixedNum) * 100) : 0;
+                      return (
+                        <div key={r.id} className={`border rounded-xl p-4 space-y-4 ${opts.inBlock ? "border-violet-100 bg-violet-50/20" : "border-slate-200 bg-slate-50/50"}`}>
+
+                          {/* Card header */}
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[12px] font-bold text-slate-500 uppercase tracking-wide">{opts.label}</span>
+                              {opts.inBlock && r.blockId && (() => {
+                                const bl = blocks.find(b => b.id === r.blockId);
+                                if (bl && r.bookingRate !== "" && r.bookingRate !== bl.bookingRate) {
+                                  return <span className="text-[10px] font-semibold text-violet-700 bg-violet-100 border border-violet-200 px-1.5 py-0.5 rounded">Modified</span>;
+                                }
+                                return null;
+                              })()}
+                            </div>
+                            {opts.onRemove && (
+                              <button
+                                type="button"
+                                onClick={opts.onRemove}
+                                className="w-7 h-7 flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                title="Remove this room"
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5">
+                                  <path d="M18 6L6 18M6 6l12 12"/>
+                                </svg>
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Room fields grid */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+
+                            {/* Room Number */}
+                            <div>
+                              <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                                Room Number <span className="text-rose-500">*</span>
+                              </label>
+                              <div className="relative">
+                                <input
+                                  type="text"
+                                  placeholder="e.g. 204"
+                                  value={r.room}
+                                  onChange={e => updateRoom(r.id, { room: e.target.value })}
+                                  className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
+                                    placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                                    ${rowErr?.room ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
+                                />
+                                {rowInfo && (
+                                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded pointer-events-none">
+                                    {rowInfo.category}
+                                  </span>
+                                )}
+                              </div>
+                              {rowErr?.room && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.room}</p>}
+                            </div>
+
+                            {/* Check-in */}
+                            <div>
+                              <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                                Check-in <span className="text-rose-500">*</span>
+                              </label>
+                              <input
+                                type="date"
+                                value={r.checkIn}
+                                onChange={e => updateRoom(r.id, { checkIn: e.target.value })}
+                                className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
+                                  focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                                  ${rowErr?.checkIn ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
+                              />
+                              {rowErr?.checkIn && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.checkIn}</p>}
+                              <p className="mt-1 text-[11px] text-slate-400">Past dates allowed.</p>
+                            </div>
+
+                            {/* Check-out */}
+                            <div>
+                              <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                                Check-out <span className="text-rose-500">*</span>
+                              </label>
+                              <input
+                                type="date"
+                                min={r.checkIn || TODAY}
+                                value={r.checkOut}
+                                onChange={e => updateRoom(r.id, { checkOut: e.target.value })}
+                                className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
+                                  focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                                  ${rowErr?.checkOut ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
+                              />
+                              {rowErr?.checkOut && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.checkOut}</p>}
+                            </div>
+
+                            {/* Booking Rate */}
+                            <div>
+                              <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                                Rate / Night
+                              </label>
+                              <div className="relative">
+                                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none text-[13px]">৳</span>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step="0.01"
+                                  placeholder={rowInfo ? String(rowInfo.price) : "0.00"}
+                                  value={r.bookingRate}
+                                  onChange={e => updateRoom(r.id, { bookingRate: e.target.value })}
+                                  onWheel={e => (e.target as HTMLInputElement).blur()}
+                                  className={`w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
+                                    placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                                    [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none
+                                    ${rowErr?.bookingRate ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
+                                />
+                              </div>
+                              {r.fixedRate && r.fixedRate !== r.bookingRate && (
+                                <p className="mt-1 text-[11px] text-slate-400">Published: ৳{r.fixedRate}</p>
+                              )}
+                              {rowErr?.bookingRate && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.bookingRate}</p>}
+                            </div>
+                          </div>
+
+                          {/* Discount badge */}
+                          {discPerNight > 0 && (
+                            <div className="flex items-center gap-2 text-[12px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 flex-shrink-0">
+                                <path d="M20 12V22H4V12"/><path d="M22 7H2v5h20V7z"/><path d="M12 22V7"/><path d="M12 7H7.5a2.5 2.5 0 010-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 000-5C13 2 12 7 12 7z"/>
                               </svg>
-                            </button>
+                              <span>
+                                <span className="font-bold">{discPct}% discount</span>
+                                {" · "}৳{discPerNight.toLocaleString()}/night off
+                                {n > 0 && <span className="font-bold"> · Total saving: ৳{(discPerNight * n).toLocaleString()}</span>}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Stay summary strip */}
+                          {n > 0 && (
+                            <div className="flex items-center gap-3 bg-sky-50 border border-sky-200 rounded-lg px-4 py-2.5">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-sky-500 flex-shrink-0">
+                                <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                              </svg>
+                              <p className="text-[13px] leading-relaxed">
+                                <span className="font-bold text-sky-800">{dayName(r.checkIn)}</span>
+                                {" "}<span className="text-sky-700">{formatDateShort(r.checkIn)}</span>
+                                {" "}<span className="text-sky-400 mx-0.5">→</span>{" "}
+                                <span className="font-bold text-sky-800">{dayName(r.checkOut)}</span>
+                                {" "}<span className="text-sky-700">{formatDateShort(r.checkOut)}</span>
+                                {" = "}
+                                <span className="font-bold text-sky-900">{n} night{n !== 1 ? "s" : ""}</span>
+                                {rowInfo && (
+                                  <span className="text-sky-600 ml-2 font-medium">
+                                    · ৳{(bookingNum * n).toLocaleString()} total
+                                  </span>
+                                )}
+                                <span className="text-sky-500 text-[11.5px] ml-2">· Check-in 12:00 PM · Check-out 11:59 AM</span>
+                              </p>
+                            </div>
+                          )}
+
+                          {/* Conflict warnings */}
+                          {rowConflict && (
+                            <div className="flex items-start gap-2.5 bg-rose-50 border border-rose-200 rounded-lg px-4 py-3">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5">
+                                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/>
+                              </svg>
+                              <p className="text-[12px] text-rose-700 leading-relaxed">
+                                <span className="font-semibold">Room unavailable.</span>{" "}
+                                Room {r.room} is already booked{" "}
+                                <span className="font-medium">{rowConflict.checkIn} – {rowConflict.checkOut}</span>{" "}
+                                (booking <span className="font-mono">{rowConflict.id}</span>, status: {rowConflict.status}).
+                              </p>
+                            </div>
+                          )}
+                          {!rowConflict && dupConflict && (
+                            <div className="flex items-start gap-2.5 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5">
+                                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/>
+                              </svg>
+                              <p className="text-[12px] text-amber-800 leading-relaxed">
+                                <span className="font-semibold">Duplicate room.</span>{" "}
+                                Room {r.room} appears more than once with overlapping dates in this booking.
+                              </p>
+                            </div>
                           )}
                         </div>
+                      );
+                    };
 
-                        {/* Room fields grid */}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    // ── Single-room entry ──────────────────────────────────
+                    if (entry.type === "single") {
+                      const singleIdx = form.rooms.indexOf(entry.row);
+                      return renderRoomCard(entry.row, {
+                        label:    `Room ${singleIdx + 1}`,
+                        onRemove: form.rooms.length > 1 ? () => removeRoom(entry.row.id) : undefined,
+                      });
+                    }
 
-                          {/* Room Number */}
-                          <div>
-                            <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                              Room Number <span className="text-rose-500">*</span>
-                            </label>
-                            <div className="relative">
-                              <input
-                                type="text"
-                                placeholder="e.g. 204"
-                                value={r.room}
-                                onChange={e => updateRoom(r.id, { room: e.target.value })}
-                                className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
-                                  placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                                  ${rowErr?.room ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
-                              />
-                              {rowInfo && (
-                                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded pointer-events-none">
-                                  {rowInfo.category}
-                                </span>
-                              )}
-                            </div>
-                            {rowErr?.room && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.room}</p>}
-                          </div>
+                    // ── Block entry ────────────────────────────────────────
+                    const { block, rows: blockRows } = entry;
+                    const blockIdx   = blocks.findIndex(bl => bl.id === block.id);
+                    const blockNum   = blockIdx + 1;
+                    const blockNights = calcNights(block.checkIn, block.checkOut);
+                    const blockRate   = parseFloat(block.bookingRate) || 0;
+                    const blockSubtotal = blockRate * blockNights * blockRows.length;
+                    const blockConflictCount = blockRows.filter(r => roomConflicts[r.id] || duplicateConflicts[r.id]).length;
 
-                          {/* Check-in */}
-                          <div>
-                            <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                              Check-in <span className="text-rose-500">*</span>
-                            </label>
-                            <input
-                              type="date"
-                              value={r.checkIn}
-                              onChange={e => updateRoom(r.id, { checkIn: e.target.value })}
-                              className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
-                                focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                                ${rowErr?.checkIn ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
-                            />
-                            {rowErr?.checkIn && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.checkIn}</p>}
-                            <p className="mt-1 text-[11px] text-slate-400">Past dates allowed.</p>
-                          </div>
-
-                          {/* Check-out */}
-                          <div>
-                            <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                              Check-out <span className="text-rose-500">*</span>
-                            </label>
-                            <input
-                              type="date"
-                              min={r.checkIn || TODAY}
-                              value={r.checkOut}
-                              onChange={e => updateRoom(r.id, { checkOut: e.target.value })}
-                              className={`w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
-                                focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                                ${rowErr?.checkOut ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
-                            />
-                            {rowErr?.checkOut && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.checkOut}</p>}
-                          </div>
-
-                          {/* Booking Rate */}
-                          <div>
-                            <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                              Rate / Night
-                            </label>
-                            <div className="relative">
-                              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none text-[13px]">৳</span>
-                              <input
-                                type="number"
-                                min={0}
-                                step="0.01"
-                                placeholder={rowInfo ? String(rowInfo.price) : "0.00"}
-                                value={r.bookingRate}
-                                onChange={e => updateRoom(r.id, { bookingRate: e.target.value })}
-                                onWheel={e => (e.target as HTMLInputElement).blur()}
-                                className={`w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
-                                  placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                                  [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none
-                                  ${rowErr?.bookingRate ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
-                              />
-                            </div>
-                            {r.fixedRate && r.fixedRate !== r.bookingRate && (
-                              <p className="mt-1 text-[11px] text-slate-400">
-                                Published: ৳{r.fixedRate}
+                    return (
+                      <div key={block.id} className="border border-violet-200 rounded-xl overflow-hidden">
+                        {/* Block header */}
+                        <div className="flex items-start justify-between gap-3 px-4 py-3 bg-violet-50">
+                          <button
+                            type="button"
+                            onClick={() => toggleBlockExpanded(block.id)}
+                            className="flex items-start gap-2.5 flex-1 min-w-0 text-left"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                              className={`w-4 h-4 text-violet-500 flex-shrink-0 mt-0.5 transition-transform ${block.expanded ? "rotate-90" : ""}`}>
+                              <path d="M9 18l6-6-6-6"/>
+                            </svg>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-[12px] font-bold text-violet-800 uppercase tracking-wide">Block {blockNum}</span>
+                                <span className="text-[11.5px] text-violet-600">· {blockRows.length} {block.category} room{blockRows.length !== 1 ? "s" : ""}</span>
+                              </div>
+                              <p className="text-[11.5px] text-slate-500 mt-0.5">
+                                {block.checkIn && block.checkOut ? `${formatDateShort(block.checkIn)} → ${formatDateShort(block.checkOut)}` : ""}
+                                {blockNights > 0 ? ` · ${blockNights} night${blockNights !== 1 ? "s" : ""}` : ""}
+                                {blockRate > 0 ? ` · ৳${blockRate.toLocaleString()}/nt` : ""}
                               </p>
-                            )}
-                            {rowErr?.bookingRate && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.bookingRate}</p>}
-                          </div>
+                              {blockSubtotal > 0 && (
+                                <p className="text-[11.5px] font-semibold text-violet-700 mt-0.5">Subtotal: ৳{blockSubtotal.toLocaleString()}</p>
+                              )}
+                              <p className="text-[11px] text-slate-400 mt-0.5">
+                                Rooms: {blockRows.map(r => r.room || "?").join(", ")}
+                              </p>
+                            </div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => removeBlock(block.id)}
+                            className="flex items-center gap-1 text-[11.5px] font-medium text-slate-400 hover:text-red-500 transition-colors flex-shrink-0 pt-0.5"
+                            title="Remove this block"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5">
+                              <path d="M18 6L6 18M6 6l12 12"/>
+                            </svg>
+                            Remove
+                          </button>
                         </div>
 
-                        {/* Discount badge */}
-                        {discPerNight > 0 && (
-                          <div className="flex items-center gap-2 text-[12px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 flex-shrink-0">
-                              <path d="M20 12V22H4V12"/><path d="M22 7H2v5h20V7z"/><path d="M12 22V7"/><path d="M12 7H7.5a2.5 2.5 0 010-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 000-5C13 2 12 7 12 7z"/>
+                        {/* Collapsed conflict summary */}
+                        {!block.expanded && blockConflictCount > 0 && (
+                          <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 border-t border-amber-200">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-amber-600 flex-shrink-0">
+                              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/>
                             </svg>
-                            <span>
-                              <span className="font-bold">{discPct}% discount</span>
-                              {" · "}৳{discPerNight.toLocaleString()}/night off
-                              {n > 0 && <span className="font-bold"> · Total saving: ৳{(discPerNight * n).toLocaleString()}</span>}
-                            </span>
-                          </div>
-                        )}
-
-                        {/* Stay summary strip */}
-                        {n > 0 && (
-                          <div className="flex items-center gap-3 bg-sky-50 border border-sky-200 rounded-lg px-4 py-2.5">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-sky-500 flex-shrink-0">
-                              <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
-                            </svg>
-                            <p className="text-[13px] leading-relaxed">
-                              <span className="font-bold text-sky-800">{dayName(r.checkIn)}</span>
-                              {" "}<span className="text-sky-700">{formatDateShort(r.checkIn)}</span>
-                              {" "}<span className="text-sky-400 mx-0.5">→</span>{" "}
-                              <span className="font-bold text-sky-800">{dayName(r.checkOut)}</span>
-                              {" "}<span className="text-sky-700">{formatDateShort(r.checkOut)}</span>
-                              {" = "}
-                              <span className="font-bold text-sky-900">{n} night{n !== 1 ? "s" : ""}</span>
-                              {rowInfo && (
-                                <span className="text-sky-600 ml-2 font-medium">
-                                  · ৳{(bookingNum * n).toLocaleString()} total
-                                </span>
-                              )}
-                              <span className="text-sky-500 text-[11.5px] ml-2">· Check-in 12:00 PM · Check-out 11:59 AM</span>
+                            <p className="text-[11.5px] text-amber-800">
+                              {blockConflictCount} room{blockConflictCount !== 1 ? "s" : ""} in this block have conflicts. Expand to review.
                             </p>
                           </div>
                         )}
 
-                        {/* Room conflict warnings (Layer A) */}
-                        {rowConflict && (
-                          <div className="flex items-start gap-2.5 bg-rose-50 border border-rose-200 rounded-lg px-4 py-3">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5">
-                              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/>
-                            </svg>
-                            <p className="text-[12px] text-rose-700 leading-relaxed">
-                              <span className="font-semibold">Room unavailable.</span>{" "}
-                              Room {r.room} is already booked{" "}
-                              <span className="font-medium">{rowConflict.checkIn} – {rowConflict.checkOut}</span>{" "}
-                              (booking <span className="font-mono">{rowConflict.id}</span>, status: {rowConflict.status}).
-                            </p>
-                          </div>
-                        )}
-                        {!rowConflict && dupConflict && (
-                          <div className="flex items-start gap-2.5 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5">
-                              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/>
-                            </svg>
-                            <p className="text-[12px] text-amber-800 leading-relaxed">
-                              <span className="font-semibold">Duplicate room.</span>{" "}
-                              Room {r.room} appears more than once with overlapping dates in this booking.
-                            </p>
+                        {/* Expanded per-room cards */}
+                        {block.expanded && (
+                          <div className="border-t border-violet-100 p-3 space-y-3">
+                            {blockRows.map((r, i) =>
+                              renderRoomCard(r, {
+                                label:    `Room ${i + 1} of ${blockRows.length}`,
+                                onRemove: () => removeRowFromBlock(r.id),
+                                inBlock:  true,
+                              })
+                            )}
                           </div>
                         )}
                       </div>
@@ -5056,6 +5320,181 @@ export default function BookingsClient({ initialRoom }: Props) {
                   className="px-5 py-2 text-[13px] font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {editSaving ? "Saving…" : "Save Changes"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ══════════════════════════════════════════════════════
+          ADD ROOM BLOCK DIALOG
+          Fixed overlay; opens when blockDialog !== null.
+      ══════════════════════════════════════════════════════ */}
+      {blockDialog && (() => {
+        const bd = blockDialog;
+        // Derive available categories dynamically from hotel rooms
+        const categories = [...new Set(rooms.map(r => r.category))].sort();
+        // Live availability for the current dialog inputs
+        const candidates = findAvailableRoomsForCategory(rooms, bookings, form.rooms, bd.category, bd.checkIn, bd.checkOut);
+        const have = candidates.length;
+        const need = parseInt(bd.quantity, 10) || 0;
+        const blockNights = calcNights(bd.checkIn, bd.checkOut);
+        const isValid = !!bd.category && need > 0 && !!bd.checkIn && !!bd.checkOut && blockNights > 0 && have >= need;
+
+        // Default rate for selected category (most common price)
+        function defaultRateForCategory(cat: string): string {
+          const catRooms = rooms.filter(r => r.category === cat);
+          if (!catRooms.length) return "";
+          const counts: Record<string, number> = {};
+          catRooms.forEach(r => { counts[String(r.price)] = (counts[String(r.price)] || 0) + 1; });
+          return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+        }
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+            <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden">
+
+              {/* Header */}
+              <div className="flex items-center gap-3 px-6 pt-5 pb-4 border-b border-slate-100">
+                <div className="w-9 h-9 rounded-xl bg-violet-100 flex items-center justify-center flex-shrink-0">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4.5 h-4.5 text-violet-600">
+                    <rect x="2" y="3" width="20" height="5" rx="1"/><rect x="2" y="10" width="20" height="5" rx="1"/><rect x="2" y="17" width="10" height="4" rx="1"/><path d="M18 19h4M20 17v4"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-[15px] font-bold text-slate-800">Add Room Block</h3>
+                  <p className="text-[12px] text-slate-400">Allocate multiple rooms of the same category at once</p>
+                </div>
+              </div>
+
+              {/* Body */}
+              <div className="px-6 py-5 space-y-4">
+
+                {/* Row 1: Category + Quantity */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                      Category <span className="text-rose-500">*</span>
+                    </label>
+                    <select
+                      value={bd.category}
+                      onChange={e => {
+                        const cat = e.target.value;
+                        const rate = !bd.rateEdited ? defaultRateForCategory(cat) : bd.bookingRate;
+                        setBlockDialog(prev => prev ? { ...prev, category: cat, bookingRate: rate } : null);
+                      }}
+                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition appearance-none cursor-pointer"
+                    >
+                      <option value="">Select category…</option>
+                      {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                      Quantity <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={bd.category ? rooms.filter(r => r.category === bd.category).length : undefined}
+                      placeholder="e.g. 10"
+                      value={bd.quantity}
+                      onChange={e => setBlockDialog(prev => prev ? { ...prev, quantity: e.target.value } : null)}
+                      onWheel={e => (e.target as HTMLInputElement).blur()}
+                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Row 2: Check-in / Check-out */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                      Check-in <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      type="date"
+                      value={bd.checkIn}
+                      onChange={e => setBlockDialog(prev => prev ? { ...prev, checkIn: e.target.value } : null)}
+                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                      Check-out <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      type="date"
+                      min={bd.checkIn || TODAY}
+                      value={bd.checkOut}
+                      onChange={e => setBlockDialog(prev => prev ? { ...prev, checkOut: e.target.value } : null)}
+                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
+                    />
+                  </div>
+                </div>
+
+                {/* Row 3: Rate per night */}
+                <div>
+                  <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                    Rate / Night <span className="text-rose-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none text-[13px]">৳</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      placeholder="0.00"
+                      value={bd.bookingRate}
+                      onChange={e => setBlockDialog(prev => prev ? { ...prev, bookingRate: e.target.value, rateEdited: true } : null)}
+                      onWheel={e => (e.target as HTMLInputElement).blur()}
+                      className="w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Live availability preview */}
+                {need > 0 && bd.category && bd.checkIn && bd.checkOut && blockNights > 0 && (
+                  have >= need ? (
+                    <div className="flex items-center gap-2.5 bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-2.5">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4 h-4 text-emerald-600 flex-shrink-0">
+                        <path d="M20 6L9 17l-5-5"/>
+                      </svg>
+                      <p className="text-[12px] text-emerald-800">
+                        <span className="font-semibold">Available:</span> {have} {bd.category} room{have !== 1 ? "s" : ""} — {need} will be allocated
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="flex items-start gap-2.5 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/>
+                      </svg>
+                      <p className="text-[12px] text-amber-800">
+                        <span className="font-semibold">Only {have} {bd.category} room{have !== 1 ? "s" : ""} available</span>{" "}
+                        {bd.checkIn && bd.checkOut ? `${formatDateShort(bd.checkIn)} → ${formatDateShort(bd.checkOut)}` : ""}. Need {need}. Adjust dates or reduce count.
+                      </p>
+                    </div>
+                  )
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setBlockDialog(null)}
+                  className="px-4 py-2 text-[13px] font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmBlockDialog}
+                  disabled={!isValid}
+                  className="px-5 py-2 text-[13px] font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Add {need > 0 ? `${need} Room${need !== 1 ? "s" : ""}` : "Block"}
                 </button>
               </div>
             </div>
