@@ -1064,25 +1064,6 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   function confirmBlockDialog() {
     const bd = blockDialog;
-    // DIAGNOSTIC — remove before merge
-    console.log("[confirmBlockDialog] bd =", {
-      checkIn:  bd?.checkIn,
-      checkOut: bd?.checkOut,
-      sections: Object.fromEntries(
-        Object.entries(bd?.sections ?? {}).map(([cat, sec]) => [
-          cat,
-          {
-            selectedCount: sec.selected.size,
-            selected:      [...sec.selected],
-            bookingRate:   sec.bookingRate,
-          },
-        ])
-      ),
-    });
-    console.log(
-      "[confirmBlockDialog] totalSelected =",
-      Object.values(bd?.sections ?? {}).reduce((sum, s) => sum + s.selected.size, 0)
-    );
     if (!bd) return;
     const newBlocks: RoomBlock[] = [];
     const newRows: RoomFormRow[] = [];
