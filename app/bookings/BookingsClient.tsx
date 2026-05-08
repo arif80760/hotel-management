@@ -122,18 +122,16 @@ function rowNights(r: RoomFormRow): number {
 /**
  * Derives the two display strings for the Room cell in the bookings table.
  *
- * - 1 room  : "Room 204" / "Suite"
- * - 2–5 rooms: "201 · 202 · 305" / "3 × Suite"  or  "Mixed (3)"
- * - 6+ rooms : "6 rooms"          / "6 × Suite"  or  "Mixed (6)"
+ * - 1 room : "Room 204" / "Suite"  (unchanged; not clickable)
+ * - 2+ rooms: "3 rooms"  / "3 × Suite" or "Mixed (3)"  (clickable — opens popover)
  */
-function roomCellDisplay(bRooms: BookingRoom[]): { top: string; sub: string } {
+function roomCellDisplay(bRooms: BookingRoom[]): { top: string; sub: string; multi: boolean } {
   const n = bRooms.length;
-  if (n === 0) return { top: "—", sub: "" };
-  if (n === 1) return { top: `Room ${bRooms[0].roomNumber}`, sub: bRooms[0].roomCategory };
+  if (n === 0) return { top: "—", sub: "", multi: false };
+  if (n === 1) return { top: `Room ${bRooms[0].roomNumber}`, sub: bRooms[0].roomCategory, multi: false };
   const cats = [...new Set(bRooms.map(r => r.roomCategory))];
   const sub  = cats.length === 1 ? `${n} × ${cats[0]}` : `Mixed (${n})`;
-  const top  = n <= 5 ? bRooms.map(r => r.roomNumber).join(" · ") : `${n} rooms`;
-  return { top, sub };
+  return { top: `${n} rooms`, sub, multi: true };
 }
 
 function formatDate(iso: string): string {
@@ -524,6 +522,11 @@ export default function BookingsClient({ initialRoom }: Props) {
   // null = closed; set to a booking to show that booking's full timeline.
   const [timelineModal, setTimelineModal] = useState<Booking | null>(null);
 
+  // ── Room-detail popover ──────────────────────────────────────
+  // For multi-room bookings: clicking the Room cell opens a read-only
+  // per-room detail popover. Stores the booking id of the open popover.
+  const [openRoomPopoverBookingId, setOpenRoomPopoverBookingId] = useState<string | null>(null);
+
   // ── Page view ───────────────────────────────────────────────
   // "bookings" = full booking list (existing)
   // "dues"     = outstanding-dues monitor (new)
@@ -763,6 +766,27 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (docsModal) document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [docsModal]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Close room-detail popover on Escape or outside click
+  useEffect(() => {
+    if (!openRoomPopoverBookingId) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpenRoomPopoverBookingId(null);
+    }
+    function onMouseDown(e: MouseEvent) {
+      const target = e.target as Element;
+      // Close if the click is outside any element with data-room-popover
+      if (!target.closest("[data-room-popover]")) {
+        setOpenRoomPopoverBookingId(null);
+      }
+    }
+    document.addEventListener("keydown",   onKey);
+    document.addEventListener("mousedown", onMouseDown);
+    return () => {
+      document.removeEventListener("keydown",   onKey);
+      document.removeEventListener("mousedown", onMouseDown);
+    };
+  }, [openRoomPopoverBookingId]);
 
   // Pre-fill edit form fields when a booking is selected for editing
   useEffect(() => {
@@ -2700,17 +2724,85 @@ export default function BookingsClient({ initialRoom }: Props) {
                     </td>
 
                     {/* Room */}
-                    <td className="px-5 py-3.5">
-                      {(() => {
-                        const { top, sub } = roomCellDisplay(b.rooms);
-                        return (
-                          <>
+                    {(() => {
+                      const { top, sub, multi } = roomCellDisplay(b.rooms);
+                      const popoverOpen = openRoomPopoverBookingId === b.id;
+                      return (
+                        <td
+                          className={`px-5 py-3.5 relative ${multi ? "cursor-pointer select-none" : ""}`}
+                          data-room-popover={multi ? b.id : undefined}
+                          onClick={multi ? () => setOpenRoomPopoverBookingId(popoverOpen ? null : b.id) : undefined}
+                        >
+                          <div className="flex items-center gap-1">
                             <p className="font-semibold text-slate-800">{top}</p>
-                            {sub && <p className="text-[11px] text-slate-400">{sub}</p>}
-                          </>
-                        );
-                      })()}
-                    </td>
+                            {multi && (
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0">
+                                <path d="M6 9l6 6 6-6"/>
+                              </svg>
+                            )}
+                          </div>
+                          {sub && <p className="text-[11px] text-slate-400">{sub}</p>}
+
+                          {/* ── Room detail popover ── */}
+                          {multi && popoverOpen && (
+                            <div
+                              data-room-popover={b.id}
+                              className="absolute top-full mt-1 left-0 z-30 w-80 bg-white border border-slate-200 rounded-xl shadow-lg overflow-hidden"
+                              onClick={e => e.stopPropagation()}
+                            >
+                              {/* Popover header */}
+                              <div className="px-4 py-3 bg-slate-50 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+                                <span className="text-[11.5px] font-semibold text-slate-700 font-mono">
+                                  {b.id}
+                                </span>
+                                <span className="text-slate-300">·</span>
+                                <span className="text-[11.5px] text-slate-500">
+                                  {b.rooms.length} rooms
+                                </span>
+                                <span className="text-slate-300">·</span>
+                                <span className="text-[11.5px] font-semibold text-slate-700">
+                                  ৳{b.totalAmount.toLocaleString()}
+                                </span>
+                              </div>
+
+                              {/* Per-room list */}
+                              <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto">
+                                {b.rooms.map(r => {
+                                  const subtotal = r.bookingRate * r.nights;
+                                  return (
+                                    <div key={r.id} className="px-4 py-3">
+                                      {/* Line 1: room number + category badge */}
+                                      <div className="flex items-center justify-between gap-2 mb-1">
+                                        <span className="text-[13px] font-semibold text-slate-800">
+                                          Room {r.roomNumber}
+                                        </span>
+                                        <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">
+                                          {r.roomCategory}
+                                        </span>
+                                      </div>
+                                      {/* Line 2: dates + nights */}
+                                      <p className="text-[11.5px] text-slate-500">
+                                        {r.checkIn} → {r.checkOut}
+                                        <span className="ml-2 text-slate-400">· {r.nights} nt</span>
+                                      </p>
+                                      {/* Line 3: rate + subtotal (right-aligned) */}
+                                      <div className="flex items-center justify-end gap-3 mt-1">
+                                        <span className="text-[11px] text-slate-400">
+                                          ৳{r.bookingRate.toLocaleString()}/nt
+                                        </span>
+                                        <span className="text-[12px] font-semibold text-slate-700">
+                                          ৳{subtotal.toLocaleString()}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })()}
 
                     {/* ── Guests column ────────────────────────────────────
                         Shows total count and up to 2 additional guest names.
@@ -3122,17 +3214,85 @@ export default function BookingsClient({ initialRoom }: Props) {
                         </td>
 
                         {/* Room */}
-                        <td className="px-5 py-3.5">
-                          {(() => {
-                            const { top, sub } = roomCellDisplay(b.rooms);
-                            return (
-                              <>
+                        {(() => {
+                          const { top, sub, multi } = roomCellDisplay(b.rooms);
+                          const popoverOpen = openRoomPopoverBookingId === b.id;
+                          return (
+                            <td
+                              className={`px-5 py-3.5 relative ${multi ? "cursor-pointer select-none" : ""}`}
+                              data-room-popover={multi ? b.id : undefined}
+                              onClick={multi ? () => setOpenRoomPopoverBookingId(popoverOpen ? null : b.id) : undefined}
+                            >
+                              <div className="flex items-center gap-1">
                                 <p className="font-semibold text-slate-800">{top}</p>
-                                {sub && <p className="text-[11px] text-slate-400">{sub}</p>}
-                              </>
-                            );
-                          })()}
-                        </td>
+                                {multi && (
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0">
+                                    <path d="M6 9l6 6 6-6"/>
+                                  </svg>
+                                )}
+                              </div>
+                              {sub && <p className="text-[11px] text-slate-400">{sub}</p>}
+
+                              {/* ── Room detail popover ── */}
+                              {multi && popoverOpen && (
+                                <div
+                                  data-room-popover={b.id}
+                                  className="absolute top-full mt-1 left-0 z-30 w-80 bg-white border border-slate-200 rounded-xl shadow-lg overflow-hidden"
+                                  onClick={e => e.stopPropagation()}
+                                >
+                                  {/* Popover header */}
+                                  <div className="px-4 py-3 bg-slate-50 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+                                    <span className="text-[11.5px] font-semibold text-slate-700 font-mono">
+                                      {b.id}
+                                    </span>
+                                    <span className="text-slate-300">·</span>
+                                    <span className="text-[11.5px] text-slate-500">
+                                      {b.rooms.length} rooms
+                                    </span>
+                                    <span className="text-slate-300">·</span>
+                                    <span className="text-[11.5px] font-semibold text-slate-700">
+                                      ৳{b.totalAmount.toLocaleString()}
+                                    </span>
+                                  </div>
+
+                                  {/* Per-room list */}
+                                  <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto">
+                                    {b.rooms.map(r => {
+                                      const subtotal = r.bookingRate * r.nights;
+                                      return (
+                                        <div key={r.id} className="px-4 py-3">
+                                          {/* Line 1: room number + category badge */}
+                                          <div className="flex items-center justify-between gap-2 mb-1">
+                                            <span className="text-[13px] font-semibold text-slate-800">
+                                              Room {r.roomNumber}
+                                            </span>
+                                            <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">
+                                              {r.roomCategory}
+                                            </span>
+                                          </div>
+                                          {/* Line 2: dates + nights */}
+                                          <p className="text-[11.5px] text-slate-500">
+                                            {r.checkIn} → {r.checkOut}
+                                            <span className="ml-2 text-slate-400">· {r.nights} nt</span>
+                                          </p>
+                                          {/* Line 3: rate + subtotal (right-aligned) */}
+                                          <div className="flex items-center justify-end gap-3 mt-1">
+                                            <span className="text-[11px] text-slate-400">
+                                              ৳{r.bookingRate.toLocaleString()}/nt
+                                            </span>
+                                            <span className="text-[12px] font-semibold text-slate-700">
+                                              ৳{subtotal.toLocaleString()}
+                                            </span>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+                          );
+                        })()}
 
                         {/* Dates */}
                         <td className="px-5 py-3.5 text-slate-600 whitespace-nowrap">{b.checkIn}</td>
