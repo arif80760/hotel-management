@@ -1323,11 +1323,11 @@ export default function BookingsClient({ initialRoom }: Props) {
     const scheduled = room.checkOutISO ?? "";
 
     let defaultActualCheckOut = "";
-    let suggestedRefund       = 0;
+    let removedAmount         = 0;
 
     if (room.status === "Confirmed") {
-      // Pre-checkin cancel: full room contribution = rate × nights
-      suggestedRefund = rate * nights;
+      // Pre-checkin cancel: full room contribution removed from total
+      removedAmount = rate * nights;
     } else {
       // Early departure: default actualCheckOut to today, compute unstayed nights
       defaultActualCheckOut = TODAY;
@@ -1336,11 +1336,13 @@ export default function BookingsClient({ initialRoom }: Props) {
             (new Date(scheduled).getTime() - new Date(TODAY).getTime()) / 86_400_000
           ))
         : 0;
-      suggestedRefund = rate * earlyNights;
+      removedAmount = rate * earlyNights;
     }
 
-    // Hard cap: suggested refund cannot exceed what the guest has actually paid
-    const capped = Math.min(suggestedRefund, booking.amountPaid);
+    // Detect scenario at open time so we can pre-fill the refund input correctly.
+    // overpayment = how much the guest has paid above the new (post-cancel) total.
+    const newTotal    = booking.totalAmount - removedAmount;
+    const overpayment = Math.max(0, booking.amountPaid - newTotal);
 
     setCancelRoomModal({
       bookingRoomId:     room.id,
@@ -1352,7 +1354,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       bookingRate:       rate,
       nights:            nights,
       actualCheckOut:    defaultActualCheckOut,
-      refundAmount:      capped > 0 ? String(capped) : "",
+      refundAmount:      overpayment > 0 ? String(overpayment) : "",
       refundEdited:      false,
       refundReason:      "",
       submitting:        false,
@@ -1384,68 +1386,48 @@ export default function BookingsClient({ initialRoom }: Props) {
       setCancelRoomModal(prev => prev && { ...prev, submitting: false, error: "Actual check-out date is required." });
       return;
     }
-    const refundAmt = parseFloat(m.refundAmount) || 0;
-    if (refundAmt > m.paidAmount) {
-      setCancelRoomModal(prev => prev && { ...prev, submitting: false, error: `Refund cannot exceed paid amount ৳${m.paidAmount.toLocaleString()}.` });
-      return;
-    }
 
-    // ── Guard: ensure cancel won't drop total_amount below paid_amount ──
-    // update_booking_total() recomputes from non-cancelled rooms. If the
-    // result is below paid_amount, the DB CHECK constraint chk_paid_not_exceed_total
-    // will reject the UPDATE with code 23514. Block here with a clear message
-    // rather than letting the RPC fail silently after the optimistic update.
-    //
-    // Note: refund records do NOT decrement paid_amount (separate ledger),
-    // so the only remedy is the operator disbursing the overpayment first.
     const booking = bookings.find(b => b.id === m.bookingRef);
     if (!booking) {
       setCancelRoomModal(prev => prev && { ...prev, submitting: false, error: "Booking not found in local state — please refresh and retry." });
       return;
     }
 
-    if (m.currentStatus === "Confirmed") {
-      // Pre-checkin cancel: this room's full contribution is removed from the total.
-      const removedAmount = m.bookingRate * m.nights;
-      const newTotal = booking.totalAmount - removedAmount;
-      if (newTotal < booking.amountPaid) {
-        const gap = booking.amountPaid - newTotal;
-        setCancelRoomModal(prev => prev && {
-          ...prev,
-          submitting: false,
-          error: `Cancelling this room would reduce the booking total to ৳${newTotal.toLocaleString()}, below the ৳${booking.amountPaid.toLocaleString()} already paid. Record a payment reversal of ৳${gap.toLocaleString()} before retrying. (Refund records do not reduce paid amount.)`,
-        });
-        return;
-      }
-    } else {
-      // Early checkout: only the deduction for unstayed nights is removed.
-      const earlyNights = m.actualCheckOut && m.scheduledCheckOut
-        ? Math.max(0, Math.floor(
-            (new Date(m.scheduledCheckOut).getTime() - new Date(m.actualCheckOut).getTime()) / 86_400_000
-          ))
-        : 0;
-      const removedAmount = earlyNights * m.bookingRate;
-      const newTotal = booking.totalAmount - removedAmount;
-      if (newTotal < booking.amountPaid) {
-        const gap = booking.amountPaid - newTotal;
-        setCancelRoomModal(prev => prev && {
-          ...prev,
-          submitting: false,
-          error: `Early checkout would reduce the booking total to ৳${newTotal.toLocaleString()}, below the ৳${booking.amountPaid.toLocaleString()} already paid. Record a payment reversal of ৳${gap.toLocaleString()} before retrying. (Refund records do not reduce paid amount.)`,
-        });
-        return;
-      }
+    // Compute scenario (same formula as render-time; re-evaluated at submit for safety)
+    const earlyNights = m.currentStatus === "Checked In" && m.actualCheckOut && m.scheduledCheckOut
+      ? Math.max(0, Math.floor(
+          (new Date(m.scheduledCheckOut).getTime() - new Date(m.actualCheckOut).getTime()) / 86_400_000
+        ))
+      : 0;
+    const removedAmount = m.currentStatus === "Confirmed"
+      ? m.bookingRate * m.nights
+      : earlyNights * m.bookingRate;
+    const newTotal    = booking.totalAmount - removedAmount;
+    const overpayment = Math.max(0, booking.amountPaid - newTotal);
+    const isAdjustment = overpayment === 0;
+
+    // Overpayment path: button should be disabled in the UI, but guard defensively.
+    // The DB constraint chk_paid_not_exceed_total would reject the cancel anyway.
+    if (!isAdjustment) {
+      setCancelRoomModal(prev => prev && {
+        ...prev,
+        submitting: false,
+        error: `Cannot proceed — paid amount exceeds new total. Disburse the ৳${overpayment.toLocaleString()} overpayment first.`,
+      });
+      return;
     }
 
     try {
       const uiStatus: "Cancelled" | "Checked Out Early" =
         m.currentStatus === "Confirmed" ? "Cancelled" : "Checked Out Early";
+      // Adjustment path: no refund record — the guest's advance simply rolls
+      // forward against remaining rooms. Pass reason if provided.
       ctxCancelBookingRoom(
         m.bookingRoomId,
         uiStatus,
         m.currentStatus === "Checked In" ? m.actualCheckOut : undefined,
-        refundAmt > 0 ? refundAmt : undefined,
-        m.refundReason.trim() || undefined,
+        undefined,                            // no refund amount
+        m.refundReason.trim() || undefined,   // optional reason note
       );
       setCancelRoomModal(null);
     } catch (err) {
@@ -5919,21 +5901,24 @@ export default function BookingsClient({ initialRoom }: Props) {
         const earlyDeduction = earlyNights * m.bookingRate;
         const refundAmt = parseFloat(m.refundAmount) || 0;
 
-        // ── Partial-paid constraint check (render-time) ─────────────────
-        // Mirrors the guard inside submitCancelRoom. Computing it here lets
-        // us disable the button and hide the green strip before the user
-        // even clicks — no click-then-error UX.
-        const liveBooking = bookings.find(b => b.id === m.bookingRef);
+        // ── Scenario detection (render-time) ────────────────────────────
+        // isAdjustment  — newTotal >= paidAmount → no money owed back;
+        //                 advance rolls forward against remaining rooms.
+        // isOverpayment — newTotal < paidAmount  → guest is owed a refund;
+        //                 blocked until Phase 8.5 per-room disbursement flow.
+        const liveBooking   = bookings.find(b => b.id === m.bookingRef);
         const removedAmount = isEarly
-          ? earlyNights * m.bookingRate          // only deducted nights
-          : m.bookingRate * m.nights;            // full room contribution
-        const newTotal = liveBooking ? liveBooking.totalAmount - removedAmount : 0;
-        const wouldDropTotalBelowPaid = liveBooking
-          ? newTotal < liveBooking.amountPaid
-          : false;
-        const partialPaidGap = liveBooking
-          ? liveBooking.amountPaid - newTotal
-          : 0;
+          ? earlyNights * m.bookingRate   // only deducted nights
+          : m.bookingRate * m.nights;     // full room contribution
+        const currentTotal  = liveBooking?.totalAmount ?? 0;
+        const currentPaid   = liveBooking?.amountPaid  ?? m.paidAmount;
+        const newTotal      = currentTotal - removedAmount;
+        const overpayment   = Math.max(0, currentPaid - newTotal);
+        const isAdjustment  = overpayment === 0;
+        const isOverpayment = overpayment > 0;
+        // Due = total − paid (positive = still owed; negative = overpaid)
+        const currentDue    = currentTotal - currentPaid;
+        const newDue        = newTotal - currentPaid;
 
         return (
           <div
@@ -5967,100 +5952,218 @@ export default function BookingsClient({ initialRoom }: Props) {
               {/* Body */}
               <div className="px-6 py-5 space-y-4">
 
-                {/* Early departure: actual check-out date */}
-                {isEarly && (
-                  <div>
-                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                      Actual Check-out Date <span className="text-rose-500">*</span>
-                    </label>
-                    <input
-                      type="date"
-                      max={m.scheduledCheckOut}
-                      value={m.actualCheckOut}
-                      onChange={e => {
-                        const newDate = e.target.value;
-                        setCancelRoomModal(prev => {
-                          if (!prev) return null;
-                          const patch: Partial<CancelRoomModalState> = { actualCheckOut: newDate, error: null };
-                          // Recompute suggested refund only if user hasn't manually edited it
-                          if (!prev.refundEdited && newDate && prev.scheduledCheckOut) {
-                            const earlyNights = Math.max(0, Math.floor(
-                              (new Date(prev.scheduledCheckOut).getTime() - new Date(newDate).getTime()) / 86_400_000
-                            ));
-                            const suggested = Math.min(earlyNights * prev.bookingRate, prev.paidAmount);
-                            patch.refundAmount = suggested > 0 ? String(suggested) : "";
-                          }
-                          return { ...prev, ...patch };
-                        });
-                      }}
-                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent transition"
-                    />
-                    {m.actualCheckOut && m.scheduledCheckOut && m.actualCheckOut < m.scheduledCheckOut && (
-                      <p className="text-[11.5px] text-orange-600 mt-1">
-                        {earlyNights} early night{earlyNights !== 1 ? "s" : ""} deducted · ৳{earlyDeduction.toLocaleString()} reduction
-                      </p>
+                {/* ── ADJUSTMENT BRANCH — no refund needed ──────────────────
+                    newTotal >= paidAmount: guest's advance rolls forward.     */}
+                {isAdjustment && (
+                  <>
+                    {/* Early departure: actual check-out date */}
+                    {isEarly && (
+                      <div>
+                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                          Actual Check-out Date <span className="text-rose-500">*</span>
+                        </label>
+                        <input
+                          type="date"
+                          max={m.scheduledCheckOut}
+                          value={m.actualCheckOut}
+                          onChange={e => {
+                            const newDate = e.target.value;
+                            setCancelRoomModal(prev => {
+                              if (!prev) return null;
+                              return { ...prev, actualCheckOut: newDate, error: null };
+                            });
+                          }}
+                          className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent transition"
+                        />
+                        {m.actualCheckOut && m.scheduledCheckOut && m.actualCheckOut < m.scheduledCheckOut && (
+                          <p className="text-[11.5px] text-orange-600 mt-1">
+                            {earlyNights} early night{earlyNights !== 1 ? "s" : ""} deducted · ৳{earlyDeduction.toLocaleString()} reduction
+                          </p>
+                        )}
+                      </div>
                     )}
-                  </div>
-                )}
 
-                {/* Refund section */}
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                      Refund Amount (BDT)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      max={m.paidAmount}
-                      placeholder="0"
-                      value={m.refundAmount}
-                      onChange={e => setCancelRoomModal(prev => prev && { ...prev, refundAmount: e.target.value, refundEdited: true, error: null })}
-                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
-                    />
-                    <p className="text-[11px] text-slate-400 mt-1">Max ৳{m.paidAmount.toLocaleString()} (total paid). Leave blank for no refund.</p>
-                  </div>
-                  <div>
-                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                      Refund Reason
-                    </label>
-                    <textarea
-                      rows={2}
-                      placeholder="e.g. Guest cancelled due to change of plans"
-                      value={m.refundReason}
-                      onChange={e => setCancelRoomModal(prev => prev && { ...prev, refundReason: e.target.value })}
-                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition resize-none"
-                    />
-                  </div>
-                </div>
-
-                {/* Refund preview strip — hidden when partial-paid guard fails */}
-                {refundAmt > 0 && !wouldDropTotalBelowPaid && (
-                  <div className="flex items-center gap-2 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg text-[12px]">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-emerald-600 flex-shrink-0"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
-                    <span className="text-emerald-700 font-medium">Refund of ৳{refundAmt.toLocaleString()} will be created (pending disbursement)</span>
-                  </div>
-                )}
-
-                {/* Partial-paid constraint warning — always visible when applicable */}
-                {wouldDropTotalBelowPaid && liveBooking && (
-                  <div className="flex items-start gap-2 px-3 py-2.5 bg-rose-50 border border-rose-200 rounded-lg text-[12px]">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
-                    <div className="text-rose-700 space-y-1">
-                      <p className="font-semibold">
-                        {isEarly ? "Early checkout" : "Cancelling this room"} would reduce the booking total to ৳{newTotal.toLocaleString()}, below the ৳{liveBooking.amountPaid.toLocaleString()} already paid. Record a payment reversal of ৳{partialPaidGap.toLocaleString()} before this room can be {isEarly ? "checked out early" : "cancelled"}.
-                      </p>
-                      <p className="text-rose-500">
-                        Setting a refund amount above does not clear this — refund records track what's owed to the guest but do not reduce the paid amount. Payment reversal flow is coming in Phase 8.5.
+                    {/* Read-only impact summary */}
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-1.5">
+                      <p className="text-[10.5px] font-semibold text-slate-400 uppercase tracking-wide mb-2">No Refund Needed</p>
+                      <div className="space-y-1.5 text-[12px]">
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Total</span>
+                          <span className="font-medium text-slate-700">
+                            ৳{currentTotal.toLocaleString()} → ৳{newTotal.toLocaleString()}
+                            <span className="text-slate-400 ml-1.5 font-normal">(-৳{removedAmount.toLocaleString()})</span>
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Paid</span>
+                          <span className="font-medium text-slate-600">
+                            ৳{currentPaid.toLocaleString()}
+                            <span className="text-slate-400 ml-1.5 font-normal">(unchanged)</span>
+                          </span>
+                        </div>
+                        <div className="flex justify-between pt-1.5 border-t border-slate-200">
+                          <span className="font-semibold text-slate-600">Due</span>
+                          <span className="font-semibold text-slate-800">
+                            ৳{currentDue.toLocaleString()} → ৳{newDue.toLocaleString()}
+                            <span className="text-slate-400 ml-1.5 font-normal">(-৳{removedAmount.toLocaleString()})</span>
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-slate-400 pt-1.5 border-t border-slate-200 mt-1">
+                        Guest's existing advance payment applies to remaining rooms.
                       </p>
                     </div>
-                  </div>
+
+                    {/* Optional reason */}
+                    <div>
+                      <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                        Reason <span className="text-[11px] font-normal text-slate-400">(optional)</span>
+                      </label>
+                      <textarea
+                        rows={2}
+                        placeholder="e.g. Guest cancelled due to change of plans"
+                        value={m.refundReason}
+                        onChange={e => setCancelRoomModal(prev => prev && { ...prev, refundReason: e.target.value })}
+                        className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition resize-none"
+                      />
+                    </div>
+
+                    {m.error && (
+                      <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 px-3 py-2 rounded-lg">{m.error}</p>
+                    )}
+                  </>
                 )}
 
-                {/* Other errors (missing date, refund > paid, etc.) */}
-                {m.error && !wouldDropTotalBelowPaid && (
-                  <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 px-3 py-2 rounded-lg">{m.error}</p>
+                {/* ── OVERPAYMENT BRANCH — refund needed ────────────────────
+                    newTotal < paidAmount: guest paid more than new total.
+                    Blocked until per-room disbursement flow lands.           */}
+                {isOverpayment && (
+                  <>
+                    {/* Early departure: actual check-out date */}
+                    {isEarly && (
+                      <div>
+                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                          Actual Check-out Date <span className="text-rose-500">*</span>
+                        </label>
+                        <input
+                          type="date"
+                          max={m.scheduledCheckOut}
+                          value={m.actualCheckOut}
+                          onChange={e => {
+                            const newDate = e.target.value;
+                            setCancelRoomModal(prev => {
+                              if (!prev) return null;
+                              const patch: Partial<CancelRoomModalState> = { actualCheckOut: newDate, error: null };
+                              // Re-compute overpayment-based refund suggestion unless manually edited
+                              if (!prev.refundEdited && newDate && prev.scheduledCheckOut) {
+                                const en = Math.max(0, Math.floor(
+                                  (new Date(prev.scheduledCheckOut).getTime() - new Date(newDate).getTime()) / 86_400_000
+                                ));
+                                const earlyRemoved      = en * prev.bookingRate;
+                                const projectedNewTotal = (liveBooking?.totalAmount ?? 0) - earlyRemoved;
+                                const projectedOverpay  = Math.max(0, prev.paidAmount - projectedNewTotal);
+                                patch.refundAmount = projectedOverpay > 0 ? String(projectedOverpay) : "";
+                              }
+                              return { ...prev, ...patch };
+                            });
+                          }}
+                          className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent transition"
+                        />
+                        {m.actualCheckOut && m.scheduledCheckOut && m.actualCheckOut < m.scheduledCheckOut && (
+                          <p className="text-[11.5px] text-orange-600 mt-1">
+                            {earlyNights} early night{earlyNights !== 1 ? "s" : ""} deducted · ৳{earlyDeduction.toLocaleString()} reduction
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Impact summary — overpayment highlighted */}
+                    <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 space-y-1.5">
+                      <p className="text-[10.5px] font-semibold text-rose-500 uppercase tracking-wide mb-2">Refund Needed</p>
+                      <div className="space-y-1.5 text-[12px]">
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Total</span>
+                          <span className="font-medium text-slate-700">
+                            ৳{currentTotal.toLocaleString()} → ৳{newTotal.toLocaleString()}
+                            <span className="text-slate-400 ml-1.5 font-normal">(-৳{removedAmount.toLocaleString()})</span>
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Paid</span>
+                          <span className="font-semibold text-rose-600">
+                            ৳{currentPaid.toLocaleString()}
+                            <span className="font-normal ml-1.5">(overpaid by ৳{overpayment.toLocaleString()})</span>
+                          </span>
+                        </div>
+                        <div className="flex justify-between pt-1.5 border-t border-rose-200">
+                          <span className="font-semibold text-slate-600">Due</span>
+                          <span className="font-semibold text-rose-700">
+                            {currentDue >= 0 ? `৳${currentDue.toLocaleString()}` : `-৳${Math.abs(currentDue).toLocaleString()}`}
+                            {" → "}
+                            {newDue >= 0 ? `৳${newDue.toLocaleString()}` : `-৳${Math.abs(newDue).toLocaleString()}`}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Refund amount + reason */}
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                          Refund Amount (BDT)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          max={currentPaid}
+                          placeholder="0"
+                          value={m.refundAmount}
+                          onChange={e => setCancelRoomModal(prev => prev && { ...prev, refundAmount: e.target.value, refundEdited: true, error: null })}
+                          className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
+                        />
+                        <p className="text-[11px] text-slate-400 mt-1">Max ৳{currentPaid.toLocaleString()} (total paid).</p>
+                      </div>
+                      <div>
+                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                          Refund Reason
+                        </label>
+                        <textarea
+                          rows={2}
+                          placeholder="e.g. Guest cancelled due to change of plans"
+                          value={m.refundReason}
+                          onChange={e => setCancelRoomModal(prev => prev && { ...prev, refundReason: e.target.value })}
+                          className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition resize-none"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Refund preview strip */}
+                    {refundAmt > 0 && (
+                      <div className="flex items-center gap-2 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg text-[12px]">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-emerald-600 flex-shrink-0"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
+                        <span className="text-emerald-700 font-medium">Refund of ৳{refundAmt.toLocaleString()} will be created (pending disbursement)</span>
+                      </div>
+                    )}
+
+                    {/* Blocked — Phase 8.5 per-room disbursement coming */}
+                    <div className="flex items-start gap-2 px-3 py-2.5 bg-rose-50 border border-rose-200 rounded-lg text-[12px]">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                      <div className="text-rose-700 space-y-1">
+                        <p className="font-semibold">
+                          {isEarly ? "Early checkout" : "Cancelling this room"} would reduce the booking total to ৳{newTotal.toLocaleString()}, below the ৳{currentPaid.toLocaleString()} already paid. Record a payment reversal of ৳{overpayment.toLocaleString()} before this room can be {isEarly ? "checked out early" : "cancelled"}.
+                        </p>
+                        <p className="text-rose-500">
+                          Refund records track what's owed but don't reduce paid amount. Payment reversal flow coming in Phase 8.5.
+                        </p>
+                      </div>
+                    </div>
+
+                    {m.error && (
+                      <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 px-3 py-2 rounded-lg">{m.error}</p>
+                    )}
+                  </>
                 )}
+
               </div>
 
               {/* Footer */}
@@ -6075,7 +6178,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 <button
                   type="button"
                   onClick={submitCancelRoom}
-                  disabled={m.submitting || wouldDropTotalBelowPaid}
+                  disabled={m.submitting || isOverpayment}
                   className={`px-5 py-2 text-[13px] font-semibold text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                     isEarly ? "bg-orange-500 hover:bg-orange-600" : "bg-rose-500 hover:bg-rose-600"
                   }`}
@@ -6084,7 +6187,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     ? "Processing…"
                     : isEarly
                     ? "Confirm Early Departure"
-                    : "Cancel Room"}
+                    : "Confirm Cancellation"}
                 </button>
               </div>
 
