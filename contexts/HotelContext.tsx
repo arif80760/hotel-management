@@ -137,6 +137,29 @@ type HotelContextType = {
   ) => void;
   /** Check in a single confirmed room within a booking. */
   checkinBookingRoom: (bookingRoomId: string) => void;
+  /**
+   * Mark a pending refund as disbursed. Optimistically decrements
+   * booking.amountPaid; rolls back on failure.
+   */
+  disburseRefund: (
+    bookingRef:   string,
+    refundId:     string,
+    refundAmount: number,
+    method:       PaymentMethod,
+    notes:        string | null,
+  ) => void;
+  /** Mark a pending refund as denied. No booking-level state change. */
+  denyRefund: (refundId: string, reason: string) => Promise<void>;
+  /**
+   * Cancel all confirmed rooms in a booking atomically. Optimistically
+   * flips rooms and booking to Cancelled, physical rooms to Available.
+   * Rolls back on failure.
+   */
+  cancelBooking: (
+    bookingRef:    string,
+    refundAmount?: number | null,
+    refundReason?: string | null,
+  ) => void;
 };
 
 const HotelContext = createContext<HotelContextType | null>(null);
@@ -921,6 +944,109 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       });
   }
 
+  // ── Phase 8.5: refund disbursement + whole-booking cancel ──
+
+  function disburseRefund(
+    bookingRef:   string,
+    refundId:     string,
+    refundAmount: number,
+    method:       PaymentMethod,
+    notes:        string | null,
+  ) {
+    const target = bookings.find(b => b.id === bookingRef);
+    if (!target) return;
+    const prevBookings = bookings;
+
+    // Optimistic: decrement paid_amount by the disbursed refund amount.
+    const newAmountPaid = Math.max(0, target.amountPaid - refundAmount);
+    setBookings(prev =>
+      prev.map(b => b.id !== bookingRef ? b : {
+        ...b,
+        amountPaid: newAmountPaid,
+        payment:    bookingsService.derivePaymentStatus(b.totalAmount, newAmountPaid),
+      })
+    );
+
+    bookingsService.disburseRefund(refundId, method, user?.id ?? "", notes)
+      .then(() => bookingsService.getBookingByRef(bookingRef))
+      .then(updated => {
+        if (updated) setBookings(prev => prev.map(b => b.id === bookingRef ? updated : b));
+      })
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[HotelContext disburseRefund] failed — rolling back:", msg);
+        setBookings(prevBookings);
+      });
+  }
+
+  function denyRefund(refundId: string, reason: string): Promise<void> {
+    // No booking-level state change — only the refund row status changes.
+    // The Timeline modal handles the optimistic flip and rollback; the
+    // context forwards the service call and re-throws so the modal can act.
+    return bookingsService.denyRefund(refundId, reason, user?.id ?? "").catch(err => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[HotelContext denyRefund] failed:", msg);
+      throw err;   // re-throw — caller (submitDeny) handles rollback + error UI
+    });
+  }
+
+  function cancelBooking(
+    bookingRef:    string,
+    refundAmount?: number | null,
+    refundReason?: string | null,
+  ) {
+    const target = bookings.find(b => b.id === bookingRef);
+    if (!target) return;
+    const prevBookings = bookings;
+    const prevRooms    = rooms;
+
+    // Optimistic: all rooms → Cancelled
+    const cancelledRooms = target.rooms.map(r => ({
+      ...r,
+      status: "Cancelled" as BookingRoomStatus,
+    }));
+
+    // Physical rooms → Available
+    const cancelledRoomNumbers = new Set(target.rooms.map(r => r.roomNumber));
+
+    // New total = extras only (rooms contribute 0 after cancel, mirrors DB logic)
+    const extrasTotal = target.extraCharges.reduce((sum, e) => sum + e.amount, 0);
+
+    setBookings(prev =>
+      prev.map(b => b.id !== bookingRef ? b : {
+        ...b,
+        rooms:       cancelledRooms,
+        status:      "Cancelled" as BookingStatus,
+        totalAmount: extrasTotal,
+        payment:     bookingsService.derivePaymentStatus(extrasTotal, b.amountPaid),
+      })
+    );
+    setRooms(prev =>
+      prev.map(r =>
+        cancelledRoomNumbers.has(r.roomNumber)
+          ? { ...r, status: "Available" as RoomStatus }
+          : r
+      )
+    );
+
+    bookingsService.cancelBooking(
+      bookingRef,
+      refundAmount  ?? null,
+      refundReason  ?? null,
+      user?.id      ?? null,
+    )
+      .then(() => bookingsService.getBookingByRef(bookingRef))
+      .then(updated => {
+        if (updated) setBookings(prev => prev.map(b => b.id === bookingRef ? updated : b));
+      })
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[HotelContext cancelBooking] failed — rolling back:", msg);
+        setBookings(prevBookings);
+        setRooms(prevRooms);
+      });
+  }
+
   // ── Room actions ────────────────────────────────────────────
 
   function addRoom(room: MockRoom) {
@@ -1004,6 +1130,9 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       cancelBookingRoom,
       extendBookingRoom,
       checkinBookingRoom,
+      disburseRefund,
+      denyRefund,
+      cancelBooking,
       addRoom,
       updateRoom,
       deleteRoom,

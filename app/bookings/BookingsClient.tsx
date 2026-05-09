@@ -47,6 +47,9 @@ import {
   deleteDocument,
 } from "@/services/documentsService";
 import { calcTrueDue } from "@/lib/invoiceUtils";
+import type { Refund } from "@/lib/mockData";
+import * as bookingsService from "@/services/bookingsService";
+import type { Payment } from "@/services/bookingsService";
 
 // ─────────────────────────────────────────────────────────────
 // LOCAL TYPES
@@ -136,6 +139,41 @@ type ExtendRoomModalState = {
   newCheckOut:     string;    // ISO date input
   submitting:      boolean;
   error:           string | null;
+};
+
+/** State for the whole-booking Cancel Booking modal. null = closed. */
+type CancelBookingModalState = {
+  bookingRef:   string;
+  guestName:    string;
+  rooms:        BookingRoom[];
+  totalAmount:  number;
+  paidAmount:   number;
+  extrasTotal:  number;          // sum of extra charges — new total after cancel
+  refundAmount: string;          // string for <input>
+  refundReason: string;
+  submitting:   boolean;
+  error:        string | null;
+};
+
+/** State for the Mark Disbursed sub-modal (opened from Timeline). null = closed. */
+type DisburseModalState = {
+  refundId:   string;
+  bookingRef: string;
+  amount:     number;            // read-only display
+  method:     PaymentMethod | "";
+  notes:      string;
+  submitting: boolean;
+  error:      string | null;
+};
+
+/** State for the Deny Refund sub-modal (opened from Timeline). null = closed. */
+type DenyModalState = {
+  refundId:   string;
+  bookingRef: string;
+  amount:     number;            // read-only display
+  reason:     string;
+  submitting: boolean;
+  error:      string | null;
 };
 
 type FormData = {
@@ -586,6 +624,9 @@ export default function BookingsClient({ initialRoom }: Props) {
     cancelBookingRoom:   ctxCancelBookingRoom,
     extendBookingRoom:   ctxExtendBookingRoom,
     checkinBookingRoom:  ctxCheckinBookingRoom,
+    disburseRefund:      ctxDisburseRefund,
+    denyRefund:          ctxDenyRefund,
+    cancelBooking:       ctxCancelBooking,
   } = useHotel();
 
   // Real role from authenticated session
@@ -660,6 +701,20 @@ export default function BookingsClient({ initialRoom }: Props) {
   // ── Timeline modal ───────────────────────────────────────────
   // null = closed; set to a booking to show that booking's full timeline.
   const [timelineModal, setTimelineModal] = useState<Booking | null>(null);
+
+  // Timeline modal — lazily-fetched payment + refund data.
+  // Fetched when timelineModal opens; cleared when it closes.
+  const [tlRefunds,  setTlRefunds]  = useState<Refund[]  | null>(null);
+  const [tlPayments, setTlPayments] = useState<Payment[] | null>(null);
+  const [tlLoading,  setTlLoading]  = useState(false);
+
+  // Timeline sub-modals (Mark Disbursed, Deny Refund). z-[70] so they sit
+  // above the Timeline modal (z-50).
+  const [disburseModal, setDisburseModal] = useState<DisburseModalState | null>(null);
+  const [denyModal,     setDenyModal]     = useState<DenyModalState     | null>(null);
+
+  // Cancel Booking (whole-booking) modal
+  const [cancelBookingModal, setCancelBookingModal] = useState<CancelBookingModalState | null>(null);
 
   // ── Room blocks (Phase 5.4) ─────────────────────────────────
   // blocks[] stores UI metadata; actual rows live in form.rooms[].
@@ -968,6 +1023,35 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (timelineModal) document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [timelineModal]);
+
+  // Fetch refunds + payments when Timeline modal opens (or switches booking).
+  // Clears on close. Stale fetch is discarded via the `cancelled` flag.
+  useEffect(() => {
+    if (!timelineModal) {
+      setTlRefunds(null);
+      setTlPayments(null);
+      return;
+    }
+    let cancelled = false;
+    setTlLoading(true);
+    setTlRefunds(null);
+    setTlPayments(null);
+    Promise.all([
+      bookingsService.listRefunds(timelineModal.id),
+      bookingsService.listPayments(timelineModal.id),
+    ]).then(([refunds, payments]) => {
+      if (!cancelled) {
+        setTlRefunds(refunds);
+        setTlPayments(payments);
+      }
+    }).catch(err => {
+      if (!cancelled) console.error("[Timeline] Failed to load refunds/payments:", err);
+    }).finally(() => {
+      if (!cancelled) setTlLoading(false);
+    });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timelineModal?.id]);
 
   // Close documents modal on Escape
   useEffect(() => {
@@ -1360,6 +1444,107 @@ export default function BookingsClient({ initialRoom }: Props) {
       submitting:        false,
       error:             null,
     });
+  }
+
+  // ── Phase 8.5: Cancel Booking + refund disburse/deny ──────────
+
+  function openCancelBookingModal(booking: Booking) {
+    const extrasTotal = booking.extraCharges.reduce((sum, e) => sum + e.amount, 0);
+    const overpayment = Math.max(0, booking.amountPaid - extrasTotal);
+    setCancelBookingModal({
+      bookingRef:   booking.id,
+      guestName:    booking.guestName,
+      rooms:        booking.rooms,
+      totalAmount:  booking.totalAmount,
+      paidAmount:   booking.amountPaid,
+      extrasTotal,
+      refundAmount: overpayment > 0 ? String(overpayment) : "",
+      refundReason: "",
+      submitting:   false,
+      error:        null,
+    });
+  }
+
+  function submitCancelBooking() {
+    const m = cancelBookingModal;
+    if (!m) return;
+    const refundAmt = parseFloat(m.refundAmount) || 0;
+    if (refundAmt > m.paidAmount) {
+      setCancelBookingModal(prev => prev && {
+        ...prev, error: `Refund cannot exceed paid amount ৳${m.paidAmount.toLocaleString()}.`,
+      });
+      return;
+    }
+    ctxCancelBooking(
+      m.bookingRef,
+      refundAmt > 0 ? refundAmt : null,
+      m.refundReason.trim() || null,
+    );
+    setCancelBookingModal(null);
+  }
+
+  /** Re-fetch Timeline payment + refund data after a refund action. */
+  function refreshTlData(bookingRef: string) {
+    setTlLoading(true);
+    Promise.all([
+      bookingsService.listRefunds(bookingRef),
+      bookingsService.listPayments(bookingRef),
+    ]).then(([refunds, payments]) => {
+      setTlRefunds(refunds);
+      setTlPayments(payments);
+    }).catch(err => {
+      console.error("[Timeline refresh] Failed:", err);
+    }).finally(() => setTlLoading(false));
+  }
+
+  function submitDisburse() {
+    const m = disburseModal;
+    if (!m) return;
+    if (!m.method) {
+      setDisburseModal(prev => prev && { ...prev, error: "Disbursement method is required." });
+      return;
+    }
+    ctxDisburseRefund(m.bookingRef, m.refundId, m.amount, m.method, m.notes.trim() || null);
+    setDisburseModal(null);
+    refreshTlData(m.bookingRef);
+  }
+
+  async function submitDeny() {
+    const m = denyModal;
+    if (!m) return;
+    if (!m.reason.trim()) {
+      setDenyModal(prev => prev && { ...prev, error: "Denial reason is required." });
+      return;
+    }
+
+    // Snapshot before mutation so we can roll back on failure.
+    const prevTlRefunds = tlRefunds;
+
+    // Optimistic: flip the refund to denied immediately.
+    setTlRefunds(prev =>
+      prev
+        ? prev.map(r =>
+            r.id !== m.refundId ? r : {
+              ...r, status: "denied" as const,
+              notes: r.notes
+                ? `${r.notes} / DENIED: ${m.reason.trim()}`
+                : `DENIED: ${m.reason.trim()}`,
+            }
+          )
+        : prev
+    );
+
+    setDenyModal(prev => prev && { ...prev, submitting: true, error: null });
+
+    try {
+      await ctxDenyRefund(m.refundId, m.reason.trim());
+      setDenyModal(null);
+      refreshTlData(m.bookingRef);   // confirm server state
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Denial failed — please try again.";
+      setTlRefunds(prevTlRefunds);   // roll back optimistic flip
+      setDenyModal(prev => prev && { ...prev, submitting: false, error: msg });
+    }
   }
 
   function openExtendRoomModal(booking: Booking, room: BookingRoom) {
@@ -3598,6 +3783,19 @@ export default function BookingsClient({ initialRoom }: Props) {
                           </button>
                         )}
 
+                        {/* ── Cancel Booking — all-confirmed only ── */}
+                        {b.status === "Confirmed" && b.rooms.every(r => r.status === "Confirmed") && (
+                          <button
+                            onClick={() => openCancelBookingModal(b)}
+                            className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-400 hover:text-rose-600 transition-colors"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
+                              <circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/>
+                            </svg>
+                            Cancel
+                          </button>
+                        )}
+
                       </div>
                     </td>
                   </tr>
@@ -5374,6 +5572,140 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </div>
                 </div>
 
+                {/* ── Payment History ─────────────────────────── */}
+                {tlLoading && (
+                  <p className="text-[11px] text-slate-400 italic mt-4">Loading payment history…</p>
+                )}
+                {!tlLoading && tlPayments && tlPayments.length > 0 && (() => {
+                  const totalIn  = tlPayments.filter(p => p.amount > 0).reduce((s, p) => s + p.amount, 0);
+                  const totalOut = tlPayments.filter(p => p.amount < 0).reduce((s, p) => s + Math.abs(p.amount), 0);
+                  const netPaid  = totalIn - totalOut;
+                  return (
+                    <div className="mt-5">
+                      <div className="flex items-center gap-2 mb-3">
+                        <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Payment History</p>
+                        <span className="text-[10px] font-semibold bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full">{tlPayments.length}</span>
+                      </div>
+                      <div className="space-y-1.5 mb-3">
+                        {tlPayments.map(p => (
+                          <div key={p.id} className="flex items-center gap-2 text-[11.5px]">
+                            <span className="text-slate-400 w-14 shrink-0 text-[10.5px]">
+                              {new Date(p.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                            </span>
+                            <span className={`font-semibold w-20 shrink-0 ${p.amount < 0 ? "text-rose-600" : "text-emerald-700"}`}>
+                              {p.amount < 0 ? "−" : "+"}৳{Math.abs(p.amount).toLocaleString()}
+                            </span>
+                            <span className="text-slate-500 shrink-0">{formatPaymentMethod(p.method)}</span>
+                            {p.notes && (
+                              <span className="text-slate-400 truncate text-[10.5px] italic">{p.notes}</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="pt-2 border-t border-slate-100 space-y-0.5">
+                        <div className="flex justify-between text-[11px]">
+                          <span className="text-slate-400">Total Received</span>
+                          <span className="font-medium text-slate-700">৳{totalIn.toLocaleString()}</span>
+                        </div>
+                        {totalOut > 0 && (
+                          <div className="flex justify-between text-[11px]">
+                            <span className="text-slate-400">Total Refunded</span>
+                            <span className="font-medium text-rose-600">৳{totalOut.toLocaleString()}</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between text-[11px] font-semibold">
+                          <span className="text-slate-600">Net Paid</span>
+                          <span className="text-slate-800">৳{netPaid.toLocaleString()}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+                {!tlLoading && tlPayments && tlPayments.length === 0 && (
+                  <p className="text-[11px] text-slate-400 italic mt-4">No payment history recorded.</p>
+                )}
+
+                {/* ── Refunds ─────────────────────────────────── */}
+                {!tlLoading && tlRefunds && tlRefunds.length > 0 && (
+                  <div className="mt-5">
+                    <div className="flex items-center gap-2 mb-3">
+                      <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Refunds</p>
+                      <span className="text-[10px] font-semibold bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full">{tlRefunds.length}</span>
+                    </div>
+                    <div className="space-y-3">
+                      {tlRefunds.map(refund => (
+                        <div key={refund.id} className="border border-slate-100 rounded-xl px-3 py-3 space-y-2">
+                          {/* Header row */}
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[12.5px] font-semibold text-slate-800">
+                                ৳{refund.amount.toLocaleString()}
+                              </span>
+                              <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full border ${
+                                refund.status === "pending"   ? "bg-amber-50 text-amber-700 border-amber-200" :
+                                refund.status === "disbursed" ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
+                                "bg-slate-100 text-slate-500 border-slate-200"
+                              }`}>
+                                {refund.status === "pending" ? "Pending" : refund.status === "disbursed" ? "Disbursed" : "Denied"}
+                              </span>
+                            </div>
+                            <span className="text-[10.5px] text-slate-400">
+                              {new Date(refund.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                            </span>
+                          </div>
+                          {/* Reason */}
+                          {refund.reason && (
+                            <p className="text-[11px] text-slate-500 italic">&ldquo;{refund.reason}&rdquo;</p>
+                          )}
+                          {/* Disbursement audit detail */}
+                          {refund.status === "disbursed" && refund.disbursedAt && (
+                            <p className="text-[10.5px] text-slate-400">
+                              {formatPaymentMethod(refund.disbursementMethod)}
+                              {" · "}
+                              {new Date(refund.disbursedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                              {refund.notes ? ` · "${refund.notes}"` : ""}
+                            </p>
+                          )}
+                          {/* Denial note */}
+                          {refund.status === "denied" && refund.notes && (
+                            <p className="text-[10.5px] text-slate-400 italic">{refund.notes}</p>
+                          )}
+                          {/* Action buttons — pending only */}
+                          {refund.status === "pending" && (
+                            <div className="flex items-center gap-1.5 pt-0.5">
+                              <button
+                                type="button"
+                                onClick={() => setDisburseModal({
+                                  refundId:   refund.id,
+                                  bookingRef: b.id,
+                                  amount:     refund.amount,
+                                  method:     "",
+                                  notes:      "",
+                                  submitting: false,
+                                  error:      null,
+                                })}
+                                className="text-[10.5px] font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded transition-colors"
+                              >Mark Disbursed</button>
+                              <button
+                                type="button"
+                                onClick={() => setDenyModal({
+                                  refundId:   refund.id,
+                                  bookingRef: b.id,
+                                  amount:     refund.amount,
+                                  reason:     "",
+                                  submitting: false,
+                                  error:      null,
+                                })}
+                                className="text-[10.5px] font-semibold text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-0.5 rounded transition-colors"
+                              >Deny</button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
               </div>
 
               {/* Footer */}
@@ -6589,6 +6921,411 @@ export default function BookingsClient({ initialRoom }: Props) {
                 </div>
               </div>
 
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ══════════════════════════════════════════════════════
+          MARK DISBURSED MODAL  (Phase 8.5)
+          Sub-modal opened from the Timeline refund row.
+          z-[70] — sits above the z-50 Timeline modal.
+          ══════════════════════════════════════════════════════ */}
+      {disburseModal && (() => {
+        const m = disburseModal;
+        return (
+          <div
+            className="fixed inset-0 z-[70] flex items-center justify-center p-4"
+            style={{ backgroundColor: "rgba(0,0,0,0.55)" }}
+            onClick={() => !m.submitting && setDisburseModal(null)}
+          >
+            <div
+              className="bg-white rounded-2xl shadow-xl w-full max-w-sm"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-slate-100">
+                <h2 className="text-[14px] font-semibold text-slate-800">Mark Refund Disbursed</h2>
+                <button
+                  onClick={() => !m.submitting && setDisburseModal(null)}
+                  className="w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
+
+              <div className="px-6 py-5 space-y-4">
+                {/* Amount — read-only */}
+                <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 text-center">
+                  <p className="text-[10.5px] text-emerald-600 mb-0.5">Refund Amount</p>
+                  <p className="text-[18px] font-bold text-emerald-700">৳{m.amount.toLocaleString()}</p>
+                </div>
+
+                {/* Disbursement method */}
+                <div>
+                  <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">
+                    Disbursement Method <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={m.method}
+                    onChange={e => setDisburseModal(prev => prev && { ...prev, method: e.target.value as PaymentMethod | "", error: null })}
+                    disabled={m.submitting}
+                    className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:border-emerald-400 disabled:opacity-60"
+                  >
+                    <option value="">Select method…</option>
+                    {PAYMENT_METHODS.map(pm => (
+                      <option key={pm} value={pm}>{PAYMENT_METHOD_LABELS[pm]}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Notes */}
+                <div>
+                  <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">
+                    Notes <span className="text-[11px] font-normal text-slate-400">(optional — e.g. receipt #)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={m.notes}
+                    onChange={e => setDisburseModal(prev => prev && { ...prev, notes: e.target.value })}
+                    disabled={m.submitting}
+                    placeholder="Receipt #1234"
+                    className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:border-emerald-400 disabled:opacity-60"
+                  />
+                </div>
+
+                {m.error && (
+                  <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">{m.error}</p>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 pb-5 flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => !m.submitting && setDisburseModal(null)}
+                  disabled={m.submitting}
+                  className="px-4 py-2 text-[13px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
+                >Cancel</button>
+                <button
+                  type="button"
+                  onClick={submitDisburse}
+                  disabled={m.submitting || !m.method}
+                  className="px-5 py-2 text-[13px] font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {m.submitting ? "Processing…" : "Confirm Disbursement"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ══════════════════════════════════════════════════════
+          DENY REFUND MODAL  (Phase 8.5)
+          Sub-modal opened from the Timeline refund row.
+          ══════════════════════════════════════════════════════ */}
+      {denyModal && (() => {
+        const m = denyModal;
+        return (
+          <div
+            className="fixed inset-0 z-[70] flex items-center justify-center p-4"
+            style={{ backgroundColor: "rgba(0,0,0,0.55)" }}
+            onClick={() => !m.submitting && setDenyModal(null)}
+          >
+            <div
+              className="bg-white rounded-2xl shadow-xl w-full max-w-sm"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-slate-100">
+                <h2 className="text-[14px] font-semibold text-slate-800">Deny Refund</h2>
+                <button
+                  onClick={() => !m.submitting && setDenyModal(null)}
+                  className="w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
+
+              <div className="px-6 py-5 space-y-4">
+                {/* Amount — read-only */}
+                <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 text-center">
+                  <p className="text-[10.5px] text-rose-500 mb-0.5">Refund Being Denied</p>
+                  <p className="text-[18px] font-bold text-rose-700">৳{m.amount.toLocaleString()}</p>
+                </div>
+
+                {/* Reason */}
+                <div>
+                  <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">
+                    Reason for Denial <span className="text-rose-500">*</span>
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={m.reason}
+                    onChange={e => setDenyModal(prev => prev && { ...prev, reason: e.target.value, error: null })}
+                    disabled={m.submitting}
+                    placeholder="e.g. No-show — non-refundable rate"
+                    className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-rose-300 focus:border-rose-400 resize-none disabled:opacity-60"
+                  />
+                </div>
+
+                {m.error && (
+                  <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">{m.error}</p>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 pb-5 flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => !m.submitting && setDenyModal(null)}
+                  disabled={m.submitting}
+                  className="px-4 py-2 text-[13px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
+                >Cancel</button>
+                <button
+                  type="button"
+                  onClick={submitDeny}
+                  disabled={m.submitting || !m.reason.trim()}
+                  className="px-5 py-2 text-[13px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {m.submitting ? "Denying…" : "Confirm Denial"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ══════════════════════════════════════════════════════
+          CANCEL BOOKING MODAL  (Phase 8.5)
+          Whole-booking cancellation for all-confirmed bookings.
+          Branches on overpayment scenario (mirrors Phase 7 redesign).
+          ══════════════════════════════════════════════════════ */}
+      {cancelBookingModal && (() => {
+        const m = cancelBookingModal;
+        const refundAmt          = parseFloat(m.refundAmount) || 0;
+        const overpayment        = Math.max(0, m.paidAmount - m.extrasTotal);
+        const isAdjustment       = overpayment === 0;
+        const isOverpayment      = overpayment > 0;
+        const refundExceedsPaid  = refundAmt > m.paidAmount;
+        // Due = total − paid (positive = owed; negative = overpaid)
+        const currentDue         = m.totalAmount - m.paidAmount;
+        const newDue             = m.extrasTotal - m.paidAmount;
+
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            style={{ backgroundColor: "rgba(0,0,0,0.45)" }}
+            onClick={() => !m.submitting && setCancelBookingModal(null)}
+          >
+            <div
+              className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-slate-100">
+                <div>
+                  <h2 className="text-[14px] font-semibold text-slate-800">
+                    Cancel Booking
+                    <span className="text-slate-400 font-normal ml-1.5">
+                      {m.bookingRef} · {m.rooms.length} room{m.rooms.length !== 1 ? "s" : ""}
+                    </span>
+                  </h2>
+                  <p className="text-[11.5px] text-slate-500 mt-0.5">{m.guestName}</p>
+                </div>
+                <button
+                  onClick={() => !m.submitting && setCancelBookingModal(null)}
+                  className="w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
+
+              <div className="px-6 py-5 space-y-4">
+
+                {/* Rooms being cancelled */}
+                <div>
+                  <p className="text-[10.5px] font-semibold text-slate-400 uppercase tracking-wide mb-2">
+                    {m.rooms.length} Room{m.rooms.length !== 1 ? "s" : ""} Will Be Cancelled
+                  </p>
+                  <div className="space-y-1">
+                    {m.rooms.map(r => (
+                      <div key={r.id} className="flex items-center gap-2 text-[11.5px] text-slate-600 bg-slate-50 rounded-lg px-3 py-1.5">
+                        <span className="font-semibold">Room {r.roomNumber}</span>
+                        <span className="text-slate-400">·</span>
+                        <span>{r.roomCategory}</span>
+                        <span className="text-slate-400">·</span>
+                        <span>{r.checkIn} → {r.checkOut}</span>
+                        <span className="ml-auto font-medium text-slate-500">
+                          ৳{(r.bookingRate * r.nights).toLocaleString()}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* ── ADJUSTMENT BRANCH ── */}
+                {isAdjustment && (
+                  <>
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-1.5">
+                      <p className="text-[10.5px] font-semibold text-slate-400 uppercase tracking-wide mb-2">No Refund Needed</p>
+                      <div className="space-y-1.5 text-[12px]">
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Total</span>
+                          <span className="font-medium text-slate-700">
+                            ৳{m.totalAmount.toLocaleString()} → ৳{m.extrasTotal.toLocaleString()}
+                            <span className="text-slate-400 ml-1.5 font-normal">(-৳{(m.totalAmount - m.extrasTotal).toLocaleString()})</span>
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Paid</span>
+                          <span className="font-medium text-slate-600">
+                            ৳{m.paidAmount.toLocaleString()}
+                            <span className="text-slate-400 ml-1.5 font-normal">(unchanged)</span>
+                          </span>
+                        </div>
+                        <div className="flex justify-between pt-1.5 border-t border-slate-200">
+                          <span className="font-semibold text-slate-600">Due</span>
+                          <span className="font-semibold text-slate-800">
+                            ৳{currentDue.toLocaleString()} → ৳{newDue.toLocaleString()}
+                            <span className="text-slate-400 ml-1.5 font-normal">(-৳{(m.totalAmount - m.extrasTotal).toLocaleString()})</span>
+                          </span>
+                        </div>
+                      </div>
+                      {m.paidAmount > 0 && (
+                        <p className="text-[11px] text-slate-400 pt-1.5 border-t border-slate-200 mt-1">
+                          Guest&apos;s existing advance applies to extras / no further action needed.
+                        </p>
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">
+                        Reason <span className="text-[11px] font-normal text-slate-400">(optional)</span>
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={m.refundReason}
+                        onChange={e => setCancelBookingModal(prev => prev && { ...prev, refundReason: e.target.value })}
+                        disabled={m.submitting}
+                        placeholder="e.g. Guest cancelled — full refund per policy"
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 resize-none disabled:opacity-60"
+                      />
+                    </div>
+
+                    {m.error && (
+                      <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3">{m.error}</p>
+                    )}
+                  </>
+                )}
+
+                {/* ── OVERPAYMENT BRANCH ── */}
+                {isOverpayment && (
+                  <>
+                    <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 space-y-1.5">
+                      <p className="text-[10.5px] font-semibold text-rose-500 uppercase tracking-wide mb-2">Refund Needed</p>
+                      <div className="space-y-1.5 text-[12px]">
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Total</span>
+                          <span className="font-medium text-slate-700">
+                            ৳{m.totalAmount.toLocaleString()} → ৳{m.extrasTotal.toLocaleString()}
+                            <span className="text-slate-400 ml-1.5 font-normal">(-৳{(m.totalAmount - m.extrasTotal).toLocaleString()})</span>
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Paid</span>
+                          <span className="font-semibold text-rose-600">
+                            ৳{m.paidAmount.toLocaleString()}
+                            <span className="font-normal ml-1.5">(overpaid by ৳{overpayment.toLocaleString()})</span>
+                          </span>
+                        </div>
+                        <div className="flex justify-between pt-1.5 border-t border-rose-200">
+                          <span className="font-semibold text-slate-600">Due</span>
+                          <span className="font-semibold text-rose-700">
+                            {currentDue >= 0 ? `৳${currentDue.toLocaleString()}` : `-৳${Math.abs(currentDue).toLocaleString()}`}
+                            {" → "}
+                            {newDue >= 0 ? `৳${newDue.toLocaleString()}` : `-৳${Math.abs(newDue).toLocaleString()}`}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">Refund Amount (BDT)</label>
+                        <input
+                          type="number" min="0" step="0.01"
+                          value={m.refundAmount}
+                          onChange={e => setCancelBookingModal(prev => prev && { ...prev, refundAmount: e.target.value, error: null })}
+                          disabled={m.submitting}
+                          placeholder="0"
+                          className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 disabled:opacity-60"
+                        />
+                        <p className="text-[11px] text-slate-400 mt-1">Max ৳{m.paidAmount.toLocaleString()} (total paid). Leave blank for no refund record.</p>
+                      </div>
+                      <div>
+                        <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">Refund Reason</label>
+                        <textarea
+                          rows={2}
+                          value={m.refundReason}
+                          onChange={e => setCancelBookingModal(prev => prev && { ...prev, refundReason: e.target.value })}
+                          disabled={m.submitting}
+                          placeholder="e.g. Guest cancelled — full refund per policy"
+                          className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 resize-none disabled:opacity-60"
+                        />
+                      </div>
+                    </div>
+
+                    {refundAmt > 0 && !refundExceedsPaid && (
+                      <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0"><path d="M20 6L9 17l-5-5"/></svg>
+                        <span className="text-[11.5px] text-emerald-700 font-medium">
+                          Refund of ৳{refundAmt.toLocaleString()} will be created (pending disbursement)
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Partial-paid guard */}
+                    <div className="flex items-start gap-2 px-3 py-2.5 bg-rose-50 border border-rose-200 rounded-lg text-[12px]">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                      <div className="text-rose-700 space-y-1">
+                        <p className="font-semibold">
+                          Cancelling would reduce total to ৳{m.extrasTotal.toLocaleString()}, below the ৳{m.paidAmount.toLocaleString()} already paid. Record a payment reversal of ৳{overpayment.toLocaleString()} before cancelling.
+                        </p>
+                        <p className="text-rose-500">
+                          Refund records track what&apos;s owed but don&apos;t reduce paid amount. Payment reversal flow coming in Phase 8.5.
+                        </p>
+                      </div>
+                    </div>
+
+                    {(m.error || refundExceedsPaid) && (
+                      <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3">
+                        {refundExceedsPaid ? `Refund cannot exceed paid amount ৳${m.paidAmount.toLocaleString()}.` : m.error}
+                      </p>
+                    )}
+                  </>
+                )}
+
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 pb-5 flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => !m.submitting && setCancelBookingModal(null)}
+                  disabled={m.submitting}
+                  className="px-4 py-2 text-[13px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
+                >Keep Booking</button>
+                <button
+                  type="button"
+                  onClick={submitCancelBooking}
+                  disabled={m.submitting || isOverpayment || refundExceedsPaid}
+                  className="px-5 py-2 text-[13px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {m.submitting ? "Cancelling…" : `Cancel All ${m.rooms.length} Room${m.rooms.length !== 1 ? "s" : ""}`}
+                </button>
+              </div>
             </div>
           </div>
         );

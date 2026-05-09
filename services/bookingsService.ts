@@ -32,6 +32,8 @@ import {
   type CheckoutOverride,
   type AdditionalGuest,
   type CreateBookingInput,
+  type Refund,
+  type RefundStatus,
   isPlaceholderEmail,
 } from "@/lib/mockData";
 
@@ -838,13 +840,19 @@ export type UpdateBookingPayload = {
   rooms?:              EditRoomInput[];   // per-room updates by booking_rooms.id
 };
 
-/** A single payment transaction row from the `payments` table. */
+/**
+ * A single payment transaction row from the `payments` table.
+ * amount is positive for inflows (guest payments) and negative for outflows
+ * (refund disbursements inserted by the disburse_refund RPC).
+ */
 export type Payment = {
-  id:        string;
-  amount:    number;
-  method:    PaymentMethod;
-  notes:     string | null;
-  createdAt: string;          // ISO timestamp, e.g. "2026-05-06T10:32:00+06:00"
+  id:         string;
+  bookingId:  string;        // DB UUID — the booking this payment belongs to
+  amount:     number;        // positive = inflow; negative = disbursement outflow
+  method:     PaymentMethod;
+  recordedBy: string | null; // auth.users UUID of the operator
+  notes:      string | null;
+  createdAt:  string;        // ISO timestamp, e.g. "2026-05-06T10:32:00+06:00"
 };
 
 /**
@@ -1831,7 +1839,7 @@ export async function getPaymentsByBookingRef(
   // Step 2: fetch all payments for that booking UUID, oldest first
   const { data, error } = await supabase
     .from("payments")
-    .select("id, amount, method, notes, created_at")
+    .select("id, booking_id, amount, method, recorded_by, notes, created_at")
     .eq("booking_id", bookingRow.id)
     .order("created_at", { ascending: true });
 
@@ -1852,11 +1860,13 @@ export async function getPaymentsByBookingRef(
   }
 
   return (data ?? []).map(row => ({
-    id:        row.id as string,
-    amount:    Number(row.amount),
-    method:    row.method as PaymentMethod,
-    notes:     row.notes ?? null,
-    createdAt: row.created_at as string,
+    id:         row.id          as string,
+    bookingId:  row.booking_id  as string,
+    amount:     Number(row.amount),
+    method:     row.method      as PaymentMethod,
+    recordedBy: row.recorded_by as string | null,
+    notes:      row.notes       ?? null,
+    createdAt:  row.created_at  as string,
   }));
 }
 
@@ -2065,4 +2075,201 @@ export async function checkinBookingRoom(
       (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// PHASE 8.5 — Refund disbursement + whole-booking cancel
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Fetch all refund records for a booking, newest first.
+ * Used by the Timeline modal to display pending / disbursed / denied refunds.
+ *
+ * @param bookingRef  booking_ref string ("BK-1041")
+ */
+export async function listRefunds(bookingRef: string): Promise<Refund[]> {
+  const { data: bookingRow, error: bookingErr } = await supabase
+    .from("bookings")
+    .select("id")
+    .eq("booking_ref", bookingRef)
+    .single();
+
+  if (bookingErr || !bookingRow) return [];
+
+  const { data, error } = await supabase
+    .from("refunds")
+    .select("*")
+    .eq("booking_id", bookingRow.id)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`[listRefunds] ${error.message}`);
+
+  return (data ?? []).map(row => ({
+    id:                 row.id                  as string,
+    bookingId:          row.booking_id          as string,
+    bookingRoomId:      row.booking_room_id     as string | null,
+    amount:             Number(row.amount),
+    reason:             row.reason              as string | null,
+    status:             row.status              as RefundStatus,
+    createdAt:          row.created_at          as string,
+    createdBy:          row.created_by          as string | null,
+    disbursedAt:        row.disbursed_at        as string | null,
+    disbursedBy:        row.disbursed_by        as string | null,
+    disbursementMethod: row.disbursement_method as PaymentMethod | null,
+    notes:              row.notes               as string | null,
+  }));
+}
+
+/**
+ * Fetch all payment transactions for a booking, newest first.
+ * Includes both positive rows (guest payments) and negative rows
+ * (refund disbursements).  Used by the Timeline modal Payment History section.
+ *
+ * @param bookingRef  booking_ref string ("BK-1041")
+ */
+export async function listPayments(bookingRef: string): Promise<Payment[]> {
+  const { data: bookingRow, error: bookingErr } = await supabase
+    .from("bookings")
+    .select("id")
+    .eq("booking_ref", bookingRef)
+    .single();
+
+  if (bookingErr || !bookingRow) return [];
+
+  const { data, error } = await supabase
+    .from("payments")
+    .select("id, booking_id, amount, method, recorded_by, notes, created_at")
+    .eq("booking_id", bookingRow.id)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`[listPayments] ${error.message}`);
+
+  return (data ?? []).map(row => ({
+    id:         row.id          as string,
+    bookingId:  row.booking_id  as string,
+    amount:     Number(row.amount),
+    method:     row.method      as PaymentMethod,
+    recordedBy: row.recorded_by as string | null,
+    notes:      row.notes       ?? null,
+    createdAt:  row.created_at  as string,
+  }));
+}
+
+/**
+ * Marks a pending refund as disbursed and inserts a negative payment row via
+ * the disburse_refund RPC, causing trg_sync_paid_amount to decrement
+ * bookings.paid_amount atomically.
+ *
+ * @param refundId    refunds.id UUID
+ * @param method      Disbursement method (cash | bkash | nagad | bank_transfer | card)
+ * @param disbursedBy auth.users UUID of the operator processing the disbursement
+ * @param notes       Optional staff note (e.g. receipt number)
+ */
+export async function disburseRefund(
+  refundId:    string,
+  method:      PaymentMethod,
+  disbursedBy: string,
+  notes:       string | null = null,
+): Promise<void> {
+  const { error: rpcErr } = await supabase.rpc("disburse_refund", {
+    p_refund_id:           refundId,
+    p_disbursement_method: method,
+    p_notes:               notes ?? null,
+    p_disbursed_by:        disbursedBy,
+  });
+
+  if (rpcErr) {
+    console.error("[disburseRefund] RPC failed:");
+    console.error("  refundId:", refundId);
+    console.error("  method  :", method);
+    console.error("  message :", rpcErr.message);
+    console.error("  code    :", rpcErr.code);
+    throw new Error(
+      `[disburseRefund] ${rpcErr.message}` +
+      (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
+    );
+  }
+}
+
+/**
+ * Marks a pending refund as denied. No payment row is inserted; paid_amount
+ * is unchanged. The denial reason is appended to the refund's notes field.
+ *
+ * @param refundId  refunds.id UUID
+ * @param reason    Reason for denial (appended to notes)
+ * @param deniedBy  auth.users UUID of the operator denying the refund
+ */
+export async function denyRefund(
+  refundId: string,
+  reason:   string,
+  deniedBy: string,
+): Promise<void> {
+  const { error: rpcErr } = await supabase.rpc("deny_refund", {
+    p_refund_id: refundId,
+    p_reason:    reason,
+    p_denied_by: deniedBy,
+  });
+
+  if (rpcErr) {
+    console.error("[denyRefund] RPC failed:");
+    console.error("  refundId:", refundId);
+    console.error("  message :", rpcErr.message);
+    console.error("  code    :", rpcErr.code);
+    throw new Error(
+      `[denyRefund] ${rpcErr.message}` +
+      (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
+    );
+  }
+}
+
+/**
+ * Atomically cancels all confirmed rooms in a booking, frees physical rooms
+ * to available, updates booking status to cancelled, and optionally creates
+ * a pending refund record.
+ *
+ * Raises if any booking_rooms row is not in 'confirmed' state — mid-stay
+ * bookings must use per-room cancel_booking_room instead.
+ *
+ * @param bookingRef        booking_ref string ("BK-1041")
+ * @param refundAmount      BDT amount for the pending refund (optional)
+ * @param refundReason      Free-text reason for the refund record (optional)
+ * @param refundCreatedBy   auth.users UUID of the operator (optional)
+ * @returns { refundId }    UUID of created refund row, or null
+ */
+export async function cancelBooking(
+  bookingRef:       string,
+  refundAmount?:    number | null,
+  refundReason?:    string | null,
+  refundCreatedBy?: string | null,
+): Promise<{ refundId: string | null }> {
+  // Resolve booking_ref → UUID
+  const { data: bookingRow, error: bookingErr } = await supabase
+    .from("bookings")
+    .select("id")
+    .eq("booking_ref", bookingRef)
+    .single();
+
+  if (bookingErr || !bookingRow) {
+    throw new Error(`[cancelBooking] Booking ${bookingRef} not found`);
+  }
+
+  const { data, error: rpcErr } = await supabase.rpc("cancel_booking", {
+    p_booking_id:        bookingRow.id,
+    p_refund_amount:     refundAmount     ?? null,
+    p_refund_reason:     refundReason     ?? null,
+    p_refund_created_by: refundCreatedBy  ?? null,
+  });
+
+  if (rpcErr) {
+    console.error("[cancelBooking] RPC failed:");
+    console.error("  bookingRef:", bookingRef);
+    console.error("  message   :", rpcErr.message);
+    console.error("  code      :", rpcErr.code);
+    throw new Error(
+      `[cancelBooking] ${rpcErr.message}` +
+      (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
+    );
+  }
+
+  return { refundId: (data as string | null) ?? null };
 }
