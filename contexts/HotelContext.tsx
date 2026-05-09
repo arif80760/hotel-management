@@ -124,11 +124,15 @@ type HotelContextType = {
   ) => void;
   /** Cancel a confirmed room or mark a checked-in room as early departure. */
   cancelBookingRoom: (
-    bookingRoomId:  string,
-    status:         "Cancelled" | "Checked Out Early",
-    actualCheckOut?: string,
-    refundAmount?:   number,
-    refundReason?:   string,
+    bookingRoomId:       string,
+    status:              "Cancelled" | "Checked Out Early",
+    actualCheckOut?:     string,
+    refundAmount?:       number,
+    refundReason?:       string,
+    // Phase 8.6: atomic disbursement
+    disbursementMethod?: PaymentMethod,
+    disbursementNotes?:  string,
+    disbursedBy?:        string,
   ) => void;
   /** Extend a room's check-out date past its current scheduled date. */
   extendBookingRoom: (
@@ -156,9 +160,13 @@ type HotelContextType = {
    * Rolls back on failure.
    */
   cancelBooking: (
-    bookingRef:    string,
-    refundAmount?: number | null,
-    refundReason?: string | null,
+    bookingRef:          string,
+    refundAmount?:       number | null,
+    refundReason?:       string | null,
+    // Phase 8.6: atomic disbursement
+    disbursementMethod?: PaymentMethod | null,
+    disbursementNotes?:  string | null,
+    disbursedBy?:        string | null,
   ) => void;
 };
 
@@ -763,11 +771,14 @@ export function HotelProvider({ children }: { children: ReactNode }) {
   }
 
   function cancelBookingRoom(
-    bookingRoomId:   string,
-    status:          "Cancelled" | "Checked Out Early",
-    actualCheckOut?: string,
-    refundAmount?:   number,
-    refundReason?:   string,
+    bookingRoomId:       string,
+    status:              "Cancelled" | "Checked Out Early",
+    actualCheckOut?:     string,
+    refundAmount?:       number,
+    refundReason?:       string,
+    disbursementMethod?: PaymentMethod,
+    disbursementNotes?:  string,
+    disbursedBy?:        string,
   ) {
     const target = bookings.find(b => b.rooms.some(r => r.id === bookingRoomId));
     if (!target) return;
@@ -822,9 +833,12 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       bookingRoomId,
       dbStatus as "cancelled" | "checked_out_early",
       actualCheckOut,
-      refundAmount   ?? null,
-      refundReason   ?? null,
-      user?.id       ?? null,
+      refundAmount       ?? null,
+      refundReason       ?? null,
+      user?.id           ?? null,
+      disbursementMethod ?? null,
+      disbursementNotes  ?? null,
+      disbursedBy        ?? null,
     )
       .then(() => bookingsService.getBookingByRef(target.id))
       .then(updated => {
@@ -991,9 +1005,12 @@ export function HotelProvider({ children }: { children: ReactNode }) {
   }
 
   function cancelBooking(
-    bookingRef:    string,
-    refundAmount?: number | null,
-    refundReason?: string | null,
+    bookingRef:          string,
+    refundAmount?:       number | null,
+    refundReason?:       string | null,
+    disbursementMethod?: PaymentMethod | null,
+    disbursementNotes?:  string | null,
+    disbursedBy?:        string | null,
   ) {
     const target = bookings.find(b => b.id === bookingRef);
     if (!target) return;
@@ -1031,9 +1048,12 @@ export function HotelProvider({ children }: { children: ReactNode }) {
 
     bookingsService.cancelBooking(
       bookingRef,
-      refundAmount  ?? null,
-      refundReason  ?? null,
-      user?.id      ?? null,
+      refundAmount       ?? null,
+      refundReason       ?? null,
+      user?.id           ?? null,
+      disbursementMethod ?? null,
+      disbursementNotes  ?? null,
+      disbursedBy        ?? null,
     )
       .then(() => bookingsService.getBookingByRef(bookingRef))
       .then(updated => {

@@ -1983,20 +1983,27 @@ export async function addRoomToBooking(
  * @returns { refundId: string | null }  — refund UUID if created, else null
  */
 export async function cancelBookingRoom(
-  bookingRoomId:   string,
-  status:          "cancelled" | "checked_out_early",
-  actualCheckOut?: string,
-  refundAmount?:   number | null,
-  refundReason?:   string | null,
-  refundCreatedBy?: string | null,
+  bookingRoomId:       string,
+  status:              "cancelled" | "checked_out_early",
+  actualCheckOut?:     string,
+  refundAmount?:       number | null,
+  refundReason?:       string | null,
+  refundCreatedBy?:    string | null,
+  // Phase 8.6: atomic disbursement — omit or pass null for pending-refund path
+  disbursementMethod?: PaymentMethod | null,
+  disbursementNotes?:  string | null,
+  disbursedBy?:        string | null,
 ): Promise<{ refundId: string | null }> {
   const { data, error: rpcErr } = await supabase.rpc("cancel_booking_room", {
-    p_booking_room_id:   bookingRoomId,
-    p_status:            status,
-    p_actual_check_out:  actualCheckOut  ?? null,
-    p_refund_amount:     refundAmount    ?? null,
-    p_refund_reason:     refundReason    ?? null,
-    p_refund_created_by: refundCreatedBy ?? null,
+    p_booking_room_id:    bookingRoomId,
+    p_status:             status,
+    p_actual_check_out:   actualCheckOut     ?? null,
+    p_refund_amount:      refundAmount       ?? null,
+    p_refund_reason:      refundReason       ?? null,
+    p_refund_created_by:  refundCreatedBy    ?? null,
+    p_disbursement_method: disbursementMethod ?? null,
+    p_disbursement_notes:  disbursementNotes  ?? null,
+    p_disbursed_by:        disbursedBy        ?? null,
   });
 
   if (rpcErr) {
@@ -2237,10 +2244,14 @@ export async function denyRefund(
  * @returns { refundId }    UUID of created refund row, or null
  */
 export async function cancelBooking(
-  bookingRef:       string,
-  refundAmount?:    number | null,
-  refundReason?:    string | null,
-  refundCreatedBy?: string | null,
+  bookingRef:          string,
+  refundAmount?:       number | null,
+  refundReason?:       string | null,
+  refundCreatedBy?:    string | null,
+  // Phase 8.6: atomic disbursement — omit or pass null for pending-refund path
+  disbursementMethod?: PaymentMethod | null,
+  disbursementNotes?:  string | null,
+  disbursedBy?:        string | null,
 ): Promise<{ refundId: string | null }> {
   // Resolve booking_ref → UUID
   const { data: bookingRow, error: bookingErr } = await supabase
@@ -2254,10 +2265,13 @@ export async function cancelBooking(
   }
 
   const { data, error: rpcErr } = await supabase.rpc("cancel_booking", {
-    p_booking_id:        bookingRow.id,
-    p_refund_amount:     refundAmount     ?? null,
-    p_refund_reason:     refundReason     ?? null,
-    p_refund_created_by: refundCreatedBy  ?? null,
+    p_booking_id:          bookingRow.id,
+    p_refund_amount:       refundAmount       ?? null,
+    p_refund_reason:       refundReason       ?? null,
+    p_refund_created_by:   refundCreatedBy    ?? null,
+    p_disbursement_method: disbursementMethod ?? null,
+    p_disbursement_notes:  disbursementNotes  ?? null,
+    p_disbursed_by:        disbursedBy        ?? null,
   });
 
   if (rpcErr) {
