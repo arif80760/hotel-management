@@ -99,7 +99,9 @@ type BlockDialogData = {
   checkIn:  string;
   checkOut: string;
   sections: Record<string, BlockDialogSection>;   // keyed by category
-  bookingContextRef?: string;   // "BK-1041" → add-to-existing mode; undefined → new-booking mode
+  bookingContextRef?:      string;   // "BK-1041" → add-to-existing mode; undefined → new-booking mode
+  bookingPrimaryCheckIn?:  string;   // ISO seed from booking's first room (add-to-existing only)
+  bookingPrimaryCheckOut?: string;   // ISO seed from booking's first room (add-to-existing only)
 };
 
 /** State for the Cancel Room modal. null = modal closed. */
@@ -1149,10 +1151,18 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   // ── Block dialog open/confirm ────────────────────────────────
 
-  function openBlockDialog(bookingContextRef?: string) {
+  function openBlockDialog(
+    bookingContextRef?: string,
+    bookingPrimaryCheckIn?: string,
+    bookingPrimaryCheckOut?: string,
+  ) {
     const lastBlock = blocks[blocks.length - 1];
-    const defaultCheckIn  = lastBlock?.checkIn  ?? form.rooms[0]?.checkIn  ?? "";
-    const defaultCheckOut = lastBlock?.checkOut ?? form.rooms[0]?.checkOut ?? "";
+    // In add-to-existing mode: seed from the booking's primary dates.
+    // In new-booking mode: seed from the last block or first form row (existing behaviour).
+    const defaultCheckIn  = bookingPrimaryCheckIn
+      ?? lastBlock?.checkIn  ?? form.rooms[0]?.checkIn  ?? "";
+    const defaultCheckOut = bookingPrimaryCheckOut
+      ?? lastBlock?.checkOut ?? form.rooms[0]?.checkOut ?? "";
     // Build one section per unique category, sorted
     const categories = [...new Set(rooms.map(r => r.category))].sort();
     const sections: Record<string, BlockDialogSection> = {};
@@ -1164,7 +1174,10 @@ export default function BookingsClient({ initialRoom }: Props) {
         rateEdited:  false,
       };
     });
-    setBlockDialog({ checkIn: defaultCheckIn, checkOut: defaultCheckOut, sections, bookingContextRef });
+    setBlockDialog({
+      checkIn: defaultCheckIn, checkOut: defaultCheckOut, sections,
+      bookingContextRef, bookingPrimaryCheckIn, bookingPrimaryCheckOut,
+    });
   }
 
   function confirmBlockDialog() {
@@ -3622,7 +3635,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                             {(b.status === "Confirmed" || b.status === "Checked In") && (
                               <button
                                 type="button"
-                                onClick={() => openBlockDialog(b.id)}
+                                onClick={() => openBlockDialog(b.id, b.rooms[0]?.checkInISO ?? "", b.rooms[0]?.checkOutISO ?? "")}
                                 className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold text-violet-600 hover:text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 px-2 py-0.5 rounded-md transition-colors"
                               >
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3"><path d="M12 5v14M5 12h14"/></svg>
@@ -4051,7 +4064,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                                 {(b.status === "Confirmed" || b.status === "Checked In") && (
                                   <button
                                     type="button"
-                                    onClick={() => openBlockDialog(b.id)}
+                                    onClick={() => openBlockDialog(b.id, b.rooms[0]?.checkInISO ?? "", b.rooms[0]?.checkOutISO ?? "")}
                                     className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold text-violet-600 hover:text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 px-2 py-0.5 rounded-md transition-colors"
                                   >
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3"><path d="M12 5v14M5 12h14"/></svg>
