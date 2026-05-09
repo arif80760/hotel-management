@@ -118,12 +118,13 @@ type CancelRoomModalState = {
   bookingRate:       number;
   nights:            number;   // booking_rooms.nights — needed for cancelled-path total guard
   // Form
-  actualCheckOut:    string;   // ISO date input (checked_out_early only)
-  refundAmount:      string;   // string for <input>
-  refundEdited:      boolean;  // true once the user manually changes refundAmount
-  refundReason:      string;
-  submitting:        boolean;
-  error:             string | null;
+  actualCheckOut:      string;         // ISO date input (checked_out_early only)
+  refundAmount:        string;         // string; read-only display in overpayment branch
+  refundReason:        string;
+  disbursementMethod:  PaymentMethod | "";
+  disbursementNotes:   string;
+  submitting:          boolean;
+  error:               string | null;
 };
 
 /** State for the Extend Room modal. null = modal closed. */
@@ -148,11 +149,13 @@ type CancelBookingModalState = {
   rooms:        BookingRoom[];
   totalAmount:  number;
   paidAmount:   number;
-  extrasTotal:  number;          // sum of extra charges — new total after cancel
-  refundAmount: string;          // string for <input>
-  refundReason: string;
-  submitting:   boolean;
-  error:        string | null;
+  extrasTotal:        number;          // sum of extra charges — new total after cancel
+  refundAmount:       string;          // string; read-only display in overpayment branch
+  refundReason:       string;
+  disbursementMethod: PaymentMethod | "";
+  disbursementNotes:  string;
+  submitting:         boolean;
+  error:              string | null;
 };
 
 /** State for the Mark Disbursed sub-modal (opened from Timeline). null = closed. */
@@ -1437,12 +1440,13 @@ export default function BookingsClient({ initialRoom }: Props) {
       scheduledCheckOut: scheduled,
       bookingRate:       rate,
       nights:            nights,
-      actualCheckOut:    defaultActualCheckOut,
-      refundAmount:      overpayment > 0 ? String(overpayment) : "",
-      refundEdited:      false,
-      refundReason:      "",
-      submitting:        false,
-      error:             null,
+      actualCheckOut:     defaultActualCheckOut,
+      refundAmount:       overpayment > 0 ? String(overpayment) : "",
+      refundReason:       overpayment > 0 ? `Cancellation refund — Room ${room.roomNumber}` : "",
+      disbursementMethod: "",
+      disbursementNotes:  "",
+      submitting:         false,
+      error:              null,
     });
   }
 
@@ -1458,29 +1462,46 @@ export default function BookingsClient({ initialRoom }: Props) {
       totalAmount:  booking.totalAmount,
       paidAmount:   booking.amountPaid,
       extrasTotal,
-      refundAmount: overpayment > 0 ? String(overpayment) : "",
-      refundReason: "",
-      submitting:   false,
-      error:        null,
+      refundAmount:       overpayment > 0 ? String(overpayment) : "",
+      refundReason:       overpayment > 0 ? `Cancellation refund — ${booking.id}` : "",
+      disbursementMethod: "",
+      disbursementNotes:  "",
+      submitting:         false,
+      error:              null,
     });
   }
 
-  function submitCancelBooking() {
+  async function submitCancelBooking(path: "later" | "now" = "later") {
     const m = cancelBookingModal;
     if (!m) return;
-    const refundAmt = parseFloat(m.refundAmount) || 0;
-    if (refundAmt > m.paidAmount) {
-      setCancelBookingModal(prev => prev && {
-        ...prev, error: `Refund cannot exceed paid amount ৳${m.paidAmount.toLocaleString()}.`,
-      });
+
+    const overpayment  = Math.max(0, m.paidAmount - m.extrasTotal);
+    const isAdjustment = overpayment === 0;
+
+    // "now" path: disbursement method is required
+    if (path === "now" && !m.disbursementMethod) {
+      setCancelBookingModal(prev => prev && { ...prev, error: "Select a disbursement method to cancel and disburse now." });
       return;
     }
-    ctxCancelBooking(
-      m.bookingRef,
-      refundAmt > 0 ? refundAmt : null,
-      m.refundReason.trim() || null,
-    );
-    setCancelBookingModal(null);
+
+    setCancelBookingModal(prev => prev && { ...prev, submitting: true, error: null });
+
+    try {
+      await ctxCancelBooking(
+        m.bookingRef,
+        // Adjustment path: no refund. Overpayment paths: always refund the full overpayment.
+        isAdjustment ? null : overpayment,
+        m.refundReason.trim() || null,
+        // Disbursement args — only for "now" path
+        path === "now" ? m.disbursementMethod as PaymentMethod : null,
+        path === "now" && m.disbursementNotes.trim() ? m.disbursementNotes.trim() : null,
+        path === "now" ? (user?.id ?? null) : null,
+      );
+      setCancelBookingModal(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Cancellation failed — please try again.";
+      setCancelBookingModal(prev => prev && { ...prev, submitting: false, error: msg });
+    }
   }
 
   /** Re-fetch Timeline payment + refund data after a refund action. */
@@ -1562,23 +1583,24 @@ export default function BookingsClient({ initialRoom }: Props) {
     });
   }
 
-  async function submitCancelRoom() {
+  async function submitCancelRoom(path: "later" | "now" = "later") {
     const m = cancelRoomModal;
     if (!m) return;
-    setCancelRoomModal(prev => prev && { ...prev, submitting: true, error: null });
 
+    // ── Pre-submit guards (before setting submitting) ─────────────────
     if (m.currentStatus === "Checked In" && !m.actualCheckOut) {
-      setCancelRoomModal(prev => prev && { ...prev, submitting: false, error: "Actual check-out date is required." });
+      setCancelRoomModal(prev => prev && { ...prev, error: "Actual check-out date is required." });
       return;
     }
 
     const booking = bookings.find(b => b.id === m.bookingRef);
     if (!booking) {
-      setCancelRoomModal(prev => prev && { ...prev, submitting: false, error: "Booking not found in local state — please refresh and retry." });
+      setCancelRoomModal(prev => prev && { ...prev, error: "Booking not found in local state — please refresh and retry." });
       return;
     }
 
-    // Compute scenario (same formula as render-time; re-evaluated at submit for safety)
+    // Re-compute overpayment at submit time (same formula as render; guards against
+    // state drift if the user navigated away and back while the modal was open).
     const earlyNights = m.currentStatus === "Checked In" && m.actualCheckOut && m.scheduledCheckOut
       ? Math.max(0, Math.floor(
           (new Date(m.scheduledCheckOut).getTime() - new Date(m.actualCheckOut).getTime()) / 86_400_000
@@ -1587,36 +1609,37 @@ export default function BookingsClient({ initialRoom }: Props) {
     const removedAmount = m.currentStatus === "Confirmed"
       ? m.bookingRate * m.nights
       : earlyNights * m.bookingRate;
-    const newTotal    = booking.totalAmount - removedAmount;
-    const overpayment = Math.max(0, booking.amountPaid - newTotal);
+    const newTotal     = booking.totalAmount - removedAmount;
+    const overpayment  = Math.max(0, booking.amountPaid - newTotal);
     const isAdjustment = overpayment === 0;
 
-    // Overpayment path: button should be disabled in the UI, but guard defensively.
-    // The DB constraint chk_paid_not_exceed_total would reject the cancel anyway.
-    if (!isAdjustment) {
-      setCancelRoomModal(prev => prev && {
-        ...prev,
-        submitting: false,
-        error: `Cannot proceed — paid amount exceeds new total. Disburse the ৳${overpayment.toLocaleString()} overpayment first.`,
-      });
+    // "now" path: disbursement method is required
+    if (path === "now" && !m.disbursementMethod) {
+      setCancelRoomModal(prev => prev && { ...prev, error: "Select a disbursement method to cancel and disburse now." });
       return;
     }
 
+    const uiStatus: "Cancelled" | "Checked Out Early" =
+      m.currentStatus === "Confirmed" ? "Cancelled" : "Checked Out Early";
+
+    setCancelRoomModal(prev => prev && { ...prev, submitting: true, error: null });
+
     try {
-      const uiStatus: "Cancelled" | "Checked Out Early" =
-        m.currentStatus === "Confirmed" ? "Cancelled" : "Checked Out Early";
-      // Adjustment path: no refund record — the guest's advance simply rolls
-      // forward against remaining rooms. Pass reason if provided.
-      ctxCancelBookingRoom(
+      await ctxCancelBookingRoom(
         m.bookingRoomId,
         uiStatus,
         m.currentStatus === "Checked In" ? m.actualCheckOut : undefined,
-        undefined,                            // no refund amount
-        m.refundReason.trim() || undefined,   // optional reason note
+        // Adjustment path: no refund. Overpayment paths: always refund the full overpayment.
+        isAdjustment ? undefined : overpayment,
+        m.refundReason.trim() || undefined,
+        // Disbursement args — only for "now" path
+        path === "now" ? m.disbursementMethod as PaymentMethod : undefined,
+        path === "now" && m.disbursementNotes.trim() ? m.disbursementNotes.trim() : undefined,
+        path === "now" ? (user?.id ?? undefined) : undefined,
       );
       setCancelRoomModal(null);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = err instanceof Error ? err.message : "Cancellation failed — please try again.";
       setCancelRoomModal(prev => prev && { ...prev, submitting: false, error: msg });
     }
   }
@@ -6237,7 +6260,7 @@ export default function BookingsClient({ initialRoom }: Props) {
         // isAdjustment  — newTotal >= paidAmount → no money owed back;
         //                 advance rolls forward against remaining rooms.
         // isOverpayment — newTotal < paidAmount  → guest is owed a refund;
-        //                 blocked until Phase 8.5 per-room disbursement flow.
+        //                 Phase 8.6: shows method picker + Disburse Later / Now buttons.
         const liveBooking   = bookings.find(b => b.id === m.bookingRef);
         const removedAmount = isEarly
           ? earlyNights * m.bookingRate   // only deducted nights
@@ -6381,24 +6404,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                           type="date"
                           max={m.scheduledCheckOut}
                           value={m.actualCheckOut}
-                          onChange={e => {
-                            const newDate = e.target.value;
-                            setCancelRoomModal(prev => {
-                              if (!prev) return null;
-                              const patch: Partial<CancelRoomModalState> = { actualCheckOut: newDate, error: null };
-                              // Re-compute overpayment-based refund suggestion unless manually edited
-                              if (!prev.refundEdited && newDate && prev.scheduledCheckOut) {
-                                const en = Math.max(0, Math.floor(
-                                  (new Date(prev.scheduledCheckOut).getTime() - new Date(newDate).getTime()) / 86_400_000
-                                ));
-                                const earlyRemoved      = en * prev.bookingRate;
-                                const projectedNewTotal = (liveBooking?.totalAmount ?? 0) - earlyRemoved;
-                                const projectedOverpay  = Math.max(0, prev.paidAmount - projectedNewTotal);
-                                patch.refundAmount = projectedOverpay > 0 ? String(projectedOverpay) : "";
-                              }
-                              return { ...prev, ...patch };
-                            });
-                          }}
+                          onChange={e => setCancelRoomModal(prev => prev && { ...prev, actualCheckOut: e.target.value, error: null })}
                           className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent transition"
                         />
                         {m.actualCheckOut && m.scheduledCheckOut && m.actualCheckOut < m.scheduledCheckOut && (
@@ -6438,56 +6444,66 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </div>
                     </div>
 
-                    {/* Refund amount + reason */}
-                    <div className="space-y-3">
-                      <div>
-                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                          Refund Amount (BDT)
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          max={currentPaid}
-                          placeholder="0"
-                          value={m.refundAmount}
-                          onChange={e => setCancelRoomModal(prev => prev && { ...prev, refundAmount: e.target.value, refundEdited: true, error: null })}
-                          className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
-                        />
-                        <p className="text-[11px] text-slate-400 mt-1">Max ৳{currentPaid.toLocaleString()} (total paid).</p>
+                    {/* Refund amount — read-only; always the full overpayment */}
+                    <div>
+                      <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                        Refund Amount (BDT)
+                      </label>
+                      <div className="w-full px-3.5 py-2.5 text-[13.5px] font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg">
+                        ৳{overpayment.toLocaleString()}
                       </div>
-                      <div>
-                        <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                          Refund Reason
-                        </label>
-                        <textarea
-                          rows={2}
-                          placeholder="e.g. Guest cancelled due to change of plans"
-                          value={m.refundReason}
-                          onChange={e => setCancelRoomModal(prev => prev && { ...prev, refundReason: e.target.value })}
-                          className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition resize-none"
-                        />
-                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Fixed at overpayment — must be fully refunded to satisfy the balance constraint.
+                      </p>
                     </div>
 
-                    {/* Refund preview strip */}
-                    {refundAmt > 0 && (
-                      <div className="flex items-center gap-2 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg text-[12px]">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-emerald-600 flex-shrink-0"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
-                        <span className="text-emerald-700 font-medium">Refund of ৳{refundAmt.toLocaleString()} will be created (pending disbursement)</span>
-                      </div>
-                    )}
+                    {/* Refund reason */}
+                    <div>
+                      <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                        Refund Reason <span className="text-[11px] font-normal normal-case text-slate-400">(optional)</span>
+                      </label>
+                      <textarea
+                        rows={2}
+                        placeholder="e.g. Guest cancelled due to change of plans"
+                        value={m.refundReason}
+                        onChange={e => setCancelRoomModal(prev => prev && { ...prev, refundReason: e.target.value })}
+                        disabled={m.submitting}
+                        className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 transition resize-none disabled:opacity-60"
+                      />
+                    </div>
 
-                    {/* Blocked — Phase 8.5 per-room disbursement coming */}
-                    <div className="flex items-start gap-2 px-3 py-2.5 bg-rose-50 border border-rose-200 rounded-lg text-[12px]">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
-                      <div className="text-rose-700 space-y-1">
-                        <p className="font-semibold">
-                          {isEarly ? "Early checkout" : "Cancelling this room"} would reduce the booking total to ৳{newTotal.toLocaleString()}, below the ৳{currentPaid.toLocaleString()} already paid. Record a payment reversal of ৳{overpayment.toLocaleString()} before this room can be {isEarly ? "checked out early" : "cancelled"}.
-                        </p>
-                        <p className="text-rose-500">
-                          Refund records track what's owed but don't reduce paid amount. Payment reversal flow coming in Phase 8.5.
-                        </p>
-                      </div>
+                    {/* Disbursement method — required for "Cancel & Disburse Now" */}
+                    <div>
+                      <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                        Disbursement Method
+                        <span className="text-[11px] font-normal normal-case text-slate-400 ml-1">(required for instant disburse)</span>
+                      </label>
+                      <select
+                        value={m.disbursementMethod}
+                        onChange={e => setCancelRoomModal(prev => prev && { ...prev, disbursementMethod: e.target.value as PaymentMethod | "", error: null })}
+                        disabled={m.submitting}
+                        className="w-full border border-slate-200 rounded-lg px-3.5 py-2.5 text-[13.5px] text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 disabled:opacity-60"
+                      >
+                        <option value="">Select method — or choose &quot;Disburse Later&quot; below</option>
+                        {PAYMENT_METHODS.map(pm => (
+                          <option key={pm} value={pm}>{PAYMENT_METHOD_LABELS[pm]}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Disbursement notes */}
+                    <div>
+                      <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                        Notes <span className="text-[11px] font-normal normal-case text-slate-400">(optional — e.g. receipt #)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={m.disbursementNotes}
+                        onChange={e => setCancelRoomModal(prev => prev && { ...prev, disbursementNotes: e.target.value })}
+                        disabled={m.submitting}
+                        placeholder="Receipt #1234"
+                        className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-700 bg-white border border-slate-200 rounded-lg placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 transition disabled:opacity-60"
+                      />
                     </div>
 
                     {m.error && (
@@ -6507,20 +6523,42 @@ export default function BookingsClient({ initialRoom }: Props) {
                 >
                   Keep Room
                 </button>
-                <button
-                  type="button"
-                  onClick={submitCancelRoom}
-                  disabled={m.submitting || isOverpayment}
-                  className={`px-5 py-2 text-[13px] font-semibold text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                    isEarly ? "bg-orange-500 hover:bg-orange-600" : "bg-rose-500 hover:bg-rose-600"
-                  }`}
-                >
-                  {m.submitting
-                    ? "Processing…"
-                    : isEarly
-                    ? "Confirm Early Departure"
-                    : "Confirm Cancellation"}
-                </button>
+
+                {/* Adjustment path — single primary button */}
+                {isAdjustment && (
+                  <button
+                    type="button"
+                    onClick={() => submitCancelRoom()}
+                    disabled={m.submitting}
+                    className={`px-5 py-2 text-[13px] font-semibold text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                      isEarly ? "bg-orange-500 hover:bg-orange-600" : "bg-rose-500 hover:bg-rose-600"
+                    }`}
+                  >
+                    {m.submitting ? "Processing…" : isEarly ? "Confirm Early Departure" : "Confirm Cancellation"}
+                  </button>
+                )}
+
+                {/* Overpayment path — two action buttons */}
+                {isOverpayment && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => submitCancelRoom("later")}
+                      disabled={m.submitting}
+                      className="px-4 py-2 text-[13px] font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Disburse Later
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => submitCancelRoom("now")}
+                      disabled={m.submitting || !m.disbursementMethod}
+                      className="px-5 py-2 text-[13px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {m.submitting ? "Processing…" : `Cancel & Disburse ৳${overpayment.toLocaleString()} Now`}
+                    </button>
+                  </>
+                )}
               </div>
 
             </div>
@@ -7104,11 +7142,9 @@ export default function BookingsClient({ initialRoom }: Props) {
           ══════════════════════════════════════════════════════ */}
       {cancelBookingModal && (() => {
         const m = cancelBookingModal;
-        const refundAmt          = parseFloat(m.refundAmount) || 0;
         const overpayment        = Math.max(0, m.paidAmount - m.extrasTotal);
         const isAdjustment       = overpayment === 0;
         const isOverpayment      = overpayment > 0;
-        const refundExceedsPaid  = refundAmt > m.paidAmount;
         // Due = total − paid (positive = owed; negative = overpaid)
         const currentDue         = m.totalAmount - m.paidAmount;
         const newDue             = m.extrasTotal - m.paidAmount;
@@ -7251,58 +7287,68 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </div>
                     </div>
 
-                    <div className="space-y-3">
-                      <div>
-                        <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">Refund Amount (BDT)</label>
-                        <input
-                          type="number" min="0" step="0.01"
-                          value={m.refundAmount}
-                          onChange={e => setCancelBookingModal(prev => prev && { ...prev, refundAmount: e.target.value, error: null })}
-                          disabled={m.submitting}
-                          placeholder="0"
-                          className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 disabled:opacity-60"
-                        />
-                        <p className="text-[11px] text-slate-400 mt-1">Max ৳{m.paidAmount.toLocaleString()} (total paid). Leave blank for no refund record.</p>
+                    {/* Refund amount — read-only; always the full overpayment */}
+                    <div>
+                      <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">Refund Amount (BDT)</label>
+                      <div className="w-full border border-rose-200 rounded-xl px-3 py-2 text-[13px] font-semibold text-rose-700 bg-rose-50">
+                        ৳{overpayment.toLocaleString()}
                       </div>
-                      <div>
-                        <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">Refund Reason</label>
-                        <textarea
-                          rows={2}
-                          value={m.refundReason}
-                          onChange={e => setCancelBookingModal(prev => prev && { ...prev, refundReason: e.target.value })}
-                          disabled={m.submitting}
-                          placeholder="e.g. Guest cancelled — full refund per policy"
-                          className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 resize-none disabled:opacity-60"
-                        />
-                      </div>
-                    </div>
-
-                    {refundAmt > 0 && !refundExceedsPaid && (
-                      <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0"><path d="M20 6L9 17l-5-5"/></svg>
-                        <span className="text-[11.5px] text-emerald-700 font-medium">
-                          Refund of ৳{refundAmt.toLocaleString()} will be created (pending disbursement)
-                        </span>
-                      </div>
-                    )}
-
-                    {/* Partial-paid guard */}
-                    <div className="flex items-start gap-2 px-3 py-2.5 bg-rose-50 border border-rose-200 rounded-lg text-[12px]">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
-                      <div className="text-rose-700 space-y-1">
-                        <p className="font-semibold">
-                          Cancelling would reduce total to ৳{m.extrasTotal.toLocaleString()}, below the ৳{m.paidAmount.toLocaleString()} already paid. Record a payment reversal of ৳{overpayment.toLocaleString()} before cancelling.
-                        </p>
-                        <p className="text-rose-500">
-                          Refund records track what&apos;s owed but don&apos;t reduce paid amount. Payment reversal flow coming in Phase 8.5.
-                        </p>
-                      </div>
-                    </div>
-
-                    {(m.error || refundExceedsPaid) && (
-                      <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3">
-                        {refundExceedsPaid ? `Refund cannot exceed paid amount ৳${m.paidAmount.toLocaleString()}.` : m.error}
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Fixed at overpayment — must be fully refunded to satisfy the balance constraint.
                       </p>
+                    </div>
+
+                    {/* Refund reason */}
+                    <div>
+                      <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">
+                        Refund Reason <span className="text-[11px] font-normal text-slate-400">(optional)</span>
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={m.refundReason}
+                        onChange={e => setCancelBookingModal(prev => prev && { ...prev, refundReason: e.target.value })}
+                        disabled={m.submitting}
+                        placeholder="e.g. Guest cancelled — full refund per policy"
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 resize-none disabled:opacity-60"
+                      />
+                    </div>
+
+                    {/* Disbursement method — required for "Cancel & Disburse Now" */}
+                    <div>
+                      <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">
+                        Disbursement Method
+                        <span className="text-[11px] font-normal text-slate-400 ml-1">(required for instant disburse)</span>
+                      </label>
+                      <select
+                        value={m.disbursementMethod}
+                        onChange={e => setCancelBookingModal(prev => prev && { ...prev, disbursementMethod: e.target.value as PaymentMethod | "", error: null })}
+                        disabled={m.submitting}
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 disabled:opacity-60"
+                      >
+                        <option value="">Select method — or choose &quot;Disburse Later&quot; below</option>
+                        {PAYMENT_METHODS.map(pm => (
+                          <option key={pm} value={pm}>{PAYMENT_METHOD_LABELS[pm]}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Disbursement notes */}
+                    <div>
+                      <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">
+                        Notes <span className="text-[11px] font-normal text-slate-400">(optional — e.g. receipt #)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={m.disbursementNotes}
+                        onChange={e => setCancelBookingModal(prev => prev && { ...prev, disbursementNotes: e.target.value })}
+                        disabled={m.submitting}
+                        placeholder="Receipt #1234"
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 disabled:opacity-60"
+                      />
+                    </div>
+
+                    {m.error && (
+                      <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3">{m.error}</p>
                     )}
                   </>
                 )}
@@ -7317,14 +7363,40 @@ export default function BookingsClient({ initialRoom }: Props) {
                   disabled={m.submitting}
                   className="px-4 py-2 text-[13px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
                 >Keep Booking</button>
-                <button
-                  type="button"
-                  onClick={submitCancelBooking}
-                  disabled={m.submitting || isOverpayment || refundExceedsPaid}
-                  className="px-5 py-2 text-[13px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {m.submitting ? "Cancelling…" : `Cancel All ${m.rooms.length} Room${m.rooms.length !== 1 ? "s" : ""}`}
-                </button>
+
+                {/* Adjustment path — single primary button */}
+                {isAdjustment && (
+                  <button
+                    type="button"
+                    onClick={() => submitCancelBooking()}
+                    disabled={m.submitting}
+                    className="px-5 py-2 text-[13px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {m.submitting ? "Cancelling…" : `Cancel All ${m.rooms.length} Room${m.rooms.length !== 1 ? "s" : ""}`}
+                  </button>
+                )}
+
+                {/* Overpayment path — two action buttons */}
+                {isOverpayment && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => submitCancelBooking("later")}
+                      disabled={m.submitting}
+                      className="px-4 py-2 text-[13px] font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Disburse Later
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => submitCancelBooking("now")}
+                      disabled={m.submitting || !m.disbursementMethod}
+                      className="px-5 py-2 text-[13px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {m.submitting ? "Cancelling…" : `Cancel & Disburse ৳${overpayment.toLocaleString()} Now`}
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>

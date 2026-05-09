@@ -133,7 +133,7 @@ type HotelContextType = {
     disbursementMethod?: PaymentMethod,
     disbursementNotes?:  string,
     disbursedBy?:        string,
-  ) => void;
+  ) => Promise<void>;
   /** Extend a room's check-out date past its current scheduled date. */
   extendBookingRoom: (
     bookingRoomId: string,
@@ -167,7 +167,7 @@ type HotelContextType = {
     disbursementMethod?: PaymentMethod | null,
     disbursementNotes?:  string | null,
     disbursedBy?:        string | null,
-  ) => void;
+  ) => Promise<void>;
 };
 
 const HotelContext = createContext<HotelContextType | null>(null);
@@ -781,7 +781,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     disbursedBy?:        string,
   ) {
     const target = bookings.find(b => b.rooms.some(r => r.id === bookingRoomId));
-    if (!target) return;
+    if (!target) return Promise.resolve();
     const prevBookings = bookings;
 
     const dbStatus = status === "Cancelled" ? "cancelled" : "checked_out_early";
@@ -829,7 +829,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       })
     );
 
-    bookingsService.cancelBookingRoom(
+    return bookingsService.cancelBookingRoom(
       bookingRoomId,
       dbStatus as "cancelled" | "checked_out_early",
       actualCheckOut,
@@ -849,6 +849,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error("[HotelContext cancelBookingRoom] failed — rolling back:", msg);
         setBookings(prevBookings);
+        throw err;
       });
   }
 
@@ -1013,7 +1014,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     disbursedBy?:        string | null,
   ) {
     const target = bookings.find(b => b.id === bookingRef);
-    if (!target) return;
+    if (!target) return Promise.resolve();
     const prevBookings = bookings;
     const prevRooms    = rooms;
 
@@ -1046,7 +1047,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       )
     );
 
-    bookingsService.cancelBooking(
+    return bookingsService.cancelBooking(
       bookingRef,
       refundAmount       ?? null,
       refundReason       ?? null,
@@ -1064,6 +1065,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         console.error("[HotelContext cancelBooking] failed — rolling back:", msg);
         setBookings(prevBookings);
         setRooms(prevRooms);
+        throw err;
       });
   }
 
