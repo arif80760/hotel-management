@@ -135,6 +135,8 @@ type HotelContextType = {
     bookingRoomId: string,
     newCheckOut:   string,
   ) => void;
+  /** Check in a single confirmed room within a booking. */
+  checkinBookingRoom: (bookingRoomId: string) => void;
 };
 
 const HotelContext = createContext<HotelContextType | null>(null);
@@ -862,6 +864,63 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       });
   }
 
+  function checkinBookingRoom(bookingRoomId: string) {
+    const target = bookings.find(b => b.rooms.some(r => r.id === bookingRoomId));
+    if (!target) return;
+    const prevBookings = bookings;
+    const prevRooms    = rooms;
+
+    const now = new Date().toISOString();
+
+    // Optimistic: flip the matching room to Checked In
+    const updatedRooms = target.rooms.map(r =>
+      r.id !== bookingRoomId
+        ? r
+        : { ...r, status: "Checked In" as BookingRoomStatus, checkedInAt: now }
+    );
+
+    // Derive booking-level status (4-rule per docs/multi-room-design.md § 5)
+    const allCancelled = updatedRooms.every(r => r.status === "Cancelled");
+    const anyCheckedIn = updatedRooms.some(r => r.status === "Checked In");
+    const noneActive   = updatedRooms.every(r => r.status !== "Confirmed" && r.status !== "Checked In");
+    const newBookingStatus: BookingStatus =
+      allCancelled ? "Cancelled"   :
+      anyCheckedIn ? "Checked In"  :
+      noneActive   ? "Checked Out" :
+                     "Confirmed";
+
+    // Locate the checked-in room in the catalog (for physical-status update)
+    const theRoom = updatedRooms.find(r => r.id === bookingRoomId);
+
+    setBookings(prev =>
+      prev.map(b => b.id !== target.id ? b : {
+        ...b,
+        rooms:  updatedRooms,
+        status: newBookingStatus,
+      })
+    );
+    if (theRoom) {
+      setRooms(prev =>
+        prev.map(r =>
+          r.roomNumber === theRoom.roomNumber ? { ...r, status: "Occupied" as RoomStatus } : r
+        )
+      );
+    }
+
+    bookingsService.checkinBookingRoom(bookingRoomId)
+      .then(() => bookingsService.getBookingByRef(target.id))
+      .then(updated => {
+        if (!updated) return;
+        setBookings(prev => prev.map(b => b.id === target.id ? updated : b));
+      })
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[HotelContext checkinBookingRoom] failed — rolling back:", msg);
+        setBookings(prevBookings);
+        setRooms(prevRooms);
+      });
+  }
+
   // ── Room actions ────────────────────────────────────────────
 
   function addRoom(room: MockRoom) {
@@ -944,6 +1003,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       addRoomToBooking,
       cancelBookingRoom,
       extendBookingRoom,
+      checkinBookingRoom,
       addRoom,
       updateRoom,
       deleteRoom,

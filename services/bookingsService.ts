@@ -2034,3 +2034,35 @@ export async function extendBookingRoom(
     );
   }
 }
+
+/**
+ * Checks in a single booking_rooms row (confirmed → checked_in).
+ * Sets the physical room to occupied and re-derives the parent booking status.
+ *
+ * Use case: multi-room bookings where rooms arrive on different days.
+ * A room added mid-stay starts as 'confirmed'; this RPC checks it in
+ * individually without touching the rest of the booking.
+ *
+ * Raises if the row is not in confirmed state — not idempotent by design;
+ * double-fire is surfaced as an error rather than silently no-oping.
+ *
+ * @param bookingRoomId  booking_rooms.id UUID
+ */
+export async function checkinBookingRoom(
+  bookingRoomId: string,
+): Promise<void> {
+  const { error: rpcErr } = await supabase.rpc("checkin_booking_room", {
+    p_booking_room_id: bookingRoomId,
+  });
+
+  if (rpcErr) {
+    console.error("[checkinBookingRoom] RPC failed:");
+    console.error("  bookingRoomId:", bookingRoomId);
+    console.error("  message      :", rpcErr.message);
+    console.error("  code         :", rpcErr.code);
+    throw new Error(
+      `[checkinBookingRoom] ${rpcErr.message}` +
+      (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
+    );
+  }
+}

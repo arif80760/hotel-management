@@ -582,9 +582,10 @@ export default function BookingsClient({ initialRoom }: Props) {
     createBooking, changeBookingStatus,
     checkoutNormal, checkoutWithOverride, recordPayment,
     updateBooking,
-    addRoomToBooking: ctxAddRoomToBooking,
-    cancelBookingRoom: ctxCancelBookingRoom,
-    extendBookingRoom: ctxExtendBookingRoom,
+    addRoomToBooking:    ctxAddRoomToBooking,
+    cancelBookingRoom:   ctxCancelBookingRoom,
+    extendBookingRoom:   ctxExtendBookingRoom,
+    checkinBookingRoom:  ctxCheckinBookingRoom,
   } = useHotel();
 
   // Real role from authenticated session
@@ -3670,6 +3671,13 @@ export default function BookingsClient({ initialRoom }: Props) {
                                       {r.status === "Confirmed" && (
                                         <button
                                           type="button"
+                                          onClick={() => ctxCheckinBookingRoom(r.id)}
+                                          className="text-[10.5px] font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                        >Check In</button>
+                                      )}
+                                      {r.status === "Confirmed" && (
+                                        <button
+                                          type="button"
                                           onClick={() => openCancelRoomModal(b, r)}
                                           className="text-[10.5px] font-semibold text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
                                         >Cancel</button>
@@ -4094,6 +4102,13 @@ export default function BookingsClient({ initialRoom }: Props) {
                                       <span className="text-[12px] font-semibold text-slate-700 whitespace-nowrap w-20 text-right">৳{subtotal.toLocaleString()}</span>
                                       {isActive && (
                                         <div className="flex items-center gap-1 ml-1">
+                                          {r.status === "Confirmed" && (
+                                            <button
+                                              type="button"
+                                              onClick={() => ctxCheckinBookingRoom(r.id)}
+                                              className="text-[10.5px] font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                            >Check In</button>
+                                          )}
                                           {r.status === "Confirmed" && (
                                             <button
                                               type="button"
