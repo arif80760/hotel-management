@@ -111,6 +111,7 @@ type CancelRoomModalState = {
   paidAmount:        number;
   scheduledCheckOut: string;   // ISO – for checked_out_early deduction preview
   bookingRate:       number;
+  nights:            number;   // booking_rooms.nights — needed for cancelled-path total guard
   // Form
   actualCheckOut:    string;   // ISO date input (checked_out_early only)
   refundAmount:      string;   // string for <input>
@@ -1335,6 +1336,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       paidAmount:        booking.amountPaid,
       scheduledCheckOut: scheduled,
       bookingRate:       rate,
+      nights:            nights,
       actualCheckOut:    defaultActualCheckOut,
       refundAmount:      capped > 0 ? String(capped) : "",
       refundEdited:      false,
@@ -1372,6 +1374,53 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (refundAmt > m.paidAmount) {
       setCancelRoomModal(prev => prev && { ...prev, submitting: false, error: `Refund cannot exceed paid amount ৳${m.paidAmount.toLocaleString()}.` });
       return;
+    }
+
+    // ── Guard: ensure cancel won't drop total_amount below paid_amount ──
+    // update_booking_total() recomputes from non-cancelled rooms. If the
+    // result is below paid_amount, the DB CHECK constraint chk_paid_not_exceed_total
+    // will reject the UPDATE with code 23514. Block here with a clear message
+    // rather than letting the RPC fail silently after the optimistic update.
+    //
+    // Note: refund records do NOT decrement paid_amount (separate ledger),
+    // so the only remedy is the operator disbursing the overpayment first.
+    const booking = bookings.find(b => b.id === m.bookingRef);
+    if (!booking) {
+      setCancelRoomModal(prev => prev && { ...prev, submitting: false, error: "Booking not found in local state — please refresh and retry." });
+      return;
+    }
+
+    if (m.currentStatus === "Confirmed") {
+      // Pre-checkin cancel: this room's full contribution is removed from the total.
+      const removedAmount = m.bookingRate * m.nights;
+      const newTotal = booking.totalAmount - removedAmount;
+      if (newTotal < booking.amountPaid) {
+        const gap = booking.amountPaid - newTotal;
+        setCancelRoomModal(prev => prev && {
+          ...prev,
+          submitting: false,
+          error: `Cancelling this room would reduce the booking total to ৳${newTotal.toLocaleString()}, below the ৳${booking.amountPaid.toLocaleString()} already paid. Record a payment reversal of ৳${gap.toLocaleString()} before retrying. (Refund records do not reduce paid amount.)`,
+        });
+        return;
+      }
+    } else {
+      // Early checkout: only the deduction for unstayed nights is removed.
+      const earlyNights = m.actualCheckOut && m.scheduledCheckOut
+        ? Math.max(0, Math.floor(
+            (new Date(m.scheduledCheckOut).getTime() - new Date(m.actualCheckOut).getTime()) / 86_400_000
+          ))
+        : 0;
+      const removedAmount = earlyNights * m.bookingRate;
+      const newTotal = booking.totalAmount - removedAmount;
+      if (newTotal < booking.amountPaid) {
+        const gap = booking.amountPaid - newTotal;
+        setCancelRoomModal(prev => prev && {
+          ...prev,
+          submitting: false,
+          error: `Early checkout would reduce the booking total to ৳${newTotal.toLocaleString()}, below the ৳${booking.amountPaid.toLocaleString()} already paid. Record a payment reversal of ৳${gap.toLocaleString()} before retrying. (Refund records do not reduce paid amount.)`,
+        });
+        return;
+      }
     }
 
     try {
@@ -3347,20 +3396,18 @@ export default function BookingsClient({ initialRoom }: Props) {
 
                     {/* Room — multi-room cells toggle an inline detail row */}
                     {(() => {
-                      const { top, sub, multi } = roomCellDisplay(b.rooms);
+                      const { top, sub } = roomCellDisplay(b.rooms);
                       const expanded = expandedBookingId === b.id;
                       return (
                         <td
-                          className={`px-5 py-3.5 ${multi ? "cursor-pointer select-none" : ""}`}
-                          onClick={multi ? () => toggleExpandedBooking(b.id) : undefined}
+                          className="px-5 py-3.5 cursor-pointer select-none"
+                          onClick={() => toggleExpandedBooking(b.id)}
                         >
                           <div className="flex items-center gap-1">
                             <p className="font-semibold text-slate-800 whitespace-nowrap">{top}</p>
-                            {multi && (
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}>
-                                <path d="M6 9l6 6 6-6"/>
-                              </svg>
-                            )}
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}>
+                              <path d="M6 9l6 6 6-6"/>
+                            </svg>
                           </div>
                           {sub && <p className="text-[11px] text-slate-400">{sub}</p>}
                         </td>
@@ -3857,20 +3904,18 @@ export default function BookingsClient({ initialRoom }: Props) {
 
                         {/* Room — multi-room cells toggle an inline detail row */}
                         {(() => {
-                          const { top, sub, multi } = roomCellDisplay(b.rooms);
+                          const { top, sub } = roomCellDisplay(b.rooms);
                           const expanded = expandedBookingId === b.id;
                           return (
                             <td
-                              className={`px-5 py-3.5 ${multi ? "cursor-pointer select-none" : ""}`}
-                              onClick={multi ? () => toggleExpandedBooking(b.id) : undefined}
+                              className="px-5 py-3.5 cursor-pointer select-none"
+                              onClick={() => toggleExpandedBooking(b.id)}
                             >
                               <div className="flex items-center gap-1">
                                 <p className="font-semibold text-slate-800 whitespace-nowrap">{top}</p>
-                                {multi && (
-                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}>
-                                    <path d="M6 9l6 6 6-6"/>
-                                  </svg>
-                                )}
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}>
+                                  <path d="M6 9l6 6 6-6"/>
+                                </svg>
                               </div>
                               {sub && <p className="text-[11px] text-slate-400">{sub}</p>}
                             </td>
@@ -5837,6 +5882,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       {cancelRoomModal && (() => {
         const m = cancelRoomModal;
         const isEarly = m.currentStatus === "Checked In";
+
         const earlyNights = isEarly && m.actualCheckOut && m.scheduledCheckOut
           ? Math.max(0, Math.floor(
               (new Date(m.scheduledCheckOut).getTime() - new Date(m.actualCheckOut).getTime()) / 86_400_000
@@ -5844,6 +5890,23 @@ export default function BookingsClient({ initialRoom }: Props) {
           : 0;
         const earlyDeduction = earlyNights * m.bookingRate;
         const refundAmt = parseFloat(m.refundAmount) || 0;
+
+        // ── Partial-paid constraint check (render-time) ─────────────────
+        // Mirrors the guard inside submitCancelRoom. Computing it here lets
+        // us disable the button and hide the green strip before the user
+        // even clicks — no click-then-error UX.
+        const liveBooking = bookings.find(b => b.id === m.bookingRef);
+        const removedAmount = isEarly
+          ? earlyNights * m.bookingRate          // only deducted nights
+          : m.bookingRate * m.nights;            // full room contribution
+        const newTotal = liveBooking ? liveBooking.totalAmount - removedAmount : 0;
+        const wouldDropTotalBelowPaid = liveBooking
+          ? newTotal < liveBooking.amountPaid
+          : false;
+        const partialPaidGap = liveBooking
+          ? liveBooking.amountPaid - newTotal
+          : 0;
+
         return (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
@@ -5943,16 +6006,31 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </div>
                 </div>
 
-                {/* Refund preview strip */}
-                {refundAmt > 0 && (
+                {/* Refund preview strip — hidden when partial-paid guard fails */}
+                {refundAmt > 0 && !wouldDropTotalBelowPaid && (
                   <div className="flex items-center gap-2 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg text-[12px]">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-emerald-600 flex-shrink-0"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
                     <span className="text-emerald-700 font-medium">Refund of ৳{refundAmt.toLocaleString()} will be created (pending disbursement)</span>
                   </div>
                 )}
 
-                {/* Error */}
-                {m.error && (
+                {/* Partial-paid constraint warning — always visible when applicable */}
+                {wouldDropTotalBelowPaid && liveBooking && (
+                  <div className="flex items-start gap-2 px-3 py-2.5 bg-rose-50 border border-rose-200 rounded-lg text-[12px]">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                    <div className="text-rose-700 space-y-1">
+                      <p className="font-semibold">
+                        {isEarly ? "Early checkout" : "Cancelling this room"} would reduce the booking total to ৳{newTotal.toLocaleString()}, below the ৳{liveBooking.amountPaid.toLocaleString()} already paid. Record a payment reversal of ৳{partialPaidGap.toLocaleString()} before this room can be {isEarly ? "checked out early" : "cancelled"}.
+                      </p>
+                      <p className="text-rose-500">
+                        Setting a refund amount above does not clear this — refund records track what's owed to the guest but do not reduce the paid amount. Payment reversal flow is coming in Phase 8.5.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Other errors (missing date, refund > paid, etc.) */}
+                {m.error && !wouldDropTotalBelowPaid && (
                   <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 px-3 py-2 rounded-lg">{m.error}</p>
                 )}
               </div>
@@ -5969,7 +6047,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 <button
                   type="button"
                   onClick={submitCancelRoom}
-                  disabled={m.submitting}
+                  disabled={m.submitting || wouldDropTotalBelowPaid}
                   className={`px-5 py-2 text-[13px] font-semibold text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                     isEarly ? "bg-orange-500 hover:bg-orange-600" : "bg-rose-500 hover:bg-rose-600"
                   }`}
@@ -6063,14 +6141,20 @@ export default function BookingsClient({ initialRoom }: Props) {
                 )}
 
                 {/* Client-side conflict warning */}
-                {conflictBooking && (
-                  <div className="flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-[12px]">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
-                    <span className="text-amber-700">
-                      Room {m.roomNumber} appears to be booked during the extension window ({conflictBooking.id}). The server will block this if the conflict is real.
-                    </span>
-                  </div>
-                )}
+                {conflictBooking && (() => {
+                  const conflictRoom = conflictBooking.rooms.find(r => r.roomNumber === m.roomNumber);
+                  const dateRange = conflictRoom
+                    ? `${conflictRoom.checkIn} → ${conflictRoom.checkOut}`
+                    : null;
+                  return (
+                    <div className="flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-[12px]">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                      <span className="text-amber-700 font-medium">
+                        Room {m.roomNumber} is already booked during the extension window ({conflictBooking.id}{dateRange ? `: ${dateRange}` : ""}). Extension blocked.
+                      </span>
+                    </div>
+                  );
+                })()}
 
                 {/* Error */}
                 {m.error && (
@@ -6090,7 +6174,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 <button
                   type="button"
                   onClick={submitExtendRoom}
-                  disabled={m.submitting || !m.newCheckOut || m.newCheckOut <= m.currentCheckOut}
+                  disabled={m.submitting || !m.newCheckOut || m.newCheckOut <= m.currentCheckOut || !!conflictBooking}
                   className="px-5 py-2 text-[13px] font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {m.submitting ? "Extending…" : "Confirm Extension"}
