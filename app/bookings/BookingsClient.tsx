@@ -6260,7 +6260,7 @@ export default function BookingsClient({ initialRoom }: Props) {
         // isAdjustment  — newTotal >= paidAmount → no money owed back;
         //                 advance rolls forward against remaining rooms.
         // isOverpayment — newTotal < paidAmount  → guest is owed a refund;
-        //                 Phase 8.6: shows method picker + Disburse Later / Now buttons.
+        //                 Phase 8.6: method picker + Cancel & Disburse Now button.
         const liveBooking   = bookings.find(b => b.id === m.bookingRef);
         const removedAmount = isEarly
           ? earlyNights * m.bookingRate   // only deducted nights
@@ -6475,8 +6475,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     {/* Disbursement method — required for "Cancel & Disburse Now" */}
                     <div>
                       <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
-                        Disbursement Method
-                        <span className="text-[11px] font-normal normal-case text-slate-400 ml-1">(required for instant disburse)</span>
+                        Disbursement Method <span className="text-rose-500">*</span>
                       </label>
                       <select
                         value={m.disbursementMethod}
@@ -6484,7 +6483,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                         disabled={m.submitting}
                         className="w-full border border-slate-200 rounded-lg px-3.5 py-2.5 text-[13.5px] text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 disabled:opacity-60"
                       >
-                        <option value="">Select method — or choose &quot;Disburse Later&quot; below</option>
+                        <option value="">Select method…</option>
                         {PAYMENT_METHODS.map(pm => (
                           <option key={pm} value={pm}>{PAYMENT_METHOD_LABELS[pm]}</option>
                         ))}
@@ -6538,26 +6537,16 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </button>
                 )}
 
-                {/* Overpayment path — two action buttons */}
+                {/* Overpayment path — disburse-now is the only action */}
                 {isOverpayment && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => submitCancelRoom("later")}
-                      disabled={m.submitting}
-                      className="px-4 py-2 text-[13px] font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      Disburse Later
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => submitCancelRoom("now")}
-                      disabled={m.submitting || !m.disbursementMethod}
-                      className="px-5 py-2 text-[13px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {m.submitting ? "Processing…" : `Cancel & Disburse ৳${overpayment.toLocaleString()} Now`}
-                    </button>
-                  </>
+                  <button
+                    type="button"
+                    onClick={() => submitCancelRoom("now")}
+                    disabled={m.submitting || !m.disbursementMethod}
+                    className="px-5 py-2 text-[13px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {m.submitting ? "Processing…" : `Cancel & Disburse ৳${overpayment.toLocaleString()} Now`}
+                  </button>
                 )}
               </div>
 
@@ -7316,8 +7305,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     {/* Disbursement method — required for "Cancel & Disburse Now" */}
                     <div>
                       <label className="block text-[12px] font-semibold text-slate-700 mb-1.5">
-                        Disbursement Method
-                        <span className="text-[11px] font-normal text-slate-400 ml-1">(required for instant disburse)</span>
+                        Disbursement Method <span className="text-rose-500">*</span>
                       </label>
                       <select
                         value={m.disbursementMethod}
@@ -7325,7 +7313,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                         disabled={m.submitting}
                         className="w-full border border-slate-200 rounded-xl px-3 py-2 text-[13px] text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 disabled:opacity-60"
                       >
-                        <option value="">Select method — or choose &quot;Disburse Later&quot; below</option>
+                        <option value="">Select method…</option>
                         {PAYMENT_METHODS.map(pm => (
                           <option key={pm} value={pm}>{PAYMENT_METHOD_LABELS[pm]}</option>
                         ))}
@@ -7376,26 +7364,16 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </button>
                 )}
 
-                {/* Overpayment path — two action buttons */}
+                {/* Overpayment path — disburse-now is the only action */}
                 {isOverpayment && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => submitCancelBooking("later")}
-                      disabled={m.submitting}
-                      className="px-4 py-2 text-[13px] font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      Disburse Later
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => submitCancelBooking("now")}
-                      disabled={m.submitting || !m.disbursementMethod}
-                      className="px-5 py-2 text-[13px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {m.submitting ? "Cancelling…" : `Cancel & Disburse ৳${overpayment.toLocaleString()} Now`}
-                    </button>
-                  </>
+                  <button
+                    type="button"
+                    onClick={() => submitCancelBooking("now")}
+                    disabled={m.submitting || !m.disbursementMethod}
+                    className="px-5 py-2 text-[13px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {m.submitting ? "Cancelling…" : `Cancel & Disburse ৳${overpayment.toLocaleString()} Now`}
+                  </button>
                 )}
               </div>
             </div>
