@@ -92,11 +92,47 @@ type BlockDialogSection = {
   rateEdited:  boolean;       // suppresses auto-fill when user has manually set rate
 };
 
-/** Live state of the "Add Room Block" dialog. null = dialog closed. */
+/** Live state of the "Add Room Block" dialog. null = dialog closed.
+ *  bookingContextRef is defined when opened from a booking drawer (add-to-existing mode);
+ *  undefined means new-booking mode (rooms pushed to form.rooms[]). */
 type BlockDialogData = {
   checkIn:  string;
   checkOut: string;
   sections: Record<string, BlockDialogSection>;   // keyed by category
+  bookingContextRef?: string;   // "BK-1041" → add-to-existing mode; undefined → new-booking mode
+};
+
+/** State for the Cancel Room modal. null = modal closed. */
+type CancelRoomModalState = {
+  bookingRoomId:     string;
+  bookingRef:        string;
+  roomNumber:        string;
+  currentStatus:     BookingRoomStatus;   // "Confirmed" or "Checked In"
+  paidAmount:        number;
+  scheduledCheckOut: string;   // ISO – for checked_out_early deduction preview
+  bookingRate:       number;
+  // Form
+  actualCheckOut:    string;   // ISO date input (checked_out_early only)
+  refundAmount:      string;   // string for <input>
+  refundEdited:      boolean;  // true once the user manually changes refundAmount
+  refundReason:      string;
+  submitting:        boolean;
+  error:             string | null;
+};
+
+/** State for the Extend Room modal. null = modal closed. */
+type ExtendRoomModalState = {
+  bookingRoomId:   string;
+  bookingRef:      string;
+  roomNumber:      string;
+  roomId:          string;    // used for local conflict preview
+  currentCheckOut: string;    // ISO
+  bookingRate:     number;
+  nights:          number;    // current nights (for preview)
+  // Form
+  newCheckOut:     string;    // ISO date input
+  submitting:      boolean;
+  error:           string | null;
 };
 
 type FormData = {
@@ -543,6 +579,9 @@ export default function BookingsClient({ initialRoom }: Props) {
     createBooking, changeBookingStatus,
     checkoutNormal, checkoutWithOverride, recordPayment,
     updateBooking,
+    addRoomToBooking: ctxAddRoomToBooking,
+    cancelBookingRoom: ctxCancelBookingRoom,
+    extendBookingRoom: ctxExtendBookingRoom,
   } = useHotel();
 
   // Real role from authenticated session
@@ -671,6 +710,10 @@ export default function BookingsClient({ initialRoom }: Props) {
   type DiffRow = { field: string; from: string; to: string };
   const [confirmDiffs,   setConfirmDiffs]   = useState<DiffRow[] | null>(null);
   const [pendingChanges, setPendingChanges] = useState<import("@/services/bookingsService").UpdateBookingPayload | null>(null);
+
+  // ── Mid-stay operation modals (Phase 7) ────────────────────
+  const [cancelRoomModal, setCancelRoomModal] = useState<CancelRoomModalState | null>(null);
+  const [extendRoomModal, setExtendRoomModal] = useState<ExtendRoomModalState | null>(null);
 
   // ── Derived (Create Booking form) ──────────────────────────
 
@@ -1105,7 +1148,7 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   // ── Block dialog open/confirm ────────────────────────────────
 
-  function openBlockDialog() {
+  function openBlockDialog(bookingContextRef?: string) {
     const lastBlock = blocks[blocks.length - 1];
     const defaultCheckIn  = lastBlock?.checkIn  ?? form.rooms[0]?.checkIn  ?? "";
     const defaultCheckOut = lastBlock?.checkOut ?? form.rooms[0]?.checkOut ?? "";
@@ -1120,12 +1163,28 @@ export default function BookingsClient({ initialRoom }: Props) {
         rateEdited:  false,
       };
     });
-    setBlockDialog({ checkIn: defaultCheckIn, checkOut: defaultCheckOut, sections });
+    setBlockDialog({ checkIn: defaultCheckIn, checkOut: defaultCheckOut, sections, bookingContextRef });
   }
 
   function confirmBlockDialog() {
     const bd = blockDialog;
     if (!bd) return;
+
+    // ── Add-to-existing mode (opened from booking drawer) ──────────────
+    // Call addRoomToBooking() for each selected room instead of pushing to form.rooms[].
+    if (bd.bookingContextRef) {
+      for (const [, section] of Object.entries(bd.sections)) {
+        if (section.selected.size === 0) continue;
+        const rate = parseFloat(section.bookingRate) || 0;
+        for (const roomNumber of section.selected) {
+          ctxAddRoomToBooking(bd.bookingContextRef, roomNumber, bd.checkIn, bd.checkOut, rate);
+        }
+      }
+      setBlockDialog(null);
+      return;
+    }
+
+    // ── New-booking mode (existing behaviour) ──────────────────────────
     const newBlocks: RoomBlock[] = [];
     const newRows: RoomFormRow[] = [];
     for (const [category, section] of Object.entries(bd.sections)) {
@@ -1239,6 +1298,118 @@ export default function BookingsClient({ initialRoom }: Props) {
         },
       };
     });
+  }
+
+  // ── Mid-stay modal handlers (Phase 7) ──────────────────────
+
+  function openCancelRoomModal(booking: Booking, room: BookingRoom) {
+    const rate      = room.bookingRate;
+    const nights    = room.nights;
+    const scheduled = room.checkOutISO ?? "";
+
+    let defaultActualCheckOut = "";
+    let suggestedRefund       = 0;
+
+    if (room.status === "Confirmed") {
+      // Pre-checkin cancel: full room contribution = rate × nights
+      suggestedRefund = rate * nights;
+    } else {
+      // Early departure: default actualCheckOut to today, compute unstayed nights
+      defaultActualCheckOut = TODAY;
+      const earlyNights = scheduled
+        ? Math.max(0, Math.floor(
+            (new Date(scheduled).getTime() - new Date(TODAY).getTime()) / 86_400_000
+          ))
+        : 0;
+      suggestedRefund = rate * earlyNights;
+    }
+
+    // Hard cap: suggested refund cannot exceed what the guest has actually paid
+    const capped = Math.min(suggestedRefund, booking.amountPaid);
+
+    setCancelRoomModal({
+      bookingRoomId:     room.id,
+      bookingRef:        booking.id,
+      roomNumber:        room.roomNumber,
+      currentStatus:     room.status,
+      paidAmount:        booking.amountPaid,
+      scheduledCheckOut: scheduled,
+      bookingRate:       rate,
+      actualCheckOut:    defaultActualCheckOut,
+      refundAmount:      capped > 0 ? String(capped) : "",
+      refundEdited:      false,
+      refundReason:      "",
+      submitting:        false,
+      error:             null,
+    });
+  }
+
+  function openExtendRoomModal(booking: Booking, room: BookingRoom) {
+    setExtendRoomModal({
+      bookingRoomId:   room.id,
+      bookingRef:      booking.id,
+      roomNumber:      room.roomNumber,
+      roomId:          room.roomId,
+      currentCheckOut: room.checkOutISO ?? "",
+      bookingRate:     room.bookingRate,
+      nights:          room.nights,
+      newCheckOut:     "",
+      submitting:      false,
+      error:           null,
+    });
+  }
+
+  async function submitCancelRoom() {
+    const m = cancelRoomModal;
+    if (!m) return;
+    setCancelRoomModal(prev => prev && { ...prev, submitting: true, error: null });
+
+    if (m.currentStatus === "Checked In" && !m.actualCheckOut) {
+      setCancelRoomModal(prev => prev && { ...prev, submitting: false, error: "Actual check-out date is required." });
+      return;
+    }
+    const refundAmt = parseFloat(m.refundAmount) || 0;
+    if (refundAmt > m.paidAmount) {
+      setCancelRoomModal(prev => prev && { ...prev, submitting: false, error: `Refund cannot exceed paid amount ৳${m.paidAmount.toLocaleString()}.` });
+      return;
+    }
+
+    try {
+      const uiStatus: "Cancelled" | "Checked Out Early" =
+        m.currentStatus === "Confirmed" ? "Cancelled" : "Checked Out Early";
+      ctxCancelBookingRoom(
+        m.bookingRoomId,
+        uiStatus,
+        m.currentStatus === "Checked In" ? m.actualCheckOut : undefined,
+        refundAmt > 0 ? refundAmt : undefined,
+        m.refundReason.trim() || undefined,
+      );
+      setCancelRoomModal(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setCancelRoomModal(prev => prev && { ...prev, submitting: false, error: msg });
+    }
+  }
+
+  async function submitExtendRoom() {
+    const m = extendRoomModal;
+    if (!m) return;
+    if (!m.newCheckOut) {
+      setExtendRoomModal(prev => prev && { ...prev, error: "New check-out date is required." });
+      return;
+    }
+    if (m.newCheckOut <= m.currentCheckOut) {
+      setExtendRoomModal(prev => prev && { ...prev, error: "New check-out must be after current check-out date." });
+      return;
+    }
+    setExtendRoomModal(prev => prev && { ...prev, submitting: true, error: null });
+    try {
+      ctxExtendBookingRoom(m.bookingRoomId, m.newCheckOut);
+      setExtendRoomModal(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setExtendRoomModal(prev => prev && { ...prev, submitting: false, error: msg });
+    }
   }
 
   // ── Additional guests handlers ──────────────────────────────
@@ -2289,7 +2460,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     </button>
                     <button
                       type="button"
-                      onClick={openBlockDialog}
+                      onClick={() => openBlockDialog()}
                       className="flex items-center gap-1.5 text-[12px] font-semibold text-violet-600 hover:text-violet-700 bg-violet-50 hover:bg-violet-100 border border-violet-200 px-3 py-1.5 rounded-lg transition-colors"
                     >
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3.5 h-3.5">
@@ -3400,18 +3571,63 @@ export default function BookingsClient({ initialRoom }: Props) {
                             <span className="text-[11.5px] text-slate-500">{b.rooms.length} rooms</span>
                             <span className="text-slate-300">·</span>
                             <span className="text-[11.5px] font-semibold text-slate-700">৳{b.totalAmount.toLocaleString()}</span>
+                            {/* + Add Room button (confirmed / checked-in bookings only) */}
+                            {(b.status === "Confirmed" || b.status === "Checked In") && (
+                              <button
+                                type="button"
+                                onClick={() => openBlockDialog(b.id)}
+                                className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold text-violet-600 hover:text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 px-2 py-0.5 rounded-md transition-colors"
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3"><path d="M12 5v14M5 12h14"/></svg>
+                                Add Room
+                              </button>
+                            )}
                           </div>
                           {/* Per-room list */}
                           <div className="divide-y divide-slate-100">
                             {b.rooms.map(r => {
                               const subtotal = r.bookingRate * r.nights;
+                              const isActive = r.status === "Confirmed" || r.status === "Checked In";
                               return (
-                                <div key={r.id} className="flex items-center gap-4 py-2">
+                                <div key={r.id} className="flex items-center gap-3 py-2 flex-wrap">
                                   <span className="text-[13px] font-semibold text-slate-800 w-20 shrink-0">Room {r.roomNumber}</span>
                                   <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">{r.roomCategory}</span>
+                                  {/* Per-room status badge */}
+                                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap ${
+                                    r.status === "Confirmed"          ? "bg-sky-50 text-sky-700 border border-sky-200" :
+                                    r.status === "Checked In"         ? "bg-emerald-50 text-emerald-700 border border-emerald-200" :
+                                    r.status === "Checked Out"        ? "bg-slate-100 text-slate-500 border border-slate-200" :
+                                    r.status === "Checked Out Early"  ? "bg-orange-50 text-orange-700 border border-orange-200" :
+                                    r.status === "Cancelled"          ? "bg-rose-50 text-rose-600 border border-rose-200" :
+                                    "bg-slate-50 text-slate-500 border border-slate-200"
+                                  }`}>{r.status}</span>
                                   <span className="text-[11.5px] text-slate-500 flex-1 whitespace-nowrap">{r.checkIn} → {r.checkOut} <span className="text-slate-400">· {r.nights} nt</span></span>
                                   <span className="text-[11px] text-slate-400 whitespace-nowrap">৳{r.bookingRate.toLocaleString()}/nt</span>
-                                  <span className="text-[12px] font-semibold text-slate-700 whitespace-nowrap w-24 text-right">৳{subtotal.toLocaleString()}</span>
+                                  <span className="text-[12px] font-semibold text-slate-700 whitespace-nowrap w-20 text-right">৳{subtotal.toLocaleString()}</span>
+                                  {/* Per-room action buttons */}
+                                  {isActive && (
+                                    <div className="flex items-center gap-1 ml-1">
+                                      {r.status === "Confirmed" && (
+                                        <button
+                                          type="button"
+                                          onClick={() => openCancelRoomModal(b, r)}
+                                          className="text-[10.5px] font-semibold text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                        >Cancel</button>
+                                      )}
+                                      {r.status === "Checked In" && (
+                                        <button
+                                          type="button"
+                                          onClick={() => openCancelRoomModal(b, r)}
+                                          className="text-[10.5px] font-semibold text-orange-600 hover:text-orange-800 bg-orange-50 hover:bg-orange-100 border border-orange-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                        >Early Out</button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => openExtendRoomModal(b, r)}
+                                        className="text-[10.5px] font-semibold text-violet-600 hover:text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                      >Extend</button>
+                                    </div>
+                                  )}
                                 </div>
                               );
                             })}
@@ -3787,18 +4003,60 @@ export default function BookingsClient({ initialRoom }: Props) {
                                 <span className="text-[11.5px] text-slate-500">{b.rooms.length} rooms</span>
                                 <span className="text-slate-300">·</span>
                                 <span className="text-[11.5px] font-semibold text-slate-700">৳{b.totalAmount.toLocaleString()}</span>
+                                {(b.status === "Confirmed" || b.status === "Checked In") && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openBlockDialog(b.id)}
+                                    className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold text-violet-600 hover:text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 px-2 py-0.5 rounded-md transition-colors"
+                                  >
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3"><path d="M12 5v14M5 12h14"/></svg>
+                                    Add Room
+                                  </button>
+                                )}
                               </div>
                               {/* Per-room list */}
                               <div className="divide-y divide-slate-100">
                                 {b.rooms.map(r => {
                                   const subtotal = r.bookingRate * r.nights;
+                                  const isActive = r.status === "Confirmed" || r.status === "Checked In";
                                   return (
-                                    <div key={r.id} className="flex items-center gap-4 py-2">
+                                    <div key={r.id} className="flex items-center gap-3 py-2 flex-wrap">
                                       <span className="text-[13px] font-semibold text-slate-800 w-20 shrink-0">Room {r.roomNumber}</span>
                                       <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">{r.roomCategory}</span>
+                                      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap ${
+                                        r.status === "Confirmed"          ? "bg-sky-50 text-sky-700 border border-sky-200" :
+                                        r.status === "Checked In"         ? "bg-emerald-50 text-emerald-700 border border-emerald-200" :
+                                        r.status === "Checked Out"        ? "bg-slate-100 text-slate-500 border border-slate-200" :
+                                        r.status === "Checked Out Early"  ? "bg-orange-50 text-orange-700 border border-orange-200" :
+                                        r.status === "Cancelled"          ? "bg-rose-50 text-rose-600 border border-rose-200" :
+                                        "bg-slate-50 text-slate-500 border border-slate-200"
+                                      }`}>{r.status}</span>
                                       <span className="text-[11.5px] text-slate-500 flex-1 whitespace-nowrap">{r.checkIn} → {r.checkOut} <span className="text-slate-400">· {r.nights} nt</span></span>
                                       <span className="text-[11px] text-slate-400 whitespace-nowrap">৳{r.bookingRate.toLocaleString()}/nt</span>
-                                      <span className="text-[12px] font-semibold text-slate-700 whitespace-nowrap w-24 text-right">৳{subtotal.toLocaleString()}</span>
+                                      <span className="text-[12px] font-semibold text-slate-700 whitespace-nowrap w-20 text-right">৳{subtotal.toLocaleString()}</span>
+                                      {isActive && (
+                                        <div className="flex items-center gap-1 ml-1">
+                                          {r.status === "Confirmed" && (
+                                            <button
+                                              type="button"
+                                              onClick={() => openCancelRoomModal(b, r)}
+                                              className="text-[10.5px] font-semibold text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                            >Cancel</button>
+                                          )}
+                                          {r.status === "Checked In" && (
+                                            <button
+                                              type="button"
+                                              onClick={() => openCancelRoomModal(b, r)}
+                                              className="text-[10.5px] font-semibold text-orange-600 hover:text-orange-800 bg-orange-50 hover:bg-orange-100 border border-orange-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                            >Early Out</button>
+                                          )}
+                                          <button
+                                            type="button"
+                                            onClick={() => openExtendRoomModal(b, r)}
+                                            className="text-[10.5px] font-semibold text-violet-600 hover:text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                          >Extend</button>
+                                        </div>
+                                      )}
                                     </div>
                                   );
                                 })}
@@ -5572,6 +5830,279 @@ export default function BookingsClient({ initialRoom }: Props) {
       })()}
 
       {/* ══════════════════════════════════════════════════════
+          CANCEL ROOM MODAL  (Phase 7)
+          Cancel a confirmed room, or record an early departure
+          for a checked-in room. Optional refund creation.
+      ══════════════════════════════════════════════════════ */}
+      {cancelRoomModal && (() => {
+        const m = cancelRoomModal;
+        const isEarly = m.currentStatus === "Checked In";
+        const earlyNights = isEarly && m.actualCheckOut && m.scheduledCheckOut
+          ? Math.max(0, Math.floor(
+              (new Date(m.scheduledCheckOut).getTime() - new Date(m.actualCheckOut).getTime()) / 86_400_000
+            ))
+          : 0;
+        const earlyDeduction = earlyNights * m.bookingRate;
+        const refundAmt = parseFloat(m.refundAmount) || 0;
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+            onClick={e => { if (e.target === e.currentTarget) setCancelRoomModal(null); }}
+          >
+            <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md flex flex-col">
+
+              {/* Header */}
+              <div className="flex items-start gap-3 px-6 pt-5 pb-4 border-b border-slate-100">
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 mt-0.5 ${isEarly ? "bg-orange-100" : "bg-rose-100"}`}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className={`w-4.5 h-4.5 ${isEarly ? "text-orange-600" : "text-rose-600"}`}>
+                    <path d="M18 6L6 18M6 6l12 12"/>
+                  </svg>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-[15px] font-bold text-slate-800">
+                    {isEarly ? "Early Departure" : "Cancel Room"}
+                  </h3>
+                  <p className="text-[12px] text-slate-400 mt-0.5">Room {m.roomNumber} · {m.bookingRef}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCancelRoomModal(null)}
+                  className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors flex-shrink-0"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4 h-4"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="px-6 py-5 space-y-4">
+
+                {/* Early departure: actual check-out date */}
+                {isEarly && (
+                  <div>
+                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                      Actual Check-out Date <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      type="date"
+                      max={m.scheduledCheckOut}
+                      value={m.actualCheckOut}
+                      onChange={e => {
+                        const newDate = e.target.value;
+                        setCancelRoomModal(prev => {
+                          if (!prev) return null;
+                          const patch: Partial<CancelRoomModalState> = { actualCheckOut: newDate, error: null };
+                          // Recompute suggested refund only if user hasn't manually edited it
+                          if (!prev.refundEdited && newDate && prev.scheduledCheckOut) {
+                            const earlyNights = Math.max(0, Math.floor(
+                              (new Date(prev.scheduledCheckOut).getTime() - new Date(newDate).getTime()) / 86_400_000
+                            ));
+                            const suggested = Math.min(earlyNights * prev.bookingRate, prev.paidAmount);
+                            patch.refundAmount = suggested > 0 ? String(suggested) : "";
+                          }
+                          return { ...prev, ...patch };
+                        });
+                      }}
+                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent transition"
+                    />
+                    {m.actualCheckOut && m.scheduledCheckOut && m.actualCheckOut < m.scheduledCheckOut && (
+                      <p className="text-[11.5px] text-orange-600 mt-1">
+                        {earlyNights} early night{earlyNights !== 1 ? "s" : ""} deducted · ৳{earlyDeduction.toLocaleString()} reduction
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Refund section */}
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                      Refund Amount (BDT)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      max={m.paidAmount}
+                      placeholder="0"
+                      value={m.refundAmount}
+                      onChange={e => setCancelRoomModal(prev => prev && { ...prev, refundAmount: e.target.value, refundEdited: true, error: null })}
+                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
+                    />
+                    <p className="text-[11px] text-slate-400 mt-1">Max ৳{m.paidAmount.toLocaleString()} (total paid). Leave blank for no refund.</p>
+                  </div>
+                  <div>
+                    <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                      Refund Reason
+                    </label>
+                    <textarea
+                      rows={2}
+                      placeholder="e.g. Guest cancelled due to change of plans"
+                      value={m.refundReason}
+                      onChange={e => setCancelRoomModal(prev => prev && { ...prev, refundReason: e.target.value })}
+                      className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition resize-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Refund preview strip */}
+                {refundAmt > 0 && (
+                  <div className="flex items-center gap-2 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg text-[12px]">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-emerald-600 flex-shrink-0"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
+                    <span className="text-emerald-700 font-medium">Refund of ৳{refundAmt.toLocaleString()} will be created (pending disbursement)</span>
+                  </div>
+                )}
+
+                {/* Error */}
+                {m.error && (
+                  <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 px-3 py-2 rounded-lg">{m.error}</p>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setCancelRoomModal(null)}
+                  className="px-4 py-2 text-[13px] font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors"
+                >
+                  Keep Room
+                </button>
+                <button
+                  type="button"
+                  onClick={submitCancelRoom}
+                  disabled={m.submitting}
+                  className={`px-5 py-2 text-[13px] font-semibold text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                    isEarly ? "bg-orange-500 hover:bg-orange-600" : "bg-rose-500 hover:bg-rose-600"
+                  }`}
+                >
+                  {m.submitting
+                    ? "Processing…"
+                    : isEarly
+                    ? "Confirm Early Departure"
+                    : "Cancel Room"}
+                </button>
+              </div>
+
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ══════════════════════════════════════════════════════
+          EXTEND ROOM MODAL  (Phase 7)
+          Extend a room's check-out date. Shows conflict warning
+          and live extra nights / extra cost preview.
+      ══════════════════════════════════════════════════════ */}
+      {extendRoomModal && (() => {
+        const m = extendRoomModal;
+        const extraNights = m.newCheckOut > m.currentCheckOut
+          ? Math.floor((new Date(m.newCheckOut).getTime() - new Date(m.currentCheckOut).getTime()) / 86_400_000)
+          : 0;
+        const extraCost = extraNights * m.bookingRate;
+        // Client-side conflict preview (server does authoritative check)
+        const conflictBooking = m.newCheckOut && m.currentCheckOut
+          ? findRoomConflict(bookings, m.roomNumber, m.currentCheckOut, m.newCheckOut)
+          : null;
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+            onClick={e => { if (e.target === e.currentTarget) setExtendRoomModal(null); }}
+          >
+            <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md flex flex-col">
+
+              {/* Header */}
+              <div className="flex items-start gap-3 px-6 pt-5 pb-4 border-b border-slate-100">
+                <div className="w-9 h-9 rounded-xl bg-violet-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4.5 h-4.5 text-violet-600">
+                    <rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M16 14h2M16 18h2"/>
+                  </svg>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-[15px] font-bold text-slate-800">Extend Stay</h3>
+                  <p className="text-[12px] text-slate-400 mt-0.5">Room {m.roomNumber} · {m.bookingRef}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setExtendRoomModal(null)}
+                  className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors flex-shrink-0"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4 h-4"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="px-6 py-5 space-y-4">
+
+                <div>
+                  <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                    Current Check-out
+                  </label>
+                  <p className="text-[13.5px] font-medium text-slate-700">{formatDate(m.currentCheckOut)}</p>
+                </div>
+
+                <div>
+                  <label className="block text-[11.5px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wide">
+                    New Check-out Date <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    min={m.currentCheckOut}
+                    value={m.newCheckOut}
+                    onChange={e => setExtendRoomModal(prev => prev && { ...prev, newCheckOut: e.target.value, error: null })}
+                    className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
+                  />
+                </div>
+
+                {/* Live preview */}
+                {extraNights > 0 && (
+                  <div className="flex items-center gap-2 px-3 py-2 bg-violet-50 border border-violet-200 rounded-lg text-[12px]">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-violet-600 flex-shrink-0"><path d="M12 5v14M5 12h14"/></svg>
+                    <span className="text-violet-700 font-medium">
+                      +{extraNights} night{extraNights !== 1 ? "s" : ""} · +৳{extraCost.toLocaleString()} added to booking total
+                    </span>
+                  </div>
+                )}
+
+                {/* Client-side conflict warning */}
+                {conflictBooking && (
+                  <div className="flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-[12px]">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                    <span className="text-amber-700">
+                      Room {m.roomNumber} appears to be booked during the extension window ({conflictBooking.id}). The server will block this if the conflict is real.
+                    </span>
+                  </div>
+                )}
+
+                {/* Error */}
+                {m.error && (
+                  <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 px-3 py-2 rounded-lg">{m.error}</p>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setExtendRoomModal(null)}
+                  className="px-4 py-2 text-[13px] font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={submitExtendRoom}
+                  disabled={m.submitting || !m.newCheckOut || m.newCheckOut <= m.currentCheckOut}
+                  className="px-5 py-2 text-[13px] font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {m.submitting ? "Extending…" : "Confirm Extension"}
+                </button>
+              </div>
+
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ══════════════════════════════════════════════════════
           ADD ROOM BLOCK DIALOG
           Fixed overlay; opens when blockDialog !== null.
           Multi-category accordion: one section per room category,
@@ -5603,9 +6134,13 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </svg>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <h3 className="text-[15px] font-bold text-slate-800">Add Room Block</h3>
+                  <h3 className="text-[15px] font-bold text-slate-800">
+                    {bd.bookingContextRef ? `Add Room — ${bd.bookingContextRef}` : "Add Room Block"}
+                  </h3>
                   <p className="text-[12px] text-slate-400 mt-0.5">
-                    Select rooms across categories — one block per category will be created
+                    {bd.bookingContextRef
+                      ? "Select rooms to add to this booking"
+                      : "Select rooms across categories — one block per category will be created"}
                   </p>
                 </div>
                 <button
@@ -5832,7 +6367,9 @@ export default function BookingsClient({ initialRoom }: Props) {
                     disabled={!isValid}
                     className="px-5 py-2 text-[13px] font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                   >
-                    Add {totalSelected > 0 ? `${totalSelected} Room${totalSelected !== 1 ? "s" : ""}` : "Block"}
+                    {bd.bookingContextRef
+                      ? `Add ${totalSelected > 0 ? `${totalSelected} Room${totalSelected !== 1 ? "s" : ""}` : "Room"}`
+                      : `Add ${totalSelected > 0 ? `${totalSelected} Room${totalSelected !== 1 ? "s" : ""}` : "Block"}`}
                   </button>
                 </div>
               </div>

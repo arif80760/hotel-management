@@ -114,6 +114,27 @@ type HotelContextType = {
     changes: UpdateBookingPayload,
     original: MockBooking,
   ) => void;
+  /** Append a new room to an existing confirmed/checked-in booking. */
+  addRoomToBooking: (
+    bookingRef:  string,
+    roomNumber:  string,
+    checkIn:     string,
+    checkOut:    string,
+    bookingRate: number,
+  ) => void;
+  /** Cancel a confirmed room or mark a checked-in room as early departure. */
+  cancelBookingRoom: (
+    bookingRoomId:  string,
+    status:         "Cancelled" | "Checked Out Early",
+    actualCheckOut?: string,
+    refundAmount?:   number,
+    refundReason?:   string,
+  ) => void;
+  /** Extend a room's check-out date past its current scheduled date. */
+  extendBookingRoom: (
+    bookingRoomId: string,
+    newCheckOut:   string,
+  ) => void;
 };
 
 const HotelContext = createContext<HotelContextType | null>(null);
@@ -646,6 +667,201 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     });
   }
 
+  // ── Mid-stay operations (Phase 7) ──────────────────────────
+
+  function addRoomToBooking(
+    bookingRef:  string,
+    roomNumber:  string,
+    checkIn:     string,
+    checkOut:    string,
+    bookingRate: number,
+  ) {
+    const target = bookings.find(b => b.id === bookingRef);
+    if (!target) return;
+
+    const hotelRoom = rooms.find(r => r.roomNumber === roomNumber);
+    const prevRoomStatus = hotelRoom?.status;
+
+    // Compute nights inline (no import needed)
+    const nights = Math.max(
+      0,
+      Math.floor((new Date(checkOut).getTime() - new Date(checkIn).getTime()) / 86_400_000),
+    );
+
+    // Optimistic: append a synthetic BookingRoom so the drawer updates immediately
+    const optimisticRoom: BookingRoom = {
+      id:           `optimistic-${crypto.randomUUID()}`,
+      bookingId:    target.id,
+      roomId:       hotelRoom?.id ?? "",
+      roomNumber,
+      roomCategory: hotelRoom?.category ?? "",
+      checkIn:      formatDateDisplay(checkIn),
+      checkOut:     formatDateDisplay(checkOut),
+      checkInISO:   checkIn,
+      checkOutISO:  checkOut,
+      nights,
+      bookingRate,
+      status:       "Confirmed" as BookingRoomStatus,
+      earlyNightsDeducted:  0,
+      earlyDeductionAmount: 0,
+    };
+    const newTotal = target.totalAmount + bookingRate * nights;
+
+    setBookings(prev =>
+      prev.map(b => b.id !== bookingRef ? b : {
+        ...b,
+        rooms:       [...b.rooms, optimisticRoom],
+        totalAmount: newTotal,
+        payment:     bookingsService.derivePaymentStatus(newTotal, b.amountPaid),
+      })
+    );
+    setRooms(prev =>
+      prev.map(r => r.roomNumber === roomNumber ? { ...r, status: "Reserved" as RoomStatus } : r)
+    );
+
+    bookingsService.addRoomToBooking(bookingRef, roomNumber, checkIn, checkOut, bookingRate)
+      .then(() => bookingsService.getBookingByRef(bookingRef))
+      .then(updated => {
+        if (!updated) return;
+        setBookings(prev => prev.map(b => b.id === bookingRef ? updated : b));
+      })
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[HotelContext addRoomToBooking] failed — rolling back:", msg);
+        setBookings(prev => prev.map(b => b.id === bookingRef ? target : b));
+        if (hotelRoom && prevRoomStatus !== undefined) {
+          setRooms(prev =>
+            prev.map(r => r.roomNumber === roomNumber ? { ...r, status: prevRoomStatus } : r)
+          );
+        }
+      });
+  }
+
+  function cancelBookingRoom(
+    bookingRoomId:   string,
+    status:          "Cancelled" | "Checked Out Early",
+    actualCheckOut?: string,
+    refundAmount?:   number,
+    refundReason?:   string,
+  ) {
+    const target = bookings.find(b => b.rooms.some(r => r.id === bookingRoomId));
+    if (!target) return;
+    const prevBookings = bookings;
+
+    const dbStatus = status === "Cancelled" ? "cancelled" : "checked_out_early";
+
+    // Optimistic: update the matching room's status
+    const updatedRooms = target.rooms.map(r => {
+      if (r.id !== bookingRoomId) return r;
+      const patch: Partial<BookingRoom> = { status };
+      if (actualCheckOut) {
+        const earlyNights = Math.max(
+          0,
+          Math.floor((new Date(r.checkOutISO ?? "").getTime() - new Date(actualCheckOut).getTime()) / 86_400_000),
+        );
+        patch.checkOutISO  = actualCheckOut;
+        patch.checkOut     = formatDateDisplay(actualCheckOut);
+        patch.nights       = r.nights - earlyNights;
+        patch.earlyNightsDeducted  = earlyNights;
+        patch.earlyDeductionAmount = earlyNights * r.bookingRate;
+      }
+      return { ...r, ...patch };
+    });
+
+    // Recompute total excluding cancelled rooms
+    const newTotal = updatedRooms
+      .filter(r => r.status !== "Cancelled")
+      .reduce((s, r) => s + r.bookingRate * r.nights, 0);
+
+    // Derive booking-level status (4-rule per docs/multi-room-design.md § 5)
+    const allCancelled  = updatedRooms.every(r => r.status === "Cancelled");
+    const anyCheckedIn  = updatedRooms.some(r => r.status === "Checked In");
+    const noneActive    = updatedRooms.every(r => r.status !== "Confirmed" && r.status !== "Checked In");
+    const newBookingStatus: BookingStatus =
+      allCancelled   ? "Cancelled"   :
+      anyCheckedIn   ? "Checked In"  :
+      noneActive     ? "Checked Out" :
+                       "Confirmed";
+
+    setBookings(prev =>
+      prev.map(b => b.id !== target.id ? b : {
+        ...b,
+        rooms:       updatedRooms,
+        totalAmount: newTotal,
+        payment:     bookingsService.derivePaymentStatus(newTotal, b.amountPaid),
+        status:      newBookingStatus,
+      })
+    );
+
+    bookingsService.cancelBookingRoom(
+      bookingRoomId,
+      dbStatus as "cancelled" | "checked_out_early",
+      actualCheckOut,
+      refundAmount   ?? null,
+      refundReason   ?? null,
+      user?.id       ?? null,
+    )
+      .then(() => bookingsService.getBookingByRef(target.id))
+      .then(updated => {
+        if (!updated) return;
+        setBookings(prev => prev.map(b => b.id === target.id ? updated : b));
+      })
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[HotelContext cancelBookingRoom] failed — rolling back:", msg);
+        setBookings(prevBookings);
+      });
+  }
+
+  function extendBookingRoom(
+    bookingRoomId: string,
+    newCheckOut:   string,
+  ) {
+    const target = bookings.find(b => b.rooms.some(r => r.id === bookingRoomId));
+    if (!target) return;
+    const prevBookings = bookings;
+
+    // Optimistic: extend the matching room
+    const updatedRooms = target.rooms.map(r => {
+      if (r.id !== bookingRoomId) return r;
+      const extraNights = Math.max(
+        0,
+        Math.floor((new Date(newCheckOut).getTime() - new Date(r.checkOutISO ?? "").getTime()) / 86_400_000),
+      );
+      return {
+        ...r,
+        checkOutISO: newCheckOut,
+        checkOut:    formatDateDisplay(newCheckOut),
+        nights:      r.nights + extraNights,
+      };
+    });
+
+    const newTotal = updatedRooms
+      .filter(r => r.status !== "Cancelled")
+      .reduce((s, r) => s + r.bookingRate * r.nights, 0);
+
+    setBookings(prev =>
+      prev.map(b => b.id !== target.id ? b : {
+        ...b,
+        rooms:       updatedRooms,
+        totalAmount: newTotal,
+        payment:     bookingsService.derivePaymentStatus(newTotal, b.amountPaid),
+      })
+    );
+
+    bookingsService.extendBookingRoom(bookingRoomId, newCheckOut)
+      .then(() => bookingsService.getBookingByRef(target.id))
+      .then(updated => {
+        if (!updated) return;
+        setBookings(prev => prev.map(b => b.id === target.id ? updated : b));
+      })
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[HotelContext extendBookingRoom] failed — rolling back:", msg);
+        setBookings(prevBookings);
+      });
+  }
+
   // ── Room actions ────────────────────────────────────────────
 
   function addRoom(room: MockRoom) {
@@ -725,6 +941,9 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       checkoutNormal,
       checkoutWithOverride,
       updateBooking,
+      addRoomToBooking,
+      cancelBookingRoom,
+      extendBookingRoom,
       addRoom,
       updateRoom,
       deleteRoom,

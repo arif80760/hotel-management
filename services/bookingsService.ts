@@ -1859,3 +1859,178 @@ export async function getPaymentsByBookingRef(
     createdAt: row.created_at as string,
   }));
 }
+
+// ─────────────────────────────────────────────────────────────
+// MID-STAY OPERATIONS  (Phase 7)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Adds a room to an existing booking by calling the add_room_to_booking RPC.
+ *
+ * Always passes p_room_status = 'confirmed' — the parent booking's status
+ * is not cascaded to new rooms; the front-end uses checkin_booking_atomic
+ * for whole-booking check-in transitions.
+ *
+ * Resolves booking_ref → booking UUID and room_number → room UUID + category
+ * before calling the RPC.
+ *
+ * @param bookingRef  Display ref, e.g. "BK-1041"
+ * @param roomNumber  Display number, e.g. "204"
+ * @param checkIn     ISO date "YYYY-MM-DD"
+ * @param checkOut    ISO date "YYYY-MM-DD"
+ * @param bookingRate Negotiated nightly rate in BDT
+ */
+export async function addRoomToBooking(
+  bookingRef:  string,
+  roomNumber:  string,
+  checkIn:     string,
+  checkOut:    string,
+  bookingRate: number,
+): Promise<void> {
+  // Step 1: resolve booking_ref → UUID
+  const { data: bookingRow, error: bookingErr } = await supabase
+    .from("bookings")
+    .select("id")
+    .eq("booking_ref", bookingRef)
+    .single();
+
+  if (bookingErr || !bookingRow) {
+    throw new Error(
+      `[addRoomToBooking] Booking ${bookingRef} not found — ${bookingErr?.message ?? "no row"}`,
+    );
+  }
+
+  // Step 2: resolve room_number → UUID + category
+  const { data: roomRow, error: roomErr } = await supabase
+    .from("rooms")
+    .select("id, category")
+    .eq("room_number", roomNumber)
+    .maybeSingle();
+
+  if (roomErr) {
+    throw new Error(
+      `[addRoomToBooking] Failed to look up room ${roomNumber} — ${roomErr.message}`,
+    );
+  }
+  if (!roomRow) {
+    throw new Error(
+      `[addRoomToBooking] Room ${roomNumber} does not exist in the rooms catalog.`,
+    );
+  }
+
+  // Step 3: compute nights
+  const nights = Math.max(
+    0,
+    Math.floor(
+      (new Date(checkOut).getTime() - new Date(checkIn).getTime()) / 86_400_000,
+    ),
+  );
+  if (nights === 0) {
+    throw new Error(
+      `[addRoomToBooking] check_in (${checkIn}) and check_out (${checkOut}) produce 0 nights.`,
+    );
+  }
+
+  // Step 4: call add_room_to_booking RPC
+  // p_room_status is always 'confirmed' — new rooms start in confirmed state
+  // regardless of the parent booking status.
+  const { error: rpcErr } = await supabase.rpc("add_room_to_booking", {
+    p_booking_id:     bookingRow.id,
+    p_room_id:        roomRow.id,
+    p_check_in_date:  checkIn,
+    p_check_out_date: checkOut,
+    p_nights:         nights,
+    p_category:       roomRow.category,   // lowercase enum stored in DB ("deluxe", etc.)
+    p_rate:           bookingRate,
+    p_room_status:    "confirmed",
+  });
+
+  if (rpcErr) {
+    console.error("[addRoomToBooking] RPC failed:");
+    console.error("  bookingRef :", bookingRef);
+    console.error("  roomNumber :", roomNumber);
+    console.error("  message    :", rpcErr.message);
+    console.error("  code       :", rpcErr.code);
+    throw new Error(
+      `[addRoomToBooking] ${rpcErr.message}` +
+      (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
+    );
+  }
+}
+
+/**
+ * Cancels one booking_rooms row (confirmed → cancelled) or marks it as an
+ * early departure (checked_in → checked_out_early).
+ *
+ * Optionally creates a refund record if refundAmount is provided and > 0.
+ *
+ * @param bookingRoomId  booking_rooms.id UUID
+ * @param status         'cancelled' | 'checked_out_early'
+ * @param actualCheckOut ISO date — required when status = 'checked_out_early'
+ * @param refundAmount   BDT amount to refund; null / undefined = no refund row
+ * @param refundReason   Free-text reason for the refund record
+ * @param refundCreatedBy auth.users UUID of the operator processing the refund
+ * @returns { refundId: string | null }  — refund UUID if created, else null
+ */
+export async function cancelBookingRoom(
+  bookingRoomId:   string,
+  status:          "cancelled" | "checked_out_early",
+  actualCheckOut?: string,
+  refundAmount?:   number | null,
+  refundReason?:   string | null,
+  refundCreatedBy?: string | null,
+): Promise<{ refundId: string | null }> {
+  const { data, error: rpcErr } = await supabase.rpc("cancel_booking_room", {
+    p_booking_room_id:   bookingRoomId,
+    p_status:            status,
+    p_actual_check_out:  actualCheckOut  ?? null,
+    p_refund_amount:     refundAmount    ?? null,
+    p_refund_reason:     refundReason    ?? null,
+    p_refund_created_by: refundCreatedBy ?? null,
+  });
+
+  if (rpcErr) {
+    console.error("[cancelBookingRoom] RPC failed:");
+    console.error("  bookingRoomId:", bookingRoomId);
+    console.error("  status       :", status);
+    console.error("  message      :", rpcErr.message);
+    console.error("  code         :", rpcErr.code);
+    throw new Error(
+      `[cancelBookingRoom] ${rpcErr.message}` +
+      (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
+    );
+  }
+
+  // data is the UUID returned by the RPC (or null if no refund was created)
+  return { refundId: (data as string | null) ?? null };
+}
+
+/**
+ * Extends a booking_rooms row's check_out_date to p_new_check_out.
+ * The server-side RPC validates that the extension window is conflict-free
+ * and that p_new_check_out > current check_out_date.
+ *
+ * @param bookingRoomId  booking_rooms.id UUID
+ * @param newCheckOut    ISO date "YYYY-MM-DD" — must be after current check_out_date
+ */
+export async function extendBookingRoom(
+  bookingRoomId: string,
+  newCheckOut:   string,
+): Promise<void> {
+  const { error: rpcErr } = await supabase.rpc("extend_booking_room", {
+    p_booking_room_id: bookingRoomId,
+    p_new_check_out:   newCheckOut,
+  });
+
+  if (rpcErr) {
+    console.error("[extendBookingRoom] RPC failed:");
+    console.error("  bookingRoomId:", bookingRoomId);
+    console.error("  newCheckOut  :", newCheckOut);
+    console.error("  message      :", rpcErr.message);
+    console.error("  code         :", rpcErr.code);
+    throw new Error(
+      `[extendBookingRoom] ${rpcErr.message}` +
+      (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
+    );
+  }
+}
