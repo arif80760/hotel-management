@@ -151,6 +151,11 @@ export default async function InvoicePage({ params }: Props) {
               const isCancelled = room.status === "Cancelled";
               // Per-room checkout: actual departure date if set, else scheduled checkout.
               const roomCheckoutISO = room.actualCheckoutDate ?? room.checkOutISO;
+              // Compute nights from dates — stored nights column may drift from check_in/check_out.
+              const computedNights = Math.round(
+                (new Date(room.checkOutISO).getTime() - new Date(room.checkInISO).getTime())
+                / 86400000
+              );
               return (
                 <div key={room.id} className={i > 0 ? "mt-2" : ""}>
                   <p className={`text-[13px] font-semibold ${isCancelled ? "line-through text-slate-400" : "text-slate-900"}`}>
@@ -162,7 +167,7 @@ export default async function InvoicePage({ params }: Props) {
                     {roomCheckoutISO ? formatInvoiceDate(roomCheckoutISO) : room.checkOut}
                   </p>
                   <p className={`text-[11px] ${isCancelled ? "line-through text-slate-400" : "text-slate-600"}`}>
-                    {room.nights} {room.nights === 1 ? "night" : "nights"}
+                    {computedNights} {computedNights === 1 ? "night" : "nights"}
                   </p>
                 </div>
               );
@@ -187,7 +192,12 @@ export default async function InvoicePage({ params }: Props) {
             {/* Room accommodation — one row per room, sorted by room_number */}
             {sortedRooms.map(room => {
               const isCancelled = room.status === "Cancelled";
-              const roomSubtotal = room.bookingRate * room.nights;
+              // Compute nights from dates — stored nights column may drift from check_in/check_out.
+              const computedNights = Math.round(
+                (new Date(room.checkOutISO).getTime() - new Date(room.checkInISO).getTime())
+                / 86400000
+              );
+              const roomSubtotal = room.bookingRate * computedNights;
               return (
                 <Fragment key={room.id}>
                   <tr className="border-b border-slate-100">
@@ -197,7 +207,7 @@ export default async function InvoicePage({ params }: Props) {
                       </p>
                       <p className={`text-[11px] mt-0.5 ${isCancelled ? "line-through text-slate-400" : "text-slate-500"}`}>
                         Room {room.roomNumber} ({room.roomCategory})
-                        {" · "}{room.nights} {room.nights === 1 ? "night" : "nights"}
+                        {" · "}{computedNights} {computedNights === 1 ? "night" : "nights"}
                         {" × "}{formatTaka(room.bookingRate)}
                       </p>
                     </td>
