@@ -65,23 +65,25 @@ function statusBadge(s: BookingStatus): string {
 
 function paymentBadge(p: PaymentStatus): string {
   const m: Record<PaymentStatus, string> = {
-    Paid:    "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
-    Partial: "bg-blue-50 text-blue-700 ring-1 ring-blue-200",
-    Unpaid:  "bg-red-50 text-red-600 ring-1 ring-red-200",
+    Paid:      "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
+    Partial:   "bg-blue-50 text-blue-700 ring-1 ring-blue-200",
+    Unpaid:    "bg-red-50 text-red-600 ring-1 ring-red-200",
+    Cancelled: "bg-slate-100 text-slate-500 ring-1 ring-slate-200",
   };
   return m[p];
 }
 
 function paymentDot(p: PaymentStatus): string {
   const m: Record<PaymentStatus, string> = {
-    Paid: "bg-emerald-500", Partial: "bg-blue-500", Unpaid: "bg-red-400",
+    Paid: "bg-emerald-500", Partial: "bg-blue-500", Unpaid: "bg-red-400", Cancelled: "bg-slate-400",
   };
   return m[p];
 }
 
-function derivePaymentStatus(total: number, paid: number): PaymentStatus {
-  if (paid <= 0)        return "Unpaid";
-  if (paid >= total)    return "Paid";
+function derivePaymentStatus(total: number, paid: number, status: BookingStatus): PaymentStatus {
+  if (status === "Cancelled") return "Cancelled";
+  if (paid <= 0)              return "Unpaid";
+  if (paid >= total)          return "Paid";
   return "Partial";
 }
 
@@ -1042,7 +1044,7 @@ export default function FrontDeskClient() {
         const finalTotal   = checkoutConfirm.totalAmount + extraChargeAmt;
         const finalPayable = finalTotal - earlyDeductionAmt - moreDiscountAmtNum - liveAmountPaid;
         const canOverride  = isAdmin || role === "Admin";
-        const payStatus    = derivePaymentStatus(checkoutConfirm.totalAmount, liveAmountPaid);
+        const payStatus    = derivePaymentStatus(checkoutConfirm.totalAmount, liveAmountPaid, checkoutConfirm.status);
         return (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
@@ -1690,11 +1692,11 @@ export default function FrontDeskClient() {
                       ৳{(payModal.amountPaid + parseFloat(payAmount)).toLocaleString()} paid
                     </p>
                     <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
-                      derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount)) === "Paid"
+                      derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status) === "Paid"
                         ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
                         : "bg-blue-50 text-blue-700 ring-1 ring-blue-200"
                     }`}>
-                      {derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount))}
+                      {derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status)}
                     </span>
                   </div>
                 )}

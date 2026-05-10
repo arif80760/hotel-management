@@ -298,27 +298,29 @@ function statusBadge(s: BookingStatus): string {
 
 function paymentBadge(p: PaymentStatus): string {
   const m: Record<PaymentStatus, string> = {
-    Paid:    "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
-    Partial: "bg-blue-50    text-blue-700    ring-1 ring-blue-200",
-    Unpaid:  "bg-red-50     text-red-600     ring-1 ring-red-200",
+    Paid:      "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
+    Partial:   "bg-blue-50    text-blue-700    ring-1 ring-blue-200",
+    Unpaid:    "bg-red-50     text-red-600     ring-1 ring-red-200",
+    Cancelled: "bg-slate-100  text-slate-500   ring-1 ring-slate-200",
   };
   return m[p];
 }
 function paymentDot(p: PaymentStatus): string {
   const m: Record<PaymentStatus, string> = {
-    Paid: "bg-emerald-500", Partial: "bg-blue-500", Unpaid: "bg-red-400",
+    Paid: "bg-emerald-500", Partial: "bg-blue-500", Unpaid: "bg-red-400", Cancelled: "bg-slate-400",
   };
   return m[p];
 }
 function paymentText(p: PaymentStatus): string {
   const m: Record<PaymentStatus, string> = {
-    Paid: "text-emerald-600", Partial: "text-blue-600", Unpaid: "text-red-500",
+    Paid: "text-emerald-600", Partial: "text-blue-600", Unpaid: "text-red-500", Cancelled: "text-slate-400",
   };
   return m[p];
 }
 
-/** Derives PaymentStatus purely from two numbers — single source of truth. */
-function derivePaymentStatus(totalAmount: number, amountPaid: number): PaymentStatus {
+/** Derives PaymentStatus from booking status and raw totals — single source of truth. */
+function derivePaymentStatus(totalAmount: number, amountPaid: number, status: BookingStatus): PaymentStatus {
+  if (status === "Cancelled")        return "Cancelled";
   if (amountPaid <= 0)               return "Unpaid";
   if (amountPaid >= totalAmount)     return "Paid";
   return "Partial";
@@ -834,7 +836,7 @@ export default function BookingsClient({ initialRoom }: Props) {
   // Payment derived values for the Create Booking form
   const amountPaidNum   = parseFloat(form.amountPaid) || 0;
   const dueAmount       = Math.max(0, grandTotal - amountPaidNum);
-  const formPayStatus   = derivePaymentStatus(grandTotal, amountPaidNum);
+  const formPayStatus   = derivePaymentStatus(grandTotal, amountPaidNum, form.status);
 
   const tabFilteredBookings =
     activeFilter === "All" ? bookings : bookings.filter(b => b.status === activeFilter);
@@ -4398,7 +4400,7 @@ export default function BookingsClient({ initialRoom }: Props) {
         );
         const finalTotal   = checkoutConfirm.totalAmount + extraChargeAmt;
         const finalPayable = finalTotal - earlyDeductionAmt - moreDiscountAmtNum - liveAmountPaid;
-        const payStatus    = derivePaymentStatus(checkoutConfirm.totalAmount, liveAmountPaid);
+        const payStatus    = derivePaymentStatus(checkoutConfirm.totalAmount, liveAmountPaid, checkoutConfirm.status);
         return (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
@@ -5348,12 +5350,12 @@ export default function BookingsClient({ initialRoom }: Props) {
                       ৳{(payModal.amountPaid + parseFloat(payAmount)).toLocaleString()} paid
                     </p>
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                      paymentBadge(derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount)))
+                      paymentBadge(derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status))
                     }`}>
                       <span className={`w-1.5 h-1.5 rounded-full ${
-                        paymentDot(derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount)))
+                        paymentDot(derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status))
                       }`} />
-                      {derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount))}
+                      {derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status)}
                     </span>
                   </div>
                 )}

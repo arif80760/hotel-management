@@ -34,12 +34,12 @@ export type BookingStatus =
 
 /**
  * Payment state for a booking.
- *   Unpaid  — no money collected yet
- *   Partial — deposit taken, balance outstanding
- *   Paid    — fully settled
- * TODO: When billing module is added, derive this from payments table.
+ *   Unpaid    — no money collected yet
+ *   Partial   — deposit taken, balance outstanding
+ *   Paid      — fully settled
+ *   Cancelled — booking is cancelled; payment state is not actionable
  */
-export type PaymentStatus = "Paid" | "Partial" | "Unpaid";
+export type PaymentStatus = "Paid" | "Partial" | "Unpaid" | "Cancelled";
 
 /**
  * Payment method — mirrors the PostgreSQL payment_method enum.

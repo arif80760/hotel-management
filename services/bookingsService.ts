@@ -138,9 +138,10 @@ const BOOKING_STATUS_TO_DB: Record<BookingStatus, string> = {
 };
 
 const DB_TO_PAYMENT_STATUS: Record<string, PaymentStatus> = {
-  unpaid:  "Unpaid",
-  partial: "Partial",
-  paid:    "Paid",
+  unpaid:     "Unpaid",
+  partial:    "Partial",
+  paid:       "Paid",
+  cancelled:  "Cancelled",
 };
 
 const DB_TO_BOOKING_ROOM_STATUS: Record<string, BookingRoomStatus> = {
@@ -354,13 +355,16 @@ export function bookingToRoomStatus(
 }
 
 /**
- * Derive PaymentStatus from raw totals (pure, no DB).
+ * Derive PaymentStatus from booking status and raw totals (pure, no DB).
  * Mirrors the Postgres trigger fn_sync_payment_status.
+ * Cancelled bookings always return "Cancelled" regardless of amounts.
  */
 export function derivePaymentStatus(
   totalAmount: number,
-  amountPaid: number
+  amountPaid: number,
+  status: BookingStatus
 ): PaymentStatus {
+  if (status === "Cancelled")    return "Cancelled";
   if (amountPaid <= 0)           return "Unpaid";
   if (amountPaid >= totalAmount) return "Paid";
   return "Partial";
@@ -1130,11 +1134,13 @@ export async function updateBooking(
   // ── Step 6 — Manually sync payment_status when total_amount changes ───────
   // fn_sync_payment_status fires on paid_amount changes only (payments INSERT chain).
   // Changing total_amount directly does NOT re-trigger it — must derive manually.
-  // derivePaymentStatus returns Title Case ("Unpaid"/"Partial"/"Paid") so .toLowerCase()
-  // is needed to match the DB's lowercase payment_status enum.
+  // derivePaymentStatus returns Title Case ("Unpaid"/"Partial"/"Paid"/"Cancelled")
+  // so .toLowerCase() is needed to match the DB's lowercase payment_status enum.
   if (bookingUpdate.total_amount !== undefined) {
     const newPmtStatus = derivePaymentStatus(
-      bookingUpdate.total_amount as number, current.paid_amount
+      bookingUpdate.total_amount as number,
+      current.paid_amount,
+      DB_TO_BOOKING_STATUS[current.status] ?? "Confirmed"
     );
     bookingUpdate.payment_status = newPmtStatus.toLowerCase();
     console.log("[updateBooking] Step 6 — total_amount →", bookingUpdate.total_amount,
