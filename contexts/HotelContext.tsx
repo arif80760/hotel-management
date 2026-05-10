@@ -151,7 +151,7 @@ type HotelContextType = {
     refundAmount: number,
     method:       PaymentMethod,
     notes:        string | null,
-  ) => void;
+  ) => Promise<void>;
   /** Mark a pending refund as denied. No booking-level state change. */
   denyRefund: (refundId: string, reason: string) => Promise<void>;
   /**
@@ -967,9 +967,9 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     refundAmount: number,
     method:       PaymentMethod,
     notes:        string | null,
-  ) {
+  ): Promise<void> {
     const target = bookings.find(b => b.id === bookingRef);
-    if (!target) return;
+    if (!target) return Promise.resolve();
     const prevBookings = bookings;
 
     // Optimistic: decrement paid_amount by the disbursed refund amount.
@@ -982,7 +982,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       })
     );
 
-    bookingsService.disburseRefund(refundId, method, user?.id ?? "", notes)
+    return bookingsService.disburseRefund(refundId, method, user?.id ?? "", notes)
       .then(() => bookingsService.getBookingByRef(bookingRef))
       .then(updated => {
         if (updated) setBookings(prev => prev.map(b => b.id === bookingRef ? updated : b));
@@ -991,6 +991,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error("[HotelContext disburseRefund] failed — rolling back:", msg);
         setBookings(prevBookings);
+        throw err;
       });
   }
 

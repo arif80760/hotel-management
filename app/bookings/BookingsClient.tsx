@@ -1507,7 +1507,7 @@ export default function BookingsClient({ initialRoom }: Props) {
   /** Re-fetch Timeline payment + refund data after a refund action. */
   function refreshTlData(bookingRef: string) {
     setTlLoading(true);
-    Promise.all([
+    return Promise.all([
       bookingsService.listRefunds(bookingRef),
       bookingsService.listPayments(bookingRef),
     ]).then(([refunds, payments]) => {
@@ -1518,16 +1518,35 @@ export default function BookingsClient({ initialRoom }: Props) {
     }).finally(() => setTlLoading(false));
   }
 
-  function submitDisburse() {
+  async function submitDisburse() {
     const m = disburseModal;
     if (!m) return;
     if (!m.method) {
       setDisburseModal(prev => prev && { ...prev, error: "Disbursement method is required." });
       return;
     }
-    ctxDisburseRefund(m.bookingRef, m.refundId, m.amount, m.method, m.notes.trim() || null);
-    setDisburseModal(null);
-    refreshTlData(m.bookingRef);
+
+    setDisburseModal(prev => prev && { ...prev, submitting: true, error: null });
+
+    try {
+      // 1. Await RPC + context's internal booking update.
+      await ctxDisburseRefund(m.bookingRef, m.refundId, m.amount, m.method, m.notes.trim() || null);
+
+      // 2. Re-fetch refunds + payment history rows so the Timeline lists are current.
+      await refreshTlData(m.bookingRef);
+
+      // 3. Sync the Payment Summary tiles. timelineModal is a snapshot set at open
+      //    time — it never auto-updates. We need a fresh getBookingByRef call here
+      //    because the closured `bookings` value is stale after React re-renders.
+      const fresh = await bookingsService.getBookingByRef(m.bookingRef);
+      if (fresh) setTimelineModal(fresh);
+
+      // 4. Close last — operator sees updated totals before the modal disappears.
+      setDisburseModal(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Disbursement failed — please try again.";
+      setDisburseModal(prev => prev && { ...prev, submitting: false, error: msg });
+    }
   }
 
   async function submitDeny() {
