@@ -9,6 +9,7 @@
 // Server component. Fetches booking only — no payment data needed.
 // AppShell's isStandaloneDocument regex already covers this route.
 
+import { Fragment }                       from "react";
 import { notFound }                      from "next/navigation";
 import { getBookingByRef,
          getPaymentsByBookingRef }        from "@/services/bookingsService";
@@ -44,8 +45,14 @@ export default async function ReservationPage({ params }: Props) {
     ? formatInvoiceDate(booking.createdAt)
     : formatInvoiceDate(new Date());    // fallback: today
 
-  const roomRate = booking.bookingRate
-    ?? (booking.nights > 0 ? Math.round(booking.totalAmount / booking.nights) : 0);
+  // Rooms sorted by room_number ascending (numeric where possible, lexicographic fallback).
+  // booking.rooms[] has no guaranteed DB order — sort for deterministic rendering.
+  const sortedRooms = [...booking.rooms].sort((a, b) => {
+    const na = parseInt(a.roomNumber, 10);
+    const nb = parseInt(b.roomNumber, 10);
+    if (!isNaN(na) && !isNaN(nb)) return na - nb;
+    return a.roomNumber.localeCompare(b.roomNumber);
+  });
 
   const extraCharge        = booking.extraChargeAmount        ?? 0;
   const earlyDeduction     = booking.earlyDeductionAmount     ?? 0;
@@ -135,17 +142,24 @@ export default async function ReservationPage({ params }: Props) {
             <p className="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mb-2">
               Stay Details
             </p>
-            <p className="text-[13px] font-semibold text-slate-900">
-              Room {booking.roomNumber} ({booking.roomCategory})
-            </p>
-            <p className="text-[11px] text-slate-600">
-              {booking.checkInISO ? formatInvoiceDate(booking.checkInISO) : booking.checkIn}
-              {" → "}
-              {booking.checkOutISO ? formatInvoiceDate(booking.checkOutISO) : booking.checkOut}
-            </p>
-            <p className="text-[11px] text-slate-600">
-              {booking.nights} {booking.nights === 1 ? "night" : "nights"}
-            </p>
+            {sortedRooms.map((room, i) => {
+              const isCancelled = room.status === "Cancelled";
+              return (
+                <div key={room.id} className={i > 0 ? "mt-2" : ""}>
+                  <p className={`text-[13px] font-semibold ${isCancelled ? "line-through text-slate-400" : "text-slate-900"}`}>
+                    Room {room.roomNumber} ({room.roomCategory})
+                  </p>
+                  <p className={`text-[11px] ${isCancelled ? "line-through text-slate-400" : "text-slate-600"}`}>
+                    {room.checkInISO ? formatInvoiceDate(room.checkInISO) : room.checkIn}
+                    {" → "}
+                    {room.checkOutISO ? formatInvoiceDate(room.checkOutISO) : room.checkOut}
+                  </p>
+                  <p className={`text-[11px] ${isCancelled ? "line-through text-slate-400" : "text-slate-600"}`}>
+                    {room.nights} {room.nights === 1 ? "night" : "nights"}
+                  </p>
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -163,20 +177,47 @@ export default async function ReservationPage({ params }: Props) {
           </thead>
           <tbody>
 
-            {/* Room accommodation */}
-            <tr className="border-b border-slate-100">
-              <td className="py-3">
-                <p className="font-medium text-slate-900">Room accommodation</p>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  Room {booking.roomNumber} ({booking.roomCategory})
-                  {" · "}{booking.nights} {booking.nights === 1 ? "night" : "nights"}
-                  {" × "}{formatTaka(roomRate)}
-                </p>
-              </td>
-              <td className="py-3 text-right text-slate-900 font-medium tabular-nums">
-                {formatTaka(booking.totalAmount)}
-              </td>
-            </tr>
+            {/* Room accommodation — one row per room, sorted by room_number */}
+            {sortedRooms.map(room => {
+              const isCancelled = room.status === "Cancelled";
+              const roomSubtotal = room.bookingRate * room.nights;
+              return (
+                <Fragment key={room.id}>
+                  <tr className="border-b border-slate-100">
+                    <td className="py-3">
+                      <p className={`font-medium ${isCancelled ? "line-through text-slate-400" : "text-slate-900"}`}>
+                        Room accommodation
+                      </p>
+                      <p className={`text-[11px] mt-0.5 ${isCancelled ? "line-through text-slate-400" : "text-slate-500"}`}>
+                        Room {room.roomNumber} ({room.roomCategory})
+                        {" · "}{room.nights} {room.nights === 1 ? "night" : "nights"}
+                        {" × "}{formatTaka(room.bookingRate)}
+                      </p>
+                    </td>
+                    <td className={`py-3 text-right font-medium tabular-nums ${isCancelled ? "line-through text-slate-400" : "text-slate-900"}`}>
+                      {formatTaka(roomSubtotal)}
+                    </td>
+                  </tr>
+                  {/* Per-room early checkout deduction — indented sub-row */}
+                  {room.earlyNightsDeducted > 0 && room.earlyDeductionAmount > 0 && (
+                    <tr className="border-b border-slate-100">
+                      <td className="py-3 pl-4">
+                        <p className={`font-medium ${isCancelled ? "line-through text-slate-400" : "text-emerald-700"}`}>
+                          Early checkout deduction
+                        </p>
+                        <p className={`text-[11px] mt-0.5 ${isCancelled ? "line-through text-slate-400" : "text-emerald-600"}`}>
+                          {room.earlyNightsDeducted}{" "}
+                          {room.earlyNightsDeducted === 1 ? "night" : "nights"} deducted
+                        </p>
+                      </td>
+                      <td className={`py-3 text-right font-medium tabular-nums ${isCancelled ? "line-through text-slate-400" : "text-emerald-700"}`}>
+                        −{formatTaka(room.earlyDeductionAmount)}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
 
             {/* Extra charges */}
             {extraCharge > 0 && (
@@ -191,26 +232,6 @@ export default async function ReservationPage({ params }: Props) {
                 </td>
                 <td className="py-3 text-right text-slate-900 font-medium tabular-nums">
                   {formatTaka(extraCharge)}
-                </td>
-              </tr>
-            )}
-
-            {/* Early checkout deduction */}
-            {earlyDeduction > 0 && (
-              <tr className="border-b border-slate-100">
-                <td className="py-3">
-                  <p className="font-medium text-emerald-700">
-                    Early checkout deduction
-                  </p>
-                  {booking.earlyNightsDeducted && (
-                    <p className="text-[11px] text-emerald-600 mt-0.5">
-                      {booking.earlyNightsDeducted}{" "}
-                      {booking.earlyNightsDeducted === 1 ? "night" : "nights"} deducted
-                    </p>
-                  )}
-                </td>
-                <td className="py-3 text-right text-emerald-700 font-medium tabular-nums">
-                  −{formatTaka(earlyDeduction)}
                 </td>
               </tr>
             )}
