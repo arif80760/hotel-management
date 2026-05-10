@@ -18,7 +18,8 @@
 import { Fragment }                       from "react";
 import { notFound }                      from "next/navigation";
 import { getBookingByRef,
-         getPaymentsByBookingRef }        from "@/services/bookingsService";
+         getPaymentsByBookingRef,
+         listRefunds }                    from "@/services/bookingsService";
 import LetterHead                        from "@/components/invoice/LetterHead";
 import PrintButtons                      from "@/components/invoice/PrintButtons";
 import { calcTrueDue,
@@ -37,9 +38,10 @@ interface Props {
 export default async function InvoicePage({ params }: Props) {
   const { id } = await params;
 
-  const [booking, payments] = await Promise.all([
+  const [booking, payments, refunds] = await Promise.all([
     getBookingByRef(id).catch(() => null),
     getPaymentsByBookingRef(id).catch(() => []),
+    listRefunds(id).catch(() => []),
   ]);
 
   if (!booking) notFound();
@@ -79,6 +81,16 @@ export default async function InvoicePage({ params }: Props) {
   // outstanding = what's still owed after all payments recorded
   const outstanding = calcTrueDue(booking);
   const totalPaid   = payments.reduce((sum, p) => sum + p.amount, 0);
+
+  // Disbursed refunds only — pending and denied are operator-internal state.
+  // Sorted by disbursedAt ascending (chronological).
+  const disbursedRefunds = refunds.filter(r => r.status === "disbursed");
+  const sortedRefunds    = [...disbursedRefunds].sort((a, b) => {
+    const ta = a.disbursedAt ? new Date(a.disbursedAt).getTime() : 0;
+    const tb = b.disbursedAt ? new Date(b.disbursedAt).getTime() : 0;
+    return ta - tb;
+  });
+  const totalRefunded = sortedRefunds.reduce((sum, r) => sum + r.amount, 0);
 
   const generatedOn = new Date().toLocaleString("en-US", {
     year: "numeric", month: "long", day: "numeric",
@@ -333,6 +345,59 @@ export default async function InvoicePage({ params }: Props) {
                   </td>
                   <td className="py-2.5 text-right font-bold text-slate-900 tabular-nums">
                     {formatTaka(totalPaid)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+
+        {/* ── Refunds ───────────────────────────────────────────────────────── */}
+        {sortedRefunds.length > 0 && (
+          <div className="mt-8">
+            <p className="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mb-2">
+              Refunds
+            </p>
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="border-b-2 border-slate-800">
+                  <th className="text-left py-2 uppercase tracking-wide text-[10px] font-semibold text-slate-600">
+                    Date
+                  </th>
+                  <th className="text-left py-2 uppercase tracking-wide text-[10px] font-semibold text-slate-600">
+                    Method
+                  </th>
+                  <th className="text-left py-2 uppercase tracking-wide text-[10px] font-semibold text-slate-600">
+                    Notes
+                  </th>
+                  <th className="text-right py-2 uppercase tracking-wide text-[10px] font-semibold text-slate-600 w-28">
+                    Amount
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedRefunds.map(r => (
+                  <tr key={r.id} className="border-b border-slate-100">
+                    <td className="py-2.5 text-slate-700">
+                      {r.disbursedAt ? formatInvoiceDate(r.disbursedAt) : "—"}
+                    </td>
+                    <td className="py-2.5 text-slate-700">
+                      {r.disbursementMethod ? formatPaymentMethod(r.disbursementMethod) : "—"}
+                    </td>
+                    <td className="py-2.5 text-slate-500">{r.reason ?? "—"}</td>
+                    <td className="py-2.5 text-right text-rose-700 font-medium tabular-nums">
+                      −{formatTaka(r.amount)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-slate-800">
+                  <td colSpan={3} className="py-2.5 font-bold text-slate-900 uppercase text-[11px] tracking-wide">
+                    Total Refunded
+                  </td>
+                  <td className="py-2.5 text-right font-bold text-rose-700 tabular-nums">
+                    −{formatTaka(totalRefunded)}
                   </td>
                 </tr>
               </tfoot>
