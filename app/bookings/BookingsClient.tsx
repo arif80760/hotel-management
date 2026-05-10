@@ -1533,23 +1533,18 @@ export default function BookingsClient({ initialRoom }: Props) {
   async function submitDeny() {
     const m = denyModal;
     if (!m) return;
-    if (!m.reason.trim()) {
-      setDenyModal(prev => prev && { ...prev, error: "Denial reason is required." });
-      return;
-    }
 
     // Snapshot before mutation so we can roll back on failure.
     const prevTlRefunds = tlRefunds;
 
     // Optimistic: flip the refund to denied immediately.
+    // reason is written to the dedicated column; notes is left untouched.
     setTlRefunds(prev =>
       prev
         ? prev.map(r =>
             r.id !== m.refundId ? r : {
               ...r, status: "denied" as const,
-              notes: r.notes
-                ? `${r.notes} / DENIED: ${m.reason.trim()}`
-                : `DENIED: ${m.reason.trim()}`,
+              reason: m.reason.trim() || null,
             }
           )
         : prev
