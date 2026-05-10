@@ -54,12 +54,19 @@ export default async function ReservationPage({ params }: Props) {
     return a.roomNumber.localeCompare(b.roomNumber);
   });
 
-  const extraCharge        = booking.extraChargeAmount        ?? 0;
+  // Sort itemized extras by applied_at ascending — chronological order matches operator entry sequence.
+  const sortedExtras = [...booking.extraCharges].sort((a, b) => {
+    const ta = a.appliedAt ? new Date(a.appliedAt).getTime() : 0;
+    const tb = b.appliedAt ? new Date(b.appliedAt).getTime() : 0;
+    return ta - tb;
+  });
+  const totalExtraCharges  = sortedExtras.reduce((sum, c) => sum + c.amount, 0);
+
   const earlyDeduction     = booking.earlyDeductionAmount     ?? 0;
   const additionalDiscount = booking.additionalDiscountAmount ?? 0;
 
   // Estimated total = charges as currently recorded (may change at checkout)
-  const estimatedTotal = booking.totalAmount + extraCharge - earlyDeduction - additionalDiscount;
+  const estimatedTotal = booking.totalAmount + totalExtraCharges - earlyDeduction - additionalDiscount;
 
   // Payments — already sorted oldest-first by getPaymentsByBookingRef (.order created_at ASC)
   const totalPaid  = payments.reduce((sum, p) => sum + p.amount, 0);
@@ -229,22 +236,19 @@ export default async function ReservationPage({ params }: Props) {
               );
             })}
 
-            {/* Extra charges */}
-            {extraCharge > 0 && (
-              <tr className="border-b border-slate-100">
+            {/* Extra charges — itemized, one row per booking_extra_charges row */}
+            {sortedExtras.map(charge => (
+              <tr key={charge.id} className="border-b border-slate-100">
                 <td className="py-3">
-                  <p className="font-medium text-slate-900">Extra charges</p>
-                  {booking.extraChargeReason && (
-                    <p className="text-[11px] text-slate-500 mt-0.5">
-                      {booking.extraChargeReason}
-                    </p>
-                  )}
+                  <p className="font-medium text-slate-900">
+                    {charge.reason?.trim() || "Extra charge"}
+                  </p>
                 </td>
                 <td className="py-3 text-right text-slate-900 font-medium tabular-nums">
-                  {formatTaka(extraCharge)}
+                  {formatTaka(charge.amount)}
                 </td>
               </tr>
-            )}
+            ))}
 
             {/* Additional discount */}
             {additionalDiscount > 0 && (
