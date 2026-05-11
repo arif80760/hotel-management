@@ -2091,6 +2091,55 @@ export async function checkinBookingRoom(
 }
 
 // ─────────────────────────────────────────────────────────────
+// Phase 7.6 — Bulk per-room check-in
+// ─────────────────────────────────────────────────────────────
+
+export type BulkCheckinFailure = {
+  bookingRoomId: string;
+  roomNumber:    string;
+  reason:        string;
+};
+
+export type BulkCheckinResult = {
+  success:   boolean;
+  checkedIn: string[];
+  failures:  BulkCheckinFailure[];
+};
+
+export async function bulkCheckinBookingRooms(
+  bookingRoomIds: string[],
+  forceFuture:    boolean = false,
+): Promise<BulkCheckinResult> {
+  const { data, error } = await supabase.rpc("bulk_checkin_booking_rooms", {
+    p_booking_room_ids: bookingRoomIds,
+    p_force_future:     forceFuture,
+  });
+
+  if (error) {
+    console.error("[bulkCheckinBookingRooms] RPC failed:");
+    console.error("  bookingRoomIds:", bookingRoomIds);
+    console.error("  message       :", error.message);
+    console.error("  code          :", error.code);
+    throw new Error(
+      `[bulkCheckinBookingRooms] ${error.message}` +
+      (error.code ? ` (code: ${error.code})` : ""),
+    );
+  }
+
+  return {
+    success:   data.success,
+    checkedIn: data.checked_in ?? [],
+    failures:  (data.failures ?? []).map(
+      (f: { booking_room_id: string; room_number: string; reason: string }) => ({
+        bookingRoomId: f.booking_room_id,
+        roomNumber:    f.room_number,
+        reason:        f.reason,
+      }),
+    ),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
 // PHASE 8.5 — Refund disbursement + whole-booking cancel
 // ─────────────────────────────────────────────────────────────
 

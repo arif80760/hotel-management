@@ -38,7 +38,7 @@ import type {
 
 import * as roomsService    from "@/services/roomsService";
 import * as bookingsService from "@/services/bookingsService";
-import type { UpdateBookingPayload } from "@/services/bookingsService";
+import type { UpdateBookingPayload, BulkCheckinResult } from "@/services/bookingsService";
 
 // Re-export types and ROOM_CATALOG so other files keep working unchanged.
 export type { MockRoom as Room, MockBooking as Booking, RoomStatus, BookingStatus };
@@ -141,6 +141,11 @@ type HotelContextType = {
   ) => void;
   /** Check in a single confirmed room within a booking. */
   checkinBookingRoom: (bookingRoomId: string) => void;
+  /** Bulk check in multiple confirmed rooms. Returns the RPC result including any per-room failures. */
+  bulkCheckinBookingRooms: (
+    roomIds:      string[],
+    forceFuture?: boolean,
+  ) => Promise<BulkCheckinResult>;
   /**
    * Mark a pending refund as disbursed. Optimistically decrements
    * booking.amountPaid; rolls back on failure.
@@ -959,6 +964,18 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       });
   }
 
+  async function bulkCheckinBookingRooms(
+    roomIds:     string[],
+    forceFuture: boolean = false,
+  ): Promise<BulkCheckinResult> {
+    const result = await bookingsService.bulkCheckinBookingRooms(roomIds, forceFuture);
+    if (result.success) {
+      const refreshed = await bookingsService.getAllBookings();
+      setBookings(refreshed);
+    }
+    return result;
+  }
+
   // ── Phase 8.5: refund disbursement + whole-booking cancel ──
 
   function disburseRefund(
@@ -1153,6 +1170,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       cancelBookingRoom,
       extendBookingRoom,
       checkinBookingRoom,
+      bulkCheckinBookingRooms,
       disburseRefund,
       denyRefund,
       cancelBooking,
