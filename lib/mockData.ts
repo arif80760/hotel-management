@@ -196,8 +196,9 @@ export type RefundStatus = "pending" | "disbursed" | "denied";
  * A refund record raised at booking cancellation or early checkout.
  * Two-step lifecycle: pending (created) → disbursed (money returned) or denied.
  *
- * bookings.paid_amount is NOT decremented on refund — effective balance is
- * computed in the app layer via calcEffectiveBalance() in lib/invoiceUtils.ts.
+ * bookings.paid_amount IS decremented on disbursement: disburse_refund inserts
+ * a negative payment row, which fires trg_sync_paid_amount and decrements
+ * paid_amount atomically (Phase 8.5, 2026-05-09-phase8.5-refund-disbursement.sql).
  */
 export interface Refund {
   id:                  string;
@@ -304,8 +305,8 @@ export type MockBooking = {
   status:       BookingStatus;
   payment:      PaymentStatus;   // auto-derived from totalAmount vs amountPaid
   totalAmount:  number;          // total charge for the stay (BDT)
-  amountPaid:   number;          // amount collected at / before booking time
-  // dueAmount is derived at render: totalAmount - amountPaid  (not stored)
+  amountPaid:   number;          // running net: incremented on payment INSERT, decremented on negative payment INSERT (refund disbursement or cancel-with-disbursement)
+  // dueAmount is derived at render via calcTrueDue() (not stored)
   totalGuests:       number;           // total number of guests in the room (including primary)
   additionalGuests:  AdditionalGuest[]; // named guests beyond the primary responsible guest
   isNew?:            boolean;           // UI flag — highlights rows added this session
