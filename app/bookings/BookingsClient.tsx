@@ -755,6 +755,10 @@ export default function BookingsClient({ initialRoom }: Props) {
   // Clicking a multi-room cell toggles an inline <tr> drawer below that row.
   const [expandedBookingId, setExpandedBookingId] = useState<string | null>(null);
 
+  // Per-booking room selection for bulk check-in.
+  // Key: booking.id → Set of selected booking_room_ids.
+  const [bulkCheckinSelection, setBulkCheckinSelection] = useState<Record<string, Set<string>>>({});
+
   // ── Page view ───────────────────────────────────────────────
   // "bookings" = full booking list (existing)
   // "dues"     = outstanding-dues monitor (new)
@@ -1077,7 +1081,32 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   // ── Room-detail row toggle ──────────────────────────────────
   function toggleExpandedBooking(bookingId: string) {
-    setExpandedBookingId(prev => prev === bookingId ? null : bookingId);
+    const isCollapsing = expandedBookingId === bookingId;
+    setExpandedBookingId(isCollapsing ? null : bookingId);
+    if (isCollapsing) {
+      setBulkCheckinSelection(prev => { const next = { ...prev }; delete next[bookingId]; return next; });
+    }
+  }
+
+  function getBulkSelection(bookingId: string): Set<string> {
+    return bulkCheckinSelection[bookingId] ?? new Set();
+  }
+
+  function toggleRoomBulkSelection(bookingId: string, roomId: string) {
+    setBulkCheckinSelection(prev => {
+      const current = new Set(prev[bookingId] ?? []);
+      if (current.has(roomId)) current.delete(roomId);
+      else current.add(roomId);
+      return { ...prev, [bookingId]: current };
+    });
+  }
+
+  function toggleAllEligibleRooms(bookingId: string, confirmedRoomIds: string[]) {
+    setBulkCheckinSelection(prev => {
+      const current = prev[bookingId] ?? new Set<string>();
+      const allSelected = confirmedRoomIds.every(id => current.has(id));
+      return { ...prev, [bookingId]: allSelected ? new Set() : new Set(confirmedRoomIds) };
+    });
   }
 
   // Pre-fill edit form from editTarget.rooms[] when a booking is selected
@@ -3580,6 +3609,8 @@ export default function BookingsClient({ initialRoom }: Props) {
                 const action  = nextAction(b.status);
                 const due     = calcTrueDue(b);
                 const isFutureCheckIn = action?.next === "Checked In" && !canCheckInToday(b.checkInISO);
+                const confirmedRoomsInBooking = b.rooms.filter(rm => rm.status === "Confirmed");
+                const showBulkCheckboxes = confirmedRoomsInBooking.length >= 2;
                 return (
                   <Fragment key={b.id}>
                   <tr
@@ -3864,12 +3895,44 @@ export default function BookingsClient({ initialRoom }: Props) {
                             )}
                           </div>
                           {/* Per-room list */}
+                          {showBulkCheckboxes && (
+                            <div className="flex items-center gap-2 py-1.5 mb-1">
+                              <input
+                                type="checkbox"
+                                checked={confirmedRoomsInBooking.every(rm => getBulkSelection(b.id).has(rm.id))}
+                                ref={el => {
+                                  if (el) {
+                                    const sel = getBulkSelection(b.id);
+                                    const someSelected = confirmedRoomsInBooking.some(rm => sel.has(rm.id));
+                                    const allSelected  = confirmedRoomsInBooking.every(rm => sel.has(rm.id));
+                                    el.indeterminate = someSelected && !allSelected;
+                                  }
+                                }}
+                                onChange={() => toggleAllEligibleRooms(b.id, confirmedRoomsInBooking.map(rm => rm.id))}
+                                aria-label={`Select all confirmed rooms in booking ${b.id}`}
+                                className="w-3.5 h-3.5 accent-emerald-600 cursor-pointer"
+                              />
+                              <span className="text-[11px] text-slate-500 select-none">Select all eligible</span>
+                            </div>
+                          )}
                           <div className="divide-y divide-slate-100">
                             {b.rooms.map(r => {
                               const subtotal = r.bookingRate * r.nights;
                               const isActive = r.status === "Confirmed" || r.status === "Checked In";
+                              const isEligible = r.status === "Confirmed";
+                              const isSelected = getBulkSelection(b.id).has(r.id);
                               return (
                                 <div key={r.id} className="flex items-center gap-3 py-2 flex-wrap">
+                                  {showBulkCheckboxes && (
+                                    <input
+                                      type="checkbox"
+                                      checked={isSelected}
+                                      disabled={!isEligible}
+                                      onChange={() => toggleRoomBulkSelection(b.id, r.id)}
+                                      aria-label={`Select Room ${r.roomNumber} for bulk check-in`}
+                                      className="w-3.5 h-3.5 accent-emerald-600 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                                    />
+                                  )}
                                   <span className="text-[13px] font-semibold text-slate-800 w-20 shrink-0">Room {r.roomNumber}</span>
                                   <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">{r.roomCategory}</span>
                                   {/* Per-room status badge */}
@@ -3919,6 +3982,28 @@ export default function BookingsClient({ initialRoom }: Props) {
                               );
                             })}
                           </div>
+                          {getBulkSelection(b.id).size > 0 && (
+                            <div className="flex items-center justify-between gap-3 mt-3 pt-2.5 border-t border-slate-200 bg-emerald-50/60 px-3 py-2 rounded-md">
+                              <span className="text-[11.5px] font-semibold text-slate-700">
+                                {getBulkSelection(b.id).size} room{getBulkSelection(b.id).size > 1 ? "s" : ""} selected
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setBulkCheckinSelection(prev => { const next = { ...prev }; delete next[b.id]; return next; })}
+                                  className="text-[10.5px] font-semibold text-slate-600 hover:text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                >Clear</button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    // Stage 4: opens preflight modal
+                                    console.log("[Phase 7.6 Stage 4 pending] Open preflight modal for:", Array.from(getBulkSelection(b.id)));
+                                  }}
+                                  className="text-[10.5px] font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                >Check In Selected ({getBulkSelection(b.id).size})</button>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -4112,6 +4197,8 @@ export default function BookingsClient({ initialRoom }: Props) {
                   ) : filteredDueBookings.map(b => {
                     const due       = calcTrueDue(b);
                     const isHighDue = due >= HIGH_DUE_THRESHOLD;
+                    const confirmedRoomsInBooking = b.rooms.filter(rm => rm.status === "Confirmed");
+                    const showBulkCheckboxes = confirmedRoomsInBooking.length >= 2;
                     return (
                       <Fragment key={b.id}>
                       <tr
@@ -4300,12 +4387,44 @@ export default function BookingsClient({ initialRoom }: Props) {
                                 )}
                               </div>
                               {/* Per-room list */}
+                              {showBulkCheckboxes && (
+                                <div className="flex items-center gap-2 py-1.5 mb-1">
+                                  <input
+                                    type="checkbox"
+                                    checked={confirmedRoomsInBooking.every(rm => getBulkSelection(b.id).has(rm.id))}
+                                    ref={el => {
+                                      if (el) {
+                                        const sel = getBulkSelection(b.id);
+                                        const someSelected = confirmedRoomsInBooking.some(rm => sel.has(rm.id));
+                                        const allSelected  = confirmedRoomsInBooking.every(rm => sel.has(rm.id));
+                                        el.indeterminate = someSelected && !allSelected;
+                                      }
+                                    }}
+                                    onChange={() => toggleAllEligibleRooms(b.id, confirmedRoomsInBooking.map(rm => rm.id))}
+                                    aria-label={`Select all confirmed rooms in booking ${b.id}`}
+                                    className="w-3.5 h-3.5 accent-emerald-600 cursor-pointer"
+                                  />
+                                  <span className="text-[11px] text-slate-500 select-none">Select all eligible</span>
+                                </div>
+                              )}
                               <div className="divide-y divide-slate-100">
                                 {b.rooms.map(r => {
                                   const subtotal = r.bookingRate * r.nights;
                                   const isActive = r.status === "Confirmed" || r.status === "Checked In";
+                                  const isEligible = r.status === "Confirmed";
+                                  const isSelected = getBulkSelection(b.id).has(r.id);
                                   return (
                                     <div key={r.id} className="flex items-center gap-3 py-2 flex-wrap">
+                                      {showBulkCheckboxes && (
+                                        <input
+                                          type="checkbox"
+                                          checked={isSelected}
+                                          disabled={!isEligible}
+                                          onChange={() => toggleRoomBulkSelection(b.id, r.id)}
+                                          aria-label={`Select Room ${r.roomNumber} for bulk check-in`}
+                                          className="w-3.5 h-3.5 accent-emerald-600 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                                        />
+                                      )}
                                       <span className="text-[13px] font-semibold text-slate-800 w-20 shrink-0">Room {r.roomNumber}</span>
                                       <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">{r.roomCategory}</span>
                                       <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap ${
@@ -4353,6 +4472,28 @@ export default function BookingsClient({ initialRoom }: Props) {
                                   );
                                 })}
                               </div>
+                              {getBulkSelection(b.id).size > 0 && (
+                                <div className="flex items-center justify-between gap-3 mt-3 pt-2.5 border-t border-slate-200 bg-emerald-50/60 px-3 py-2 rounded-md">
+                                  <span className="text-[11.5px] font-semibold text-slate-700">
+                                    {getBulkSelection(b.id).size} room{getBulkSelection(b.id).size > 1 ? "s" : ""} selected
+                                  </span>
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setBulkCheckinSelection(prev => { const next = { ...prev }; delete next[b.id]; return next; })}
+                                      className="text-[10.5px] font-semibold text-slate-600 hover:text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                    >Clear</button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        // Stage 4: opens preflight modal
+                                        console.log("[Phase 7.6 Stage 4 pending] Open preflight modal for:", Array.from(getBulkSelection(b.id)));
+                                      }}
+                                      className="text-[10.5px] font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                    >Check In Selected ({getBulkSelection(b.id).size})</button>
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           </td>
                         </tr>
