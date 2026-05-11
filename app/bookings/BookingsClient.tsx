@@ -49,7 +49,7 @@ import {
 import { calcTrueDue } from "@/lib/invoiceUtils";
 import type { Refund } from "@/lib/mockData";
 import * as bookingsService from "@/services/bookingsService";
-import type { Payment } from "@/services/bookingsService";
+import type { Payment, BulkCheckinFailure } from "@/services/bookingsService";
 
 // ─────────────────────────────────────────────────────────────
 // LOCAL TYPES
@@ -140,6 +140,16 @@ type ExtendRoomModalState = {
   newCheckOut:     string;    // ISO date input
   submitting:      boolean;
   error:           string | null;
+};
+
+type BulkCheckinModalState = {
+  open:         boolean;
+  bookingId:    string | null;
+  roomIds:      string[];
+  forceFuture:  boolean;
+  status:       "idle" | "submitting" | "soft-failure" | "hard-error";
+  failures:     BulkCheckinFailure[];
+  errorMessage: string | null;
 };
 
 /** State for the whole-booking Cancel Booking modal. null = closed. */
@@ -628,8 +638,9 @@ export default function BookingsClient({ initialRoom }: Props) {
     addRoomToBooking:    ctxAddRoomToBooking,
     cancelBookingRoom:   ctxCancelBookingRoom,
     extendBookingRoom:   ctxExtendBookingRoom,
-    checkinBookingRoom:  ctxCheckinBookingRoom,
-    disburseRefund:      ctxDisburseRefund,
+    checkinBookingRoom:       ctxCheckinBookingRoom,
+    bulkCheckinBookingRooms:  ctxBulkCheckinBookingRooms,
+    disburseRefund:           ctxDisburseRefund,
     denyRefund:          ctxDenyRefund,
     cancelBooking:       ctxCancelBooking,
   } = useHotel();
@@ -782,6 +793,12 @@ export default function BookingsClient({ initialRoom }: Props) {
   // ── Mid-stay operation modals (Phase 7) ────────────────────
   const [cancelRoomModal, setCancelRoomModal] = useState<CancelRoomModalState | null>(null);
   const [extendRoomModal, setExtendRoomModal] = useState<ExtendRoomModalState | null>(null);
+
+  // ── Phase 7.6: bulk check-in preflight modal ───────────────
+  const [bulkCheckinModal, setBulkCheckinModal] = useState<BulkCheckinModalState>({
+    open: false, bookingId: null, roomIds: [], forceFuture: false,
+    status: "idle", failures: [], errorMessage: null,
+  });
 
   // ── Derived (Create Booking form) ──────────────────────────
 
@@ -1707,6 +1724,32 @@ export default function BookingsClient({ initialRoom }: Props) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setExtendRoomModal(prev => prev && { ...prev, submitting: false, error: msg });
+    }
+  }
+
+  async function submitBulkCheckin() {
+    setBulkCheckinModal(prev => ({ ...prev, status: "submitting", failures: [], errorMessage: null }));
+    try {
+      const result = await ctxBulkCheckinBookingRooms(
+        bulkCheckinModal.roomIds,
+        bulkCheckinModal.forceFuture,
+      );
+      if (result.success) {
+        setBulkCheckinSelection(prev => {
+          const next = { ...prev };
+          if (bulkCheckinModal.bookingId) delete next[bulkCheckinModal.bookingId];
+          return next;
+        });
+        setBulkCheckinModal({ open: false, bookingId: null, roomIds: [], forceFuture: false, status: "idle", failures: [], errorMessage: null });
+      } else {
+        setBulkCheckinModal(prev => ({ ...prev, status: "soft-failure", failures: result.failures }));
+      }
+    } catch (err) {
+      setBulkCheckinModal(prev => ({
+        ...prev,
+        status: "hard-error",
+        errorMessage: err instanceof Error ? err.message : String(err),
+      }));
     }
   }
 
@@ -3996,8 +4039,15 @@ export default function BookingsClient({ initialRoom }: Props) {
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    // Stage 4: opens preflight modal
-                                    console.log("[Phase 7.6 Stage 4 pending] Open preflight modal for:", Array.from(getBulkSelection(b.id)));
+                                    setBulkCheckinModal({
+                                      open: true,
+                                      bookingId: b.id,
+                                      roomIds: Array.from(getBulkSelection(b.id)),
+                                      forceFuture: false,
+                                      status: "idle",
+                                      failures: [],
+                                      errorMessage: null,
+                                    });
                                   }}
                                   className="text-[10.5px] font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
                                 >Check In Selected ({getBulkSelection(b.id).size})</button>
@@ -4486,8 +4536,15 @@ export default function BookingsClient({ initialRoom }: Props) {
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        // Stage 4: opens preflight modal
-                                        console.log("[Phase 7.6 Stage 4 pending] Open preflight modal for:", Array.from(getBulkSelection(b.id)));
+                                        setBulkCheckinModal({
+                                          open: true,
+                                          bookingId: b.id,
+                                          roomIds: Array.from(getBulkSelection(b.id)),
+                                          forceFuture: false,
+                                          status: "idle",
+                                          failures: [],
+                                          errorMessage: null,
+                                        });
                                       }}
                                       className="text-[10.5px] font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
                                     >Check In Selected ({getBulkSelection(b.id).size})</button>
@@ -7533,6 +7590,157 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {bulkCheckinModal.open && (() => {
+        const booking = bookings.find(b => b.id === bulkCheckinModal.bookingId);
+        const roomDetails = bulkCheckinModal.roomIds.flatMap(id => {
+          const r = booking?.rooms.find(rm => rm.id === id);
+          return r ? [r] : [];
+        });
+        const today = new Date().toISOString().slice(0, 10);
+        const hasFutureDate = roomDetails.some(r => r.checkInISO > today);
+        const isSubmitting = bulkCheckinModal.status === "submitting";
+        const closeFn = () => setBulkCheckinModal(prev => ({ ...prev, open: false, status: "idle", failures: [], errorMessage: null }));
+        const n = bulkCheckinModal.roomIds.length;
+        const confirmLabel = bulkCheckinModal.status === "hard-error" ? "Retry" : `Confirm Check In (${n})`;
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+            onClick={e => { if (!isSubmitting && e.target === e.currentTarget) closeFn(); }}
+          >
+            <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md flex flex-col">
+
+              {/* Header */}
+              <div className="flex items-start gap-3 px-6 pt-5 pb-4 border-b border-slate-100">
+                <div className="w-9 h-9 rounded-xl bg-emerald-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4.5 h-4.5 text-emerald-600">
+                    <path d="M20 6L9 17l-5-5"/>
+                  </svg>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-[15px] font-bold text-slate-800">
+                    Check in {n} room{n !== 1 ? "s" : ""} from {bulkCheckinModal.bookingId}
+                  </h3>
+                  <p className="text-[12px] text-slate-400 mt-0.5">{booking?.guestName}</p>
+                </div>
+                {!isSubmitting && (
+                  <button
+                    type="button"
+                    onClick={closeFn}
+                    className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors flex-shrink-0"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4 h-4"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                  </button>
+                )}
+              </div>
+
+              {/* Body */}
+              <div className="px-6 py-5 space-y-4">
+
+                {/* Room list */}
+                <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
+                  {roomDetails.map(r => {
+                    const isFuture = r.checkInISO > today;
+                    const nights = Math.round(
+                      (new Date(r.checkOutISO).getTime() - new Date(r.checkInISO).getTime()) / 86_400_000
+                    );
+                    return (
+                      <div key={r.id} className="flex items-center gap-2 px-3 py-2.5">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[12.5px] font-semibold text-slate-800">
+                            Room {r.roomNumber} ({r.roomCategory})
+                          </p>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            {r.checkIn} → {r.checkOut} · {nights} night{nights !== 1 ? "s" : ""}
+                          </p>
+                        </div>
+                        {isFuture && (
+                          <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">
+                            Future date
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Future-date warning + override */}
+                {hasFutureDate && (
+                  <div className="space-y-2">
+                    <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[12px]">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                      <span className="text-amber-700">
+                        Some rooms are scheduled for future dates. By default, future-dated rooms cannot be checked in early.
+                      </span>
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={bulkCheckinModal.forceFuture}
+                        onChange={e => setBulkCheckinModal(prev => ({ ...prev, forceFuture: e.target.checked }))}
+                        className="w-3.5 h-3.5 accent-amber-600"
+                      />
+                      <span className="text-[12px] text-slate-700">Override warning and check in early</span>
+                    </label>
+                  </div>
+                )}
+
+                {/* Soft failure list */}
+                {bulkCheckinModal.status === "soft-failure" && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-1.5">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4 h-4 text-rose-600 flex-shrink-0"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                      <p className="text-[12.5px] font-semibold text-rose-700">Could not check in the selected rooms:</p>
+                    </div>
+                    <div className="divide-y divide-slate-100 border border-rose-200 rounded-xl">
+                      {bulkCheckinModal.failures.map((f, i) => (
+                        <div key={i} className="flex items-start gap-2 px-3 py-2">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3.5 h-3.5 text-rose-500 flex-shrink-0 mt-0.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                          <p className="text-[11.5px] text-slate-700">
+                            <span className="font-semibold">Room {f.roomNumber}</span> — {f.reason}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[11.5px] text-slate-500">Adjust your selection and try again.</p>
+                  </div>
+                )}
+
+                {/* Hard error */}
+                {bulkCheckinModal.status === "hard-error" && (
+                  <div className="flex items-start gap-2 px-3 py-2.5 bg-rose-50 border border-rose-200 rounded-xl">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                    <p className="text-[12px] text-rose-700">{bulkCheckinModal.errorMessage}</p>
+                  </div>
+                )}
+
+              </div>
+
+              {/* Footer */}
+              <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={closeFn}
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-[13px] font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >Cancel</button>
+                <button
+                  type="button"
+                  onClick={submitBulkCheckin}
+                  disabled={isSubmitting || (hasFutureDate && !bulkCheckinModal.forceFuture && bulkCheckinModal.status === "idle")}
+                  className="px-5 py-2 text-[13px] font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                >
+                  {isSubmitting && (
+                    <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                  )}
+                  {isSubmitting ? "Checking in…" : confirmLabel}
+                </button>
+              </div>
+
             </div>
           </div>
         );
