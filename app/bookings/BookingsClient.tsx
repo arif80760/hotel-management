@@ -3964,6 +3964,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                               const isActive = r.status === "Confirmed" || r.status === "Checked In";
                               const isEligible = r.status === "Confirmed";
                               const isSelected = getBulkSelection(b.id).has(r.id);
+                              const isFutureRoomCheckIn = !canCheckInToday(r.checkInISO);
                               return (
                                 <div key={r.id} className="flex items-center gap-3 py-2 flex-wrap">
                                   {showBulkCheckboxes && (
@@ -3996,8 +3997,14 @@ export default function BookingsClient({ initialRoom }: Props) {
                                       {r.status === "Confirmed" && (
                                         <button
                                           type="button"
-                                          onClick={() => ctxCheckinBookingRoom(r.id)}
-                                          className="text-[10.5px] font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                          onClick={isFutureRoomCheckIn ? undefined : () => ctxCheckinBookingRoom(r.id)}
+                                          disabled={isFutureRoomCheckIn}
+                                          title={isFutureRoomCheckIn ? `Check-in available on ${r.checkIn}` : undefined}
+                                          className={`text-[10.5px] font-semibold border px-2 py-0.5 rounded whitespace-nowrap ${
+                                            isFutureRoomCheckIn
+                                              ? "opacity-50 cursor-not-allowed text-emerald-700 bg-emerald-50 border-emerald-300"
+                                              : "text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border-emerald-300 transition-colors"
+                                          }`}
                                         >Check In</button>
                                       )}
                                       {r.status === "Confirmed" && (
@@ -4463,6 +4470,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                                   const isActive = r.status === "Confirmed" || r.status === "Checked In";
                                   const isEligible = r.status === "Confirmed";
                                   const isSelected = getBulkSelection(b.id).has(r.id);
+                                  const isFutureRoomCheckIn = !canCheckInToday(r.checkInISO);
                                   return (
                                     <div key={r.id} className="flex items-center gap-3 py-2 flex-wrap">
                                       {showBulkCheckboxes && (
@@ -4493,8 +4501,14 @@ export default function BookingsClient({ initialRoom }: Props) {
                                           {r.status === "Confirmed" && (
                                             <button
                                               type="button"
-                                              onClick={() => ctxCheckinBookingRoom(r.id)}
-                                              className="text-[10.5px] font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                              onClick={isFutureRoomCheckIn ? undefined : () => ctxCheckinBookingRoom(r.id)}
+                                              disabled={isFutureRoomCheckIn}
+                                              title={isFutureRoomCheckIn ? `Check-in available on ${r.checkIn}` : undefined}
+                                              className={`text-[10.5px] font-semibold border px-2 py-0.5 rounded whitespace-nowrap ${
+                                                isFutureRoomCheckIn
+                                                  ? "opacity-50 cursor-not-allowed text-emerald-700 bg-emerald-50 border-emerald-300"
+                                                  : "text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border-emerald-300 transition-colors"
+                                              }`}
                                             >Check In</button>
                                           )}
                                           {r.status === "Confirmed" && (
