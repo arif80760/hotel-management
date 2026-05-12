@@ -2070,17 +2070,22 @@ export async function extendBookingRoom(
  * double-fire is surfaced as an error rather than silently no-oping.
  *
  * @param bookingRoomId  booking_rooms.id UUID
+ * @param forceFuture    Pass true to bypass the future-date guard (Phase 11 #10).
+ *                       Defaults to false — early check-ins are blocked by default.
  */
 export async function checkinBookingRoom(
   bookingRoomId: string,
+  forceFuture:   boolean = false,
 ): Promise<void> {
   const { error: rpcErr } = await supabase.rpc("checkin_booking_room", {
     p_booking_room_id: bookingRoomId,
+    p_force_future:    forceFuture,
   });
 
   if (rpcErr) {
     console.error("[checkinBookingRoom] RPC failed:");
     console.error("  bookingRoomId:", bookingRoomId);
+    console.error("  forceFuture  :", forceFuture);
     console.error("  message      :", rpcErr.message);
     console.error("  code         :", rpcErr.code);
     throw new Error(

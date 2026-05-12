@@ -139,8 +139,8 @@ type HotelContextType = {
     bookingRoomId: string,
     newCheckOut:   string,
   ) => void;
-  /** Check in a single confirmed room within a booking. */
-  checkinBookingRoom: (bookingRoomId: string) => void;
+  /** Check in a single confirmed room within a booking. Pass forceFuture=true to bypass the future-date guard (Phase 11 #10). */
+  checkinBookingRoom: (bookingRoomId: string, forceFuture?: boolean) => void;
   /** Bulk check in multiple confirmed rooms. Returns the RPC result including any per-room failures. */
   bulkCheckinBookingRooms: (
     roomIds:      string[],
@@ -907,7 +907,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       });
   }
 
-  function checkinBookingRoom(bookingRoomId: string) {
+  function checkinBookingRoom(bookingRoomId: string, forceFuture: boolean = false) {
     const target = bookings.find(b => b.rooms.some(r => r.id === bookingRoomId));
     if (!target) return;
     const prevBookings = bookings;
@@ -950,7 +950,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       );
     }
 
-    bookingsService.checkinBookingRoom(bookingRoomId)
+    bookingsService.checkinBookingRoom(bookingRoomId, forceFuture)
       .then(() => bookingsService.getBookingByRef(target.id))
       .then(updated => {
         if (!updated) return;
