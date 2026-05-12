@@ -29,7 +29,7 @@ import {
   PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
 } from "@/lib/mockData";
-import { calcTrueDue } from "@/lib/invoiceUtils";
+import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
 
 // ─────────────────────────────────────────────────────────────
 // LOCAL TYPES
@@ -78,13 +78,6 @@ function paymentDot(p: PaymentStatus): string {
     Paid: "bg-emerald-500", Partial: "bg-blue-500", Unpaid: "bg-red-400", Cancelled: "bg-slate-400",
   };
   return m[p];
-}
-
-function derivePaymentStatus(total: number, paid: number, status: BookingStatus): PaymentStatus {
-  if (status === "Cancelled") return "Cancelled";
-  if (paid <= 0)              return "Unpaid";
-  if (paid >= total)          return "Paid";
-  return "Partial";
 }
 
 /** Returns true if the booking's check-in date is today or in the past. */

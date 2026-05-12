@@ -46,7 +46,7 @@ import {
   uploadDocument,
   deleteDocument,
 } from "@/services/documentsService";
-import { calcTrueDue } from "@/lib/invoiceUtils";
+import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
 import type { Refund } from "@/lib/mockData";
 import * as bookingsService from "@/services/bookingsService";
 import type { Payment, BulkCheckinFailure } from "@/services/bookingsService";
@@ -326,14 +326,6 @@ function paymentText(p: PaymentStatus): string {
     Paid: "text-emerald-600", Partial: "text-blue-600", Unpaid: "text-red-500", Cancelled: "text-slate-400",
   };
   return m[p];
-}
-
-/** Derives PaymentStatus from booking status and raw totals — single source of truth. */
-function derivePaymentStatus(totalAmount: number, amountPaid: number, status: BookingStatus): PaymentStatus {
-  if (status === "Cancelled")        return "Cancelled";
-  if (amountPaid <= 0)               return "Unpaid";
-  if (amountPaid >= totalAmount)     return "Paid";
-  return "Partial";
 }
 
 /**

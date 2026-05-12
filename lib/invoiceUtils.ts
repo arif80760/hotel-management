@@ -1,4 +1,5 @@
 import type { Booking } from "@/contexts/HotelContext";
+import type { BookingStatus, PaymentStatus } from "@/lib/mockData";
 
 /**
  * Returns the invoice number for a booking. Today: just
@@ -66,4 +67,23 @@ export function calcTrueDue(b: {
     - (b.earlyDeductionAmount       ?? 0)
     - (b.additionalDiscountAmount   ?? 0)
     - b.amountPaid;
+}
+
+/**
+ * Derives PaymentStatus from booking status and raw totals (pure, no DB).
+ * Mirrors the Postgres trigger fn_sync_payment_status.
+ * Cancelled bookings always return "Cancelled" regardless of amounts.
+ *
+ * Canonical version — moved here from bookingsService.ts (Phase 11 #28).
+ * bookingsService re-exports this to preserve its existing call surface.
+ */
+export function derivePaymentStatus(
+  totalAmount: number,
+  amountPaid:  number,
+  status:      BookingStatus,
+): PaymentStatus {
+  if (status === "Cancelled")    return "Cancelled";
+  if (amountPaid <= 0)           return "Unpaid";
+  if (amountPaid >= totalAmount) return "Paid";
+  return "Partial";
 }

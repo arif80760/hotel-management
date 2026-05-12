@@ -354,21 +354,12 @@ export function bookingToRoomStatus(
   return BOOKING_TO_ROOM_STATUS[bookingStatus];
 }
 
-/**
- * Derive PaymentStatus from booking status and raw totals (pure, no DB).
- * Mirrors the Postgres trigger fn_sync_payment_status.
- * Cancelled bookings always return "Cancelled" regardless of amounts.
- */
-export function derivePaymentStatus(
-  totalAmount: number,
-  amountPaid: number,
-  status: BookingStatus
-): PaymentStatus {
-  if (status === "Cancelled")    return "Cancelled";
-  if (amountPaid <= 0)           return "Unpaid";
-  if (amountPaid >= totalAmount) return "Paid";
-  return "Partial";
-}
+// Canonical home is lib/invoiceUtils (Phase 11 #28). Imported here for the
+// one internal call site (updateBookingTotal, line ~1129) and re-exported to
+// preserve the bookingsService.derivePaymentStatus surface used by 8
+// HotelContext.tsx call sites — no changes needed there.
+import { derivePaymentStatus } from "@/lib/invoiceUtils";
+export { derivePaymentStatus };
 
 // ─────────────────────────────────────────────────────────────
 // READ
