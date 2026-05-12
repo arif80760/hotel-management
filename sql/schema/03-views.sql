@@ -47,7 +47,6 @@ SELECT
   -- Financial summary
   b.total_amount,
   b.paid_amount,
-  b.due_amount,
   b.payment_status,
 
   -- Override
