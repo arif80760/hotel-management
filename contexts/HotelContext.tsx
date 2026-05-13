@@ -94,7 +94,7 @@ type HotelContextType = {
     additionalDiscountAmount: number,
     additionalDiscountReason: string | null,
     paymentMethod?: PaymentMethod,
-  ) => void;
+  ) => Promise<void>;
   /** Admin override — checkout despite outstanding balance. Stores override audit, extra charges, early deduction, and additional discount. */
   checkoutWithOverride: (
     id: string,
@@ -107,7 +107,7 @@ type HotelContextType = {
     additionalDiscountAmount?: number,
     additionalDiscountReason?: string | null,
     paymentMethod?: PaymentMethod,
-  ) => void;
+  ) => Promise<void>;
   /** Edit a booking's fields. Optimistic update + rollback on service failure. */
   updateBooking: (
     bookingRef: string,
@@ -436,9 +436,9 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     additionalDiscountAmount: number,
     additionalDiscountReason: string | null,
     paymentMethod?: PaymentMethod,
-  ) {
+  ): Promise<void> {
     const target = bookings.find(b => b.id === id);
-    if (!target) return;
+    if (!target) return Promise.resolve();
 
     // Guard FIRST — before any state mutation.
     // target.rooms?.[0]?.id: optional chain on rooms handles the case where the booking
@@ -451,7 +451,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         `[HotelContext checkoutNormal] booking ${id} has no booking_rooms row — ` +
         "cannot complete checkout. Refresh the page to reload room data."
       );
-      return;
+      return Promise.resolve();
     }
 
     // Capture current state so we can roll back if the DB write fails.
@@ -488,7 +488,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         r.roomNumber === target.roomNumber ? { ...r, status: "Cleaning" as RoomStatus } : r
       )
     );
-    bookingsService.checkoutNormal(
+    return bookingsService.checkoutNormal(
       id,
       bookingRoomId,
       extraChargeAmount,
@@ -517,15 +517,15 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     additionalDiscountAmount?: number,
     additionalDiscountReason?: string | null,
     paymentMethod?: PaymentMethod,
-  ) {
+  ): Promise<void> {
     const target = bookings.find(b => b.id === id);
-    if (!target) return;
+    if (!target) return Promise.resolve();
 
     // Require a real auth user — never send null as the auditor.
     const overrideBy = user?.id;
     if (!overrideBy) {
       console.error("[HotelContext checkoutWithOverride] blocked — no authenticated user id available.");
-      return;
+      return Promise.resolve();
     }
 
     // Guard FIRST — before any state mutation. Same rationale as checkoutNormal above.
@@ -535,7 +535,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         `[HotelContext checkoutWithOverride] booking ${id} has no booking_rooms row — ` +
         "cannot complete checkout. Refresh the page to reload room data."
       );
-      return;
+      return Promise.resolve();
     }
 
     // Capture current state so we can roll back if the DB write fails.
@@ -579,7 +579,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         r.roomNumber === target.roomNumber ? { ...r, status: "Cleaning" as RoomStatus } : r
       )
     );
-    bookingsService.checkoutWithOverride(
+    return bookingsService.checkoutWithOverride(
       id,
       bookingRoomId,
       overrideReason,
