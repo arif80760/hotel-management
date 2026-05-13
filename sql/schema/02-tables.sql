@@ -191,7 +191,15 @@ CREATE TABLE IF NOT EXISTS public.bookings (
 
   -- ── Audit timestamps ────────────────────────────────────────
   created_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT chk_paid_not_exceed_total CHECK (
+    paid_amount <= (
+      total_amount
+      + COALESCE(extra_charge_amount,        0)
+      - COALESCE(additional_discount_amount, 0)
+    )
+  )
 );
 
 COMMENT ON TABLE  public.bookings IS 'Core booking record — financial unit for a guest stay';
