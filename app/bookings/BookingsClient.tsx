@@ -2132,6 +2132,9 @@ export default function BookingsClient({ initialRoom }: Props) {
     const bookingId      = checkoutConfirm.id;
     const guestName      = checkoutConfirm.guestName;
     const roomNumber     = checkoutConfirm.roomNumber;
+    const activeRoomCount = (checkoutConfirm.rooms?.filter(
+      r => r.status === "Checked In" || r.status === "Confirmed"
+    ) ?? []).length;
     const capturedPayAmt = parseFloat(modalPayAmt) || 0;
     const capturedMethod = checkoutPayMethod;
 
@@ -2169,7 +2172,11 @@ export default function BookingsClient({ initialRoom }: Props) {
         console.error("[handleConfirmCheckout] recordPayment soft-fail:", err instanceof Error ? err.message : err);
       }
     }
-    setSuccessMsg(`${guestName} checked out · Room ${roomNumber} is now Cleaning.`);
+    setSuccessMsg(
+      activeRoomCount <= 1
+        ? `${guestName} checked out · Room ${roomNumber} is now Cleaning.`
+        : `${guestName} checked out · ${activeRoomCount} rooms are now Cleaning.`
+    );
     // Auto-open invoice in new tab. Fires within the same user-gesture microtask after a
     // short Supabase await — not blocked by Chrome's popup blocker.
     window.open(`/bookings/${bookingId}/invoice`, "_blank");
@@ -4660,7 +4667,23 @@ export default function BookingsClient({ initialRoom }: Props) {
                   </div>
                   <div>
                     <p className="text-[13.5px] font-semibold text-slate-800">{checkoutConfirm.guestName}</p>
-                    <p className="text-[12px] text-slate-500">Room {checkoutConfirm.roomNumber} · {checkoutConfirm.roomCategory} · {checkoutConfirm.nights} nt</p>
+                    {(() => {
+                      const activeRooms = checkoutConfirm.rooms?.filter(
+                        r => r.status === "Checked In" || r.status === "Confirmed"
+                      ) ?? [];
+                      if (activeRooms.length <= 1) {
+                        return (
+                          <p className="text-[12px] text-slate-500">
+                            Room {checkoutConfirm.roomNumber} · {checkoutConfirm.roomCategory} · {checkoutConfirm.nights} nt
+                          </p>
+                        );
+                      }
+                      return (
+                        <p className="text-[12px] text-slate-500">
+                          Rooms {activeRooms.map(r => r.roomNumber).join(", ")} · {activeRooms.length} rooms
+                        </p>
+                      );
+                    })()}
                     <p className="text-[12px] text-slate-400">{checkoutConfirm.checkIn} → {checkoutConfirm.checkOut}</p>
                   </div>
                   <span className={`ml-auto flex-shrink-0 text-[11.5px] font-semibold px-2.5 py-0.5 rounded-full ${statusBadge(checkoutConfirm.status)}`}>

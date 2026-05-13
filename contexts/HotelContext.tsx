@@ -440,19 +440,8 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     const target = bookings.find(b => b.id === id);
     if (!target) return Promise.resolve();
 
-    // Guard FIRST — before any state mutation.
-    // target.rooms?.[0]?.id: optional chain on rooms handles the case where the booking
-    // was loaded from state before Phase 3 (rooms property absent) or was created
-    // with old code that didn't insert a booking_rooms row (rooms: []).
-    // If no bookingRoomId, bail without touching state — no UI corruption, no DB call.
-    const bookingRoomId = target.rooms?.[0]?.id ?? "";
-    if (!bookingRoomId) {
-      console.error(
-        `[HotelContext checkoutNormal] booking ${id} has no booking_rooms row — ` +
-        "cannot complete checkout. Refresh the page to reload room data."
-      );
-      return Promise.resolve();
-    }
+    // bookingRoomId derivation removed — checkout_booking RPC operates at booking
+    // level and checks out all active rooms. No rooms[0] shim needed.
 
     // Capture current state so we can roll back if the DB write fails.
     const previousBookings = bookings;
@@ -483,14 +472,18 @@ export function HotelProvider({ children }: { children: ReactNode }) {
           : b
       )
     );
+    // Multi-room fix: mark ALL rooms on this booking as Cleaning, not just rooms[0].
+    // target.rooms contains BookingRoom[] with roomNumber from the rooms JOIN.
+    const checkingOutRoomNumbers = new Set(
+      target.rooms?.map(r => r.roomNumber) ?? [target.roomNumber]
+    );
     setRooms(prev =>
       prev.map(r =>
-        r.roomNumber === target.roomNumber ? { ...r, status: "Cleaning" as RoomStatus } : r
+        checkingOutRoomNumbers.has(r.roomNumber) ? { ...r, status: "Cleaning" as RoomStatus } : r
       )
     );
     return bookingsService.checkoutNormal(
       id,
-      bookingRoomId,
       extraChargeAmount,
       extraChargeReason,
       actualCheckoutDate,
@@ -528,15 +521,8 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       return Promise.resolve();
     }
 
-    // Guard FIRST — before any state mutation. Same rationale as checkoutNormal above.
-    const bookingRoomId = target.rooms?.[0]?.id ?? "";
-    if (!bookingRoomId) {
-      console.error(
-        `[HotelContext checkoutWithOverride] booking ${id} has no booking_rooms row — ` +
-        "cannot complete checkout. Refresh the page to reload room data."
-      );
-      return Promise.resolve();
-    }
+    // bookingRoomId derivation removed — checkout_booking RPC operates at booking
+    // level and checks out all active rooms. No rooms[0] shim needed.
 
     // Capture current state so we can roll back if the DB write fails.
     const previousBookings = bookings;
@@ -574,14 +560,17 @@ export function HotelProvider({ children }: { children: ReactNode }) {
           : b
       )
     );
+    // Multi-room fix: mark ALL rooms on this booking as Cleaning, not just rooms[0].
+    const checkingOutRoomNumbers = new Set(
+      target.rooms?.map(r => r.roomNumber) ?? [target.roomNumber]
+    );
     setRooms(prev =>
       prev.map(r =>
-        r.roomNumber === target.roomNumber ? { ...r, status: "Cleaning" as RoomStatus } : r
+        checkingOutRoomNumbers.has(r.roomNumber) ? { ...r, status: "Cleaning" as RoomStatus } : r
       )
     );
     return bookingsService.checkoutWithOverride(
       id,
-      bookingRoomId,
       overrideReason,
       overrideBy,
       extraChargeAmount,

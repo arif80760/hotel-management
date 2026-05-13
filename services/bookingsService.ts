@@ -1546,7 +1546,6 @@ export async function recordPayment(
  */
 export async function checkoutNormal(
   id: string,
-  bookingRoomId: string,
   extraChargeAmount: number,
   extraChargeReason: string | null,
   actualCheckoutDate: string,
@@ -1556,36 +1555,56 @@ export async function checkoutNormal(
   additionalDiscountReason: string | null,
   additionalDiscountBy: string | null,
 ): Promise<void> {
-  // ── Step 1 — checkout_booking_room RPC ─────────────────────────────────────
-  // Atomically sets booking_rooms.status, rooms.status = cleaning, stamps
-  // actual_checkout_date + early deduction, and advances bookings.status when
-  // this is the last active room on the booking.
+  // ── Step 0 — Resolve booking_ref → UUID ──────────────────────────────────
+  // checkout_booking RPC takes p_booking_id (UUID), not booking_ref.
+  // Mirrors the cancelBooking pattern.
+  console.log("[checkoutNormal] Step 0 — resolving booking_ref to UUID:", id);
+  const { data: bookingRow, error: resolveErr } = await supabase
+    .from("bookings")
+    .select("id")
+    .eq("booking_ref", id)
+    .single();
+
+  if (resolveErr || !bookingRow) {
+    throw new Error(
+      `[checkoutNormal] booking ${id} not found — ` +
+      (resolveErr?.message ?? "no row returned")
+    );
+  }
+
+  const bookingUUID = (bookingRow as { id: string }).id;
+  console.log("[checkoutNormal] Step 0 — resolved UUID:", bookingUUID);
+
+  // ── Step 1 — checkout_booking RPC ─────────────────────────────────────────
+  // Atomically sets ALL active booking_rooms.status = checked_out,
+  // ALL associated rooms.status = cleaning, recomputes total, and
+  // advances bookings.status = checked_out.
   console.log(
-    "[checkoutNormal] Step 1 — RPC checkout_booking_room" +
-    ` | bookingRoomId: ${bookingRoomId}` +
+    "[checkoutNormal] Step 1 — RPC checkout_booking" +
+    ` | bookingUUID: ${bookingUUID}` +
     ` | actualCheckoutDate: ${actualCheckoutDate}` +
     ` | earlyNightsDeducted: ${earlyNightsDeducted}` +
     ` | earlyDeductionAmount: ${earlyDeductionAmount}`
   );
 
-  const { error: rpcErr } = await supabase.rpc("checkout_booking_room", {
-    p_booking_room_id:       bookingRoomId,
+  const { error: rpcErr } = await supabase.rpc("checkout_booking", {
+    p_booking_id:            bookingUUID,
     p_actual_checkout_date:  actualCheckoutDate || null,
     p_early_nights_deducted: earlyNightsDeducted,
     p_deduction_amount:      earlyDeductionAmount,
   });
 
   if (rpcErr) {
-    console.error("──────────── [checkoutNormal] Step 1 — RPC checkout_booking_room FAILED ────────────");
-    console.error("  message       :", rpcErr.message);
-    console.error("  details       :", rpcErr.details);
-    console.error("  hint          :", rpcErr.hint);
-    console.error("  code          :", rpcErr.code);
-    console.error("  bookingRoomId :", bookingRoomId);
-    console.error("  booking_ref   :", id);
-    console.error("────────────────────────────────────────────────────────────────────────────────────");
+    console.error("──────────── [checkoutNormal] Step 1 — RPC checkout_booking FAILED ────────────");
+    console.error("  message     :", rpcErr.message);
+    console.error("  details     :", rpcErr.details);
+    console.error("  hint        :", rpcErr.hint);
+    console.error("  code        :", rpcErr.code);
+    console.error("  bookingUUID :", bookingUUID);
+    console.error("  booking_ref :", id);
+    console.error("────────────────────────────────────────────────────────────────────────────────");
     throw new Error(
-      `[checkoutNormal] checkout_booking_room RPC failed — ${rpcErr.message}` +
+      `[checkoutNormal] checkout_booking RPC failed — ${rpcErr.message}` +
       (rpcErr.code    ? ` (code: ${rpcErr.code})`       : "") +
       (rpcErr.hint    ? ` | hint: ${rpcErr.hint}`        : "") +
       (rpcErr.details ? ` | details: ${rpcErr.details}`  : "")
@@ -1613,11 +1632,10 @@ export async function checkoutNormal(
   if (Object.keys(bookingsPayload).length > 0) {
     console.log("[checkoutNormal] Step 2 — UPDATE bookings, booking_ref:", id, "| payload:", bookingsPayload);
 
-    const { data: updateData, error, status, statusText } = await supabase
+    const { error, status, statusText } = await supabase
       .from("bookings")
       .update(bookingsPayload)
-      .eq("booking_ref", id)
-      .select("id");
+      .eq("id", bookingUUID);
 
     if (error) {
       console.error("──────────── [checkoutNormal] Step 2 — UPDATE bookings FAILED ────────────");
@@ -1644,42 +1662,41 @@ export async function checkoutNormal(
     // fn_sync_payment_status, recordPayment). This INSERT creates the table row
     // that invoice and reservation pages use for itemised display.
     //
+    // booking_room_id = null: booking-level charge, not attributed to a specific
+    // room. Matches the column's nullable design intent:
+    //   "NULL = booking-level charge; non-null = attributed to a specific room"
+    // bookingUUID comes from Step 0 (no longer needed from Step 2 updateData).
+    //
     // INSERT failure is logged but does NOT throw. The scalar already committed;
     // throwing here would roll back the client's optimistic state (worse UX).
     // Recovery: manual INSERT into booking_extra_charges using the logged values.
     if (extraChargeAmount > 0) {
-      const bookingUUID = (updateData as Array<{ id: string }> | null)?.[0]?.id;
-      if (bookingUUID) {
-        console.log("[checkoutNormal] Step 3 — INSERT booking_extra_charges" +
-          ` | booking_id: ${bookingUUID} | amount: ${extraChargeAmount} | reason: ${extraChargeReason}`);
-        const { error: insertErr } = await supabase
-          .from("booking_extra_charges")
-          .insert({
-            booking_id:      bookingUUID,
-            booking_room_id: bookingRoomId,
-            amount:          extraChargeAmount,
-            reason:          extraChargeReason || null,
-            charge_type:     "other",
-            applied_at:      new Date().toISOString(),
-          });
-        if (insertErr) {
-          console.error("──────────── [checkoutNormal] Step 3 — INSERT booking_extra_charges FAILED ────────────");
-          console.error("  message     :", insertErr.message);
-          console.error("  details     :", insertErr.details);
-          console.error("  hint        :", insertErr.hint);
-          console.error("  code        :", insertErr.code);
-          console.error("  booking_ref :", id);
-          console.error("  booking_id  :", bookingUUID);
-          console.error("  amount      :", extraChargeAmount);
-          console.error("  reason      :", extraChargeReason);
-          console.error("────────────────────────────────────────────────────────────────────────────────────────");
-          // Do NOT throw — scalar committed. Recoverable with manual INSERT.
-        } else {
-          console.log("[checkoutNormal] Step 3 — booking_extra_charges INSERT succeeded for booking_ref:", id);
-        }
+      console.log("[checkoutNormal] Step 3 — INSERT booking_extra_charges" +
+        ` | booking_id: ${bookingUUID} | amount: ${extraChargeAmount} | reason: ${extraChargeReason}`);
+      const { error: insertErr } = await supabase
+        .from("booking_extra_charges")
+        .insert({
+          booking_id:      bookingUUID,
+          booking_room_id: null,
+          amount:          extraChargeAmount,
+          reason:          extraChargeReason || null,
+          charge_type:     "other",
+          applied_at:      new Date().toISOString(),
+        });
+      if (insertErr) {
+        console.error("──────────── [checkoutNormal] Step 3 — INSERT booking_extra_charges FAILED ────────────");
+        console.error("  message     :", insertErr.message);
+        console.error("  details     :", insertErr.details);
+        console.error("  hint        :", insertErr.hint);
+        console.error("  code        :", insertErr.code);
+        console.error("  booking_ref :", id);
+        console.error("  booking_id  :", bookingUUID);
+        console.error("  amount      :", extraChargeAmount);
+        console.error("  reason      :", extraChargeReason);
+        console.error("────────────────────────────────────────────────────────────────────────────────────────");
+        // Do NOT throw — scalar committed. Recoverable with manual INSERT.
       } else {
-        console.error("[checkoutNormal] Step 3 — booking UUID not returned by Step 2 SELECT;" +
-          ` booking_extra_charges INSERT skipped | booking_ref: ${id} | amount: ${extraChargeAmount}`);
+        console.log("[checkoutNormal] Step 3 — booking_extra_charges INSERT succeeded for booking_ref:", id);
       }
     }
   } else {
@@ -1720,7 +1737,6 @@ export async function checkoutNormal(
  */
 export async function checkoutWithOverride(
   id: string,
-  bookingRoomId: string,
   overrideReason: string,
   overrideBy: string,
   extraChargeAmount?: number,
@@ -1732,36 +1748,56 @@ export async function checkoutWithOverride(
   additionalDiscountReason?: string | null,
   additionalDiscountBy?: string | null,
 ): Promise<void> {
-  // ── Step 1 — checkout_booking_room RPC ─────────────────────────────────────
-  // Atomically sets booking_rooms.status, rooms.status = cleaning, stamps
-  // actual_checkout_date + early deduction, and advances bookings.status when
-  // this is the last active room on the booking.
+  // ── Step 0 — Resolve booking_ref → UUID ──────────────────────────────────
+  // checkout_booking RPC takes p_booking_id (UUID), not booking_ref.
+  // Mirrors the cancelBooking pattern.
+  console.log("[checkoutWithOverride] Step 0 — resolving booking_ref to UUID:", id);
+  const { data: bookingRow, error: resolveErr } = await supabase
+    .from("bookings")
+    .select("id")
+    .eq("booking_ref", id)
+    .single();
+
+  if (resolveErr || !bookingRow) {
+    throw new Error(
+      `[checkoutWithOverride] booking ${id} not found — ` +
+      (resolveErr?.message ?? "no row returned")
+    );
+  }
+
+  const bookingUUID = (bookingRow as { id: string }).id;
+  console.log("[checkoutWithOverride] Step 0 — resolved UUID:", bookingUUID);
+
+  // ── Step 1 — checkout_booking RPC ─────────────────────────────────────────
+  // Atomically sets ALL active booking_rooms.status = checked_out,
+  // ALL associated rooms.status = cleaning, recomputes total, and
+  // advances bookings.status = checked_out.
   console.log(
-    "[checkoutWithOverride] Step 1 — RPC checkout_booking_room" +
-    ` | bookingRoomId: ${bookingRoomId}` +
+    "[checkoutWithOverride] Step 1 — RPC checkout_booking" +
+    ` | bookingUUID: ${bookingUUID}` +
     ` | actualCheckoutDate: ${actualCheckoutDate ?? "none"}` +
     ` | earlyNightsDeducted: ${earlyNightsDeducted ?? 0}` +
     ` | earlyDeductionAmount: ${earlyDeductionAmount ?? 0}`
   );
 
-  const { error: rpcErr } = await supabase.rpc("checkout_booking_room", {
-    p_booking_room_id:       bookingRoomId,
+  const { error: rpcErr } = await supabase.rpc("checkout_booking", {
+    p_booking_id:            bookingUUID,
     p_actual_checkout_date:  actualCheckoutDate  || null,
     p_early_nights_deducted: earlyNightsDeducted ?? 0,
     p_deduction_amount:      earlyDeductionAmount ?? 0,
   });
 
   if (rpcErr) {
-    console.error("──────────── [checkoutWithOverride] Step 1 — RPC checkout_booking_room FAILED ────────────");
-    console.error("  message       :", rpcErr.message);
-    console.error("  details       :", rpcErr.details);
-    console.error("  hint          :", rpcErr.hint);
-    console.error("  code          :", rpcErr.code);
-    console.error("  bookingRoomId :", bookingRoomId);
-    console.error("  booking_ref   :", id);
-    console.error("──────────────────────────────────────────────────────────────────────────────────────────");
+    console.error("──────────── [checkoutWithOverride] Step 1 — RPC checkout_booking FAILED ────────────");
+    console.error("  message     :", rpcErr.message);
+    console.error("  details     :", rpcErr.details);
+    console.error("  hint        :", rpcErr.hint);
+    console.error("  code        :", rpcErr.code);
+    console.error("  bookingUUID :", bookingUUID);
+    console.error("  booking_ref :", id);
+    console.error("────────────────────────────────────────────────────────────────────────────────────");
     throw new Error(
-      `[checkoutWithOverride] checkout_booking_room RPC failed — ${rpcErr.message}` +
+      `[checkoutWithOverride] checkout_booking RPC failed — ${rpcErr.message}` +
       (rpcErr.code    ? ` (code: ${rpcErr.code})`       : "") +
       (rpcErr.hint    ? ` | hint: ${rpcErr.hint}`        : "") +
       (rpcErr.details ? ` | details: ${rpcErr.details}`  : "")
@@ -1792,11 +1828,10 @@ export async function checkoutWithOverride(
 
   console.log("[checkoutWithOverride] Step 2 — UPDATE bookings, booking_ref:", id, "| payload:", updatePayload);
 
-  const { data: updateData, error, status, statusText } = await supabase
+  const { error, status, statusText } = await supabase
     .from("bookings")
     .update(updatePayload)
-    .eq("booking_ref", id)
-    .select("id");
+    .eq("id", bookingUUID);
 
   if (error) {
     console.error("──────────── [checkoutWithOverride] Step 2 — UPDATE bookings FAILED ────────────");
@@ -1837,39 +1872,37 @@ export async function checkoutWithOverride(
   // INSERT failure is logged but does NOT throw. The scalar already committed;
   // throwing here would roll back the client's optimistic state (worse UX).
   // Recovery: manual INSERT into booking_extra_charges using the logged values.
+  // booking_room_id = null: booking-level charge, not attributed to a specific
+  // room. Matches the column's nullable design intent:
+  //   "NULL = booking-level charge; non-null = attributed to a specific room"
+  // bookingUUID comes from Step 0 (no longer needed from Step 2 updateData).
   if (extraChargeAmount && extraChargeAmount > 0) {
-    const bookingUUID = (updateData as Array<{ id: string }> | null)?.[0]?.id;
-    if (bookingUUID) {
-      console.log("[checkoutWithOverride] Step 3 — INSERT booking_extra_charges" +
-        ` | booking_id: ${bookingUUID} | amount: ${extraChargeAmount} | reason: ${extraChargeReason}`);
-      const { error: insertErr } = await supabase
-        .from("booking_extra_charges")
-        .insert({
-          booking_id:      bookingUUID,
-          booking_room_id: bookingRoomId,
-          amount:          extraChargeAmount,
-          reason:          extraChargeReason || null,
-          charge_type:     "other",
-          applied_at:      new Date().toISOString(),
-        });
-      if (insertErr) {
-        console.error("──────────── [checkoutWithOverride] Step 3 — INSERT booking_extra_charges FAILED ────────────");
-        console.error("  message     :", insertErr.message);
-        console.error("  details     :", insertErr.details);
-        console.error("  hint        :", insertErr.hint);
-        console.error("  code        :", insertErr.code);
-        console.error("  booking_ref :", id);
-        console.error("  booking_id  :", bookingUUID);
-        console.error("  amount      :", extraChargeAmount);
-        console.error("  reason      :", extraChargeReason);
-        console.error("──────────────────────────────────────────────────────────────────────────────────────────");
-        // Do NOT throw — scalar committed. Recoverable with manual INSERT.
-      } else {
-        console.log("[checkoutWithOverride] Step 3 — booking_extra_charges INSERT succeeded for booking_ref:", id);
-      }
+    console.log("[checkoutWithOverride] Step 3 — INSERT booking_extra_charges" +
+      ` | booking_id: ${bookingUUID} | amount: ${extraChargeAmount} | reason: ${extraChargeReason}`);
+    const { error: insertErr } = await supabase
+      .from("booking_extra_charges")
+      .insert({
+        booking_id:      bookingUUID,
+        booking_room_id: null,
+        amount:          extraChargeAmount,
+        reason:          extraChargeReason || null,
+        charge_type:     "other",
+        applied_at:      new Date().toISOString(),
+      });
+    if (insertErr) {
+      console.error("──────────── [checkoutWithOverride] Step 3 — INSERT booking_extra_charges FAILED ────────────");
+      console.error("  message     :", insertErr.message);
+      console.error("  details     :", insertErr.details);
+      console.error("  hint        :", insertErr.hint);
+      console.error("  code        :", insertErr.code);
+      console.error("  booking_ref :", id);
+      console.error("  booking_id  :", bookingUUID);
+      console.error("  amount      :", extraChargeAmount);
+      console.error("  reason      :", extraChargeReason);
+      console.error("──────────────────────────────────────────────────────────────────────────────────────────");
+      // Do NOT throw — scalar committed. Recoverable with manual INSERT.
     } else {
-      console.error("[checkoutWithOverride] Step 3 — booking UUID not returned by Step 2 SELECT;" +
-        ` booking_extra_charges INSERT skipped | booking_ref: ${id} | amount: ${extraChargeAmount}`);
+      console.log("[checkoutWithOverride] Step 3 — booking_extra_charges INSERT succeeded for booking_ref:", id);
     }
   }
 
