@@ -73,11 +73,10 @@ export default async function InvoicePage({ params }: Props) {
   });
   const totalExtraCharges  = sortedExtras.reduce((sum, c) => sum + c.amount, 0);
 
-  const earlyDeduction     = booking.earlyDeductionAmount     ?? 0;
   const additionalDiscount = booking.additionalDiscountAmount ?? 0;
 
   // grossBill = total owed for the stay, before payments
-  const grossBill   = booking.totalAmount + totalExtraCharges - earlyDeduction - additionalDiscount;
+  const grossBill   = booking.totalAmount + totalExtraCharges - additionalDiscount;
   // outstanding = what's still owed after all payments recorded
   const outstanding = calcTrueDue(booking);
   const totalPaid   = payments.reduce((sum, p) => sum + p.amount, 0);
@@ -234,23 +233,7 @@ export default async function InvoicePage({ params }: Props) {
                       {formatTaka(roomSubtotal)}
                     </td>
                   </tr>
-                  {/* Per-room early checkout deduction — indented sub-row */}
-                  {room.earlyNightsDeducted > 0 && room.earlyDeductionAmount > 0 && (
-                    <tr className="border-b border-slate-100">
-                      <td className="py-3 pl-4">
-                        <p className={`font-medium ${isCancelled ? "line-through text-slate-400" : "text-emerald-700"}`}>
-                          Early checkout deduction
-                        </p>
-                        <p className={`text-[11px] mt-0.5 ${isCancelled ? "line-through text-slate-400" : "text-emerald-600"}`}>
-                          {room.earlyNightsDeducted}{" "}
-                          {room.earlyNightsDeducted === 1 ? "night" : "nights"} deducted
-                        </p>
-                      </td>
-                      <td className={`py-3 text-right font-medium tabular-nums ${isCancelled ? "line-through text-slate-400" : "text-emerald-700"}`}>
-                        −{formatTaka(room.earlyDeductionAmount)}
-                      </td>
-                    </tr>
-                  )}
+
                 </Fragment>
               );
             })}

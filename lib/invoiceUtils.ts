@@ -59,12 +59,10 @@ export function calcTrueDue(b: {
   totalAmount:               number;
   amountPaid:                number;
   extraChargeAmount?:        number;
-  earlyDeductionAmount?:     number;
   additionalDiscountAmount?: number;
 }): number {
   return b.totalAmount
     + (b.extraChargeAmount          ?? 0)
-    - (b.earlyDeductionAmount       ?? 0)
     - (b.additionalDiscountAmount   ?? 0)
     - b.amountPaid;
 }

@@ -1453,7 +1453,6 @@ export async function recordPayment(
   const trueDue =
     booking.total_amount
     + ((booking.extra_charge_amount         as number | null) ?? 0)
-    - ((booking.early_deduction_amount      as number | null) ?? 0)
     - ((booking.additional_discount_amount  as number | null) ?? 0)
     - booking.paid_amount;
 
