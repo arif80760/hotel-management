@@ -45,12 +45,6 @@ function localDateToISO(d: Date): string {
 const TODAY_ISO = localDateToISO(new Date());
 
 // ── Status derivation helpers ─────────────────────────────────
-// Half-open interval [checkIn, checkOut): checkout date = room released.
-// Matches booking system overlap check semantics exactly.
-function bookingActiveOnDate(b: Booking, dateISO: string): boolean {
-  if (!b.checkInISO || !b.checkOutISO) return false;
-  return b.checkInISO <= dateISO && dateISO < b.checkOutISO;
-}
 
 function deriveRoomStatusForDate(
   room: Room, dateISO: string, todayISO: string, bookings: Booking[],
@@ -65,26 +59,33 @@ function deriveRoomStatusForDate(
   //    physically present until staff confirms. Half-open would say "released"
   //    but guest hasn't left yet.
   if (dateISO === todayISO) {
-    const stillCheckedIn = bookings.find(
-      b =>
-        b.roomNumber === room.roomNumber &&
-        b.status === "Checked In" &&
-        b.checkOutISO === todayISO,
+    const stillCheckedIn = bookings.some(b =>
+      b.rooms.some(
+        r =>
+          r.roomNumber === room.roomNumber &&
+          r.status === "Checked In" &&
+          r.checkOutISO === todayISO,
+      )
     );
     if (stillCheckedIn) return "Occupied";
   }
-  // 3. Standard active booking check (half-open — checkout day is released)
-  const activeBooking = bookings.find(
-    b =>
-      b.roomNumber === room.roomNumber &&
-      b.status !== "Cancelled" &&
-      bookingActiveOnDate(b, dateISO),
-  );
-  if (activeBooking) {
-    if (activeBooking.status === "Checked In")                          return "Occupied";
-    if (activeBooking.status === "Checked Out" && dateISO < todayISO)  return "Occupied";
-    if (activeBooking.status === "Confirmed"   && dateISO >= todayISO) return "Reserved";
-    // Stale Confirmed on past dates → fall through to Available
+  // 3. Standard active booking check (half-open — checkout day is released).
+  //    Iterates b.rooms[] so multi-room bookings match each room correctly.
+  for (const b of bookings) {
+    if (b.status === "Cancelled") continue;
+    const matched = b.rooms.find(
+      r =>
+        r.roomNumber === room.roomNumber &&
+        r.status !== "Cancelled" &&
+        r.checkInISO <= dateISO && dateISO < r.checkOutISO,
+    );
+    if (matched) {
+      const s = matched.status;
+      if (s === "Checked In")                                                        return "Occupied";
+      if ((s === "Checked Out" || s === "Checked Out Early") && dateISO < todayISO) return "Occupied";
+      if (s === "Confirmed" && dateISO >= todayISO)                                 return "Reserved";
+      break; // stale Confirmed on past dates → fall through to Available
+    }
   }
   // 4. Default
   return "Available";
@@ -96,11 +97,15 @@ function getBookingForRoomOnDate(
   if (dateISO === todayISO) return undefined;
   return bookings.find(
     b =>
-      b.roomNumber === room.roomNumber &&
       b.status !== "Cancelled" &&
       ((dateISO > todayISO && (b.status === "Confirmed" || b.status === "Checked In")) ||
        (dateISO < todayISO && (b.status === "Checked In" || b.status === "Checked Out"))) &&
-      bookingActiveOnDate(b, dateISO),
+      b.rooms.some(
+        r =>
+          r.roomNumber === room.roomNumber &&
+          r.status !== "Cancelled" &&
+          r.checkInISO <= dateISO && dateISO < r.checkOutISO,
+      ),
   );
 }
 
