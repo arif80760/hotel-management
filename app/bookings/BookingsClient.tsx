@@ -47,6 +47,7 @@ import {
   deleteDocument,
 } from "@/services/documentsService";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
+import { calcBookingLevelDeductions } from "@/lib/checkoutUtils";
 import type { Refund } from "@/lib/mockData";
 import * as bookingsService from "@/services/bookingsService";
 import type { Payment, BulkCheckinFailure } from "@/services/bookingsService";
@@ -2115,13 +2116,9 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (!checkoutConfirm) return;
     const charge = validateAndBuildCharge();
     if (charge === undefined) return;
-    const { earlyDays, earlyAmt: earlyDeductionAmt, actualDateISO } = calcEarlyDeduction(
-      checkoutConfirm.checkOut,
-      checkoutConfirm.bookingRate,
-      checkoutConfirm.totalAmount,
-      checkoutConfirm.nights,
-      checkoutOpenedAt ?? new Date(),
-    );
+    const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
+      calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], checkoutOpenedAt ?? new Date());
+    const actualDateISO = new Date().toISOString().split("T")[0];
     const remainingAfterPayment =
       checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt - liveAmountPaid;
     const discount = validateAndBuildDiscount(remainingAfterPayment);
@@ -2157,8 +2154,6 @@ export default function BookingsClient({ initialRoom }: Props) {
       charge.amount,
       charge.reason,
       actualDateISO,
-      earlyDays,
-      earlyDeductionAmt,
       discount.amount,
       moreDiscountReason.trim() || null,
       capturedMethod,
@@ -2192,13 +2187,9 @@ export default function BookingsClient({ initialRoom }: Props) {
     }
     const charge = validateAndBuildCharge();
     if (charge === undefined) return;
-    const { earlyDays, earlyAmt: earlyDeductionAmt, actualDateISO } = calcEarlyDeduction(
-      checkoutConfirm.checkOut,
-      checkoutConfirm.bookingRate,
-      checkoutConfirm.totalAmount,
-      checkoutConfirm.nights,
-      checkoutOpenedAt ?? new Date(),
-    );
+    const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
+      calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], checkoutOpenedAt ?? new Date());
+    const actualDateISO = new Date().toISOString().split("T")[0];
     const remainingAfterPayment =
       checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt - liveAmountPaid;
     const discount = validateAndBuildDiscount(remainingAfterPayment);
@@ -2227,8 +2218,6 @@ export default function BookingsClient({ initialRoom }: Props) {
       charge.amount,
       charge.reason,
       actualDateISO,
-      earlyDays,
-      earlyDeductionAmt,
       discount.amount,
       moreDiscountReason.trim() || null,
       capturedMethod,
@@ -4607,13 +4596,8 @@ export default function BookingsClient({ initialRoom }: Props) {
       {checkoutConfirm && (() => {
         const extraChargeAmt     = parseFloat(chargeAmount) || 0;
         const moreDiscountAmtNum = parseFloat(moreDiscountAmt) || 0;
-        const { earlyDays, earlyAmt: earlyDeductionAmt } = calcEarlyDeduction(
-          checkoutConfirm.checkOut,
-          checkoutConfirm.bookingRate,
-          checkoutConfirm.totalAmount,
-          checkoutConfirm.nights,
-          checkoutOpenedAt ?? new Date(),
-        );
+        const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
+          calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], checkoutOpenedAt ?? new Date());
         const finalTotal                = checkoutConfirm.totalAmount + extraChargeAmt;
         const finalPayableBeforeModalPay = finalTotal - earlyDeductionAmt - moreDiscountAmtNum - liveAmountPaid;
         const modalPayAmtNum            = parseFloat(modalPayAmt) || 0;

@@ -1549,8 +1549,6 @@ export async function checkoutNormal(
   extraChargeAmount: number,
   extraChargeReason: string | null,
   actualCheckoutDate: string,
-  earlyNightsDeducted: number,
-  earlyDeductionAmount: number,
   additionalDiscountAmount: number,
   additionalDiscountReason: string | null,
   additionalDiscountBy: string | null,
@@ -1582,16 +1580,12 @@ export async function checkoutNormal(
   console.log(
     "[checkoutNormal] Step 1 — RPC checkout_booking" +
     ` | bookingUUID: ${bookingUUID}` +
-    ` | actualCheckoutDate: ${actualCheckoutDate}` +
-    ` | earlyNightsDeducted: ${earlyNightsDeducted}` +
-    ` | earlyDeductionAmount: ${earlyDeductionAmount}`
+    ` | actualCheckoutDate: ${actualCheckoutDate}`
   );
 
   const { error: rpcErr } = await supabase.rpc("checkout_booking", {
-    p_booking_id:            bookingUUID,
-    p_actual_checkout_date:  actualCheckoutDate || null,
-    p_early_nights_deducted: earlyNightsDeducted,
-    p_deduction_amount:      earlyDeductionAmount,
+    p_booking_id:           bookingUUID,
+    p_actual_checkout_date: actualCheckoutDate || null,
   });
 
   if (rpcErr) {
@@ -1742,8 +1736,6 @@ export async function checkoutWithOverride(
   extraChargeAmount?: number,
   extraChargeReason?: string | null,
   actualCheckoutDate?: string,
-  earlyNightsDeducted?: number,
-  earlyDeductionAmount?: number,
   additionalDiscountAmount?: number,
   additionalDiscountReason?: string | null,
   additionalDiscountBy?: string | null,
@@ -1775,16 +1767,12 @@ export async function checkoutWithOverride(
   console.log(
     "[checkoutWithOverride] Step 1 — RPC checkout_booking" +
     ` | bookingUUID: ${bookingUUID}` +
-    ` | actualCheckoutDate: ${actualCheckoutDate ?? "none"}` +
-    ` | earlyNightsDeducted: ${earlyNightsDeducted ?? 0}` +
-    ` | earlyDeductionAmount: ${earlyDeductionAmount ?? 0}`
+    ` | actualCheckoutDate: ${actualCheckoutDate ?? "none"}`
   );
 
   const { error: rpcErr } = await supabase.rpc("checkout_booking", {
-    p_booking_id:            bookingUUID,
-    p_actual_checkout_date:  actualCheckoutDate  || null,
-    p_early_nights_deducted: earlyNightsDeducted ?? 0,
-    p_deduction_amount:      earlyDeductionAmount ?? 0,
+    p_booking_id:           bookingUUID,
+    p_actual_checkout_date: actualCheckoutDate || null,
   });
 
   if (rpcErr) {
