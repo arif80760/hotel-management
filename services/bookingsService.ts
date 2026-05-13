@@ -1613,10 +1613,11 @@ export async function checkoutNormal(
   if (Object.keys(bookingsPayload).length > 0) {
     console.log("[checkoutNormal] Step 2 — UPDATE bookings, booking_ref:", id, "| payload:", bookingsPayload);
 
-    const { error, status, statusText } = await supabase
+    const { data: updateData, error, status, statusText } = await supabase
       .from("bookings")
       .update(bookingsPayload)
-      .eq("booking_ref", id);
+      .eq("booking_ref", id)
+      .select("id");
 
     if (error) {
       console.error("──────────── [checkoutNormal] Step 2 — UPDATE bookings FAILED ────────────");
@@ -1637,6 +1638,50 @@ export async function checkoutNormal(
     }
 
     console.log("[checkoutNormal] Step 2 — extra charge / discount written for booking_ref:", id);
+
+    // ── Step 3 — INSERT booking_extra_charges (table row for invoice display) ──
+    // The scalar write (Step 2) drives all financial calculations (calcTrueDue,
+    // fn_sync_payment_status, recordPayment). This INSERT creates the table row
+    // that invoice and reservation pages use for itemised display.
+    //
+    // INSERT failure is logged but does NOT throw. The scalar already committed;
+    // throwing here would roll back the client's optimistic state (worse UX).
+    // Recovery: manual INSERT into booking_extra_charges using the logged values.
+    if (extraChargeAmount > 0) {
+      const bookingUUID = (updateData as Array<{ id: string }> | null)?.[0]?.id;
+      if (bookingUUID) {
+        console.log("[checkoutNormal] Step 3 — INSERT booking_extra_charges" +
+          ` | booking_id: ${bookingUUID} | amount: ${extraChargeAmount} | reason: ${extraChargeReason}`);
+        const { error: insertErr } = await supabase
+          .from("booking_extra_charges")
+          .insert({
+            booking_id:      bookingUUID,
+            booking_room_id: bookingRoomId,
+            amount:          extraChargeAmount,
+            reason:          extraChargeReason || null,
+            charge_type:     "other",
+            applied_at:      new Date().toISOString(),
+          });
+        if (insertErr) {
+          console.error("──────────── [checkoutNormal] Step 3 — INSERT booking_extra_charges FAILED ────────────");
+          console.error("  message     :", insertErr.message);
+          console.error("  details     :", insertErr.details);
+          console.error("  hint        :", insertErr.hint);
+          console.error("  code        :", insertErr.code);
+          console.error("  booking_ref :", id);
+          console.error("  booking_id  :", bookingUUID);
+          console.error("  amount      :", extraChargeAmount);
+          console.error("  reason      :", extraChargeReason);
+          console.error("────────────────────────────────────────────────────────────────────────────────────────");
+          // Do NOT throw — scalar committed. Recoverable with manual INSERT.
+        } else {
+          console.log("[checkoutNormal] Step 3 — booking_extra_charges INSERT succeeded for booking_ref:", id);
+        }
+      } else {
+        console.error("[checkoutNormal] Step 3 — booking UUID not returned by Step 2 SELECT;" +
+          ` booking_extra_charges INSERT skipped | booking_ref: ${id} | amount: ${extraChargeAmount}`);
+      }
+    }
   } else {
     console.log("[checkoutNormal] Step 2 — no extra charges or discount, skipping bookings UPDATE");
   }
@@ -1747,10 +1792,11 @@ export async function checkoutWithOverride(
 
   console.log("[checkoutWithOverride] Step 2 — UPDATE bookings, booking_ref:", id, "| payload:", updatePayload);
 
-  const { error, status, statusText } = await supabase
+  const { data: updateData, error, status, statusText } = await supabase
     .from("bookings")
     .update(updatePayload)
-    .eq("booking_ref", id);
+    .eq("booking_ref", id)
+    .select("id");
 
   if (error) {
     console.error("──────────── [checkoutWithOverride] Step 2 — UPDATE bookings FAILED ────────────");
@@ -1781,6 +1827,50 @@ export async function checkoutWithOverride(
       (error.hint    ? ` | hint: ${error.hint}`        : "") +
       (error.details ? ` | details: ${error.details}`  : "")
     );
+  }
+
+  // ── Step 3 — INSERT booking_extra_charges (table row for invoice display) ──
+  // The scalar write (Step 2) drives all financial calculations (calcTrueDue,
+  // fn_sync_payment_status, recordPayment). This INSERT creates the table row
+  // that invoice and reservation pages use for itemised display.
+  //
+  // INSERT failure is logged but does NOT throw. The scalar already committed;
+  // throwing here would roll back the client's optimistic state (worse UX).
+  // Recovery: manual INSERT into booking_extra_charges using the logged values.
+  if (extraChargeAmount && extraChargeAmount > 0) {
+    const bookingUUID = (updateData as Array<{ id: string }> | null)?.[0]?.id;
+    if (bookingUUID) {
+      console.log("[checkoutWithOverride] Step 3 — INSERT booking_extra_charges" +
+        ` | booking_id: ${bookingUUID} | amount: ${extraChargeAmount} | reason: ${extraChargeReason}`);
+      const { error: insertErr } = await supabase
+        .from("booking_extra_charges")
+        .insert({
+          booking_id:      bookingUUID,
+          booking_room_id: bookingRoomId,
+          amount:          extraChargeAmount,
+          reason:          extraChargeReason || null,
+          charge_type:     "other",
+          applied_at:      new Date().toISOString(),
+        });
+      if (insertErr) {
+        console.error("──────────── [checkoutWithOverride] Step 3 — INSERT booking_extra_charges FAILED ────────────");
+        console.error("  message     :", insertErr.message);
+        console.error("  details     :", insertErr.details);
+        console.error("  hint        :", insertErr.hint);
+        console.error("  code        :", insertErr.code);
+        console.error("  booking_ref :", id);
+        console.error("  booking_id  :", bookingUUID);
+        console.error("  amount      :", extraChargeAmount);
+        console.error("  reason      :", extraChargeReason);
+        console.error("──────────────────────────────────────────────────────────────────────────────────────────");
+        // Do NOT throw — scalar committed. Recoverable with manual INSERT.
+      } else {
+        console.log("[checkoutWithOverride] Step 3 — booking_extra_charges INSERT succeeded for booking_ref:", id);
+      }
+    } else {
+      console.error("[checkoutWithOverride] Step 3 — booking UUID not returned by Step 2 SELECT;" +
+        ` booking_extra_charges INSERT skipped | booking_ref: ${id} | amount: ${extraChargeAmount}`);
+    }
   }
 
   console.log("[checkoutWithOverride] complete for booking_ref:", id);
