@@ -15,14 +15,16 @@
 --
 -- Active functions (4 remain):
 --   1. fn_stamp_booking_timestamps — BEFORE UPDATE OF status ON bookings
---   2. fn_sync_paid_amount         — AFTER INSERT ON payments
+--   2. fn_sync_paid_amount         — AFTER INSERT OR DELETE ON payments
 --   3. fn_sync_payment_status      — BEFORE UPDATE OF paid_amount, total_amount ON bookings
 --   4. fn_sync_last_payment_method — AFTER INSERT ON payments
 --
 -- NOTE — binding corrections vs initial reconstruction (2026-05-07):
 --   trg_stamp_booking_timestamps was INSERT OR UPDATE → UPDATE OF status only
---   trg_sync_paid_amount      was INSERT OR UPDATE OR DELETE → INSERT only
---                             Body also changed: incremental (+=) not re-aggregate (SUM)
+--   trg_sync_paid_amount      was INSERT OR UPDATE OR DELETE → INSERT only (2026-05-08)
+--                             Body changed: incremental (+=) not re-aggregate (SUM)
+--                             Extended to INSERT OR DELETE (2026-05-14, Phase 11 #50):
+--                             DELETE branch re-aggregates; INSERT branch unchanged.
 --   trg_sync_payment_status   was UPDATE OF paid_amount → UPDATE OF paid_amount, total_amount
 -- =============================================================
 
@@ -92,23 +94,51 @@ EXECUTE FUNCTION public.fn_stamp_booking_timestamps();
 
 -- ─────────────────────────────────────────────────────────────
 -- 2. fn_sync_paid_amount
--- Fires: AFTER INSERT ON payments
+-- Fires: AFTER INSERT OR DELETE ON payments
 --
--- Increments bookings.paid_amount by the new payment's amount.
--- Uses GREATEST(0, ...) to guard against a negative drift.
+-- INSERT branch: fail-fast incremental (Phase 8.5, 2026-05-09).
+--   Raises if result < 0 — prevents disbursing more than received.
+--   recordPayment() in bookingsService.ts INSERT-only design matches.
 --
--- Implication of INSERT-only + incremental body:
---   • Payment UPDATEs and DELETEs do NOT trigger auto-recalc.
---   • If a payment row is ever corrected or removed outside the
---     normal app flow, paid_amount must be manually reconciled.
---   • recordPayment() in bookingsService.ts INSERT-only design
---     matches this trigger exactly.
+-- DELETE branch: re-aggregate from remaining rows (Phase 11 #50, 2026-05-14).
+--   Defensive against pre-existing scalar drift. Does not raise.
+--   Payment rows should never be deleted in normal flow — this branch
+--   guards against manual SQL Editor deletions (e.g. test-data cleanup).
 -- ─────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.fn_sync_paid_amount()
 RETURNS TRIGGER AS $$
+DECLARE
+  v_current NUMERIC;
+  v_new     NUMERIC;
 BEGIN
-  UPDATE bookings
-  SET    paid_amount = GREATEST(0, paid_amount + NEW.amount)
+
+  IF TG_OP = 'DELETE' THEN
+    UPDATE public.bookings
+    SET    paid_amount = (
+             SELECT COALESCE(SUM(amount), 0)
+             FROM   public.payments
+             WHERE  booking_id = OLD.booking_id
+           )
+    WHERE  id = OLD.booking_id;
+    RETURN OLD;
+  END IF;
+
+  SELECT paid_amount INTO v_current
+  FROM   public.bookings
+  WHERE  id = NEW.booking_id;
+
+  v_new := v_current + NEW.amount;
+
+  IF v_new < 0 THEN
+    RAISE EXCEPTION
+      'Disbursement of % would result in negative paid_amount '
+      '(current: %, projected: %). '
+      'Cannot disburse more than has been received.',
+      NEW.amount, v_current, v_new;
+  END IF;
+
+  UPDATE public.bookings
+  SET    paid_amount = v_new
   WHERE  id = NEW.booking_id;
 
   RETURN NEW;
@@ -117,7 +147,7 @@ $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_sync_paid_amount ON public.payments;
 CREATE TRIGGER trg_sync_paid_amount
-AFTER INSERT ON public.payments
+AFTER INSERT OR DELETE ON public.payments
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_sync_paid_amount();
 
