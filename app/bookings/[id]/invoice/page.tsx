@@ -169,9 +169,9 @@ export default async function InvoicePage({ params }: Props) {
               const isCancelled = room.status === "Cancelled";
               // Per-room checkout: actual departure date if set, else scheduled checkout.
               const roomCheckoutISO = room.actualCheckoutDate ?? room.checkOutISO;
-              // Compute nights from dates — stored nights column may drift from check_in/check_out.
+              // Compute nights using actual departure if recorded, else original scheduled checkout.
               const computedNights = Math.round(
-                (new Date(room.checkOutISO).getTime() - new Date(room.checkInISO).getTime())
+                (new Date(roomCheckoutISO).getTime() - new Date(room.checkInISO).getTime())
                 / 86400000
               );
               return (
@@ -210,9 +210,10 @@ export default async function InvoicePage({ params }: Props) {
             {/* Room accommodation — one row per room, sorted by room_number */}
             {sortedRooms.map(room => {
               const isCancelled = room.status === "Cancelled";
-              // Compute nights from dates — stored nights column may drift from check_in/check_out.
+              const billedCheckoutISO = room.actualCheckoutDate ?? room.checkOutISO;
+              // Compute nights using actual departure if recorded, else original scheduled checkout.
               const computedNights = Math.round(
-                (new Date(room.checkOutISO).getTime() - new Date(room.checkInISO).getTime())
+                (new Date(billedCheckoutISO).getTime() - new Date(room.checkInISO).getTime())
                 / 86400000
               );
               const roomSubtotal = room.bookingRate * computedNights;
