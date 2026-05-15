@@ -16,7 +16,9 @@
 -- Active functions (4 remain):
 --   1. fn_stamp_booking_timestamps — BEFORE UPDATE OF status ON bookings
 --   2. fn_sync_paid_amount         — AFTER INSERT OR DELETE ON payments
---   3. fn_sync_payment_status      — BEFORE UPDATE OF paid_amount, total_amount ON bookings
+--   3. fn_sync_payment_status      — BEFORE UPDATE OF paid_amount, total_amount,
+--                                    status, extra_charge_amount,
+--                                    additional_discount_amount ON bookings
 --   4. fn_sync_last_payment_method — AFTER INSERT ON payments
 --
 -- NOTE — binding corrections vs initial reconstruction (2026-05-07):
@@ -26,6 +28,10 @@
 --                             Extended to INSERT OR DELETE (2026-05-14, Phase 11 #50):
 --                             DELETE branch re-aggregates; INSERT branch unchanged.
 --   trg_sync_payment_status   was UPDATE OF paid_amount → UPDATE OF paid_amount, total_amount
+--                             Extended: + status, extra_charge_amount (2026-05-12, Phase 11 #20)
+--                             Extended: + additional_discount_amount (2026-05-15, Phase 11 #55)
+--                             Formula:  + COALESCE(extra_charge_amount,0) (Phase 11 #20)
+--                                       - COALESCE(additional_discount_amount,0) (Phase 11 #55)
 -- =============================================================
 
 
@@ -154,30 +160,54 @@ EXECUTE FUNCTION public.fn_sync_paid_amount();
 
 -- ─────────────────────────────────────────────────────────────
 -- 3. fn_sync_payment_status
--- Fires: BEFORE UPDATE OF paid_amount, total_amount ON bookings
+-- Fires: BEFORE UPDATE OF paid_amount, total_amount, status,
+--        extra_charge_amount, additional_discount_amount ON bookings
 --
--- Derives payment_status from paid_amount vs total_amount.
--- Only recalculates when either watched column actually changes.
+-- Derives payment_status from the five governing columns.
+-- Only recalculates when any watched column actually changes.
 --
--- ⚠  KNOWN BUG — does not account for extra-charge adjustments:
---    Compares paid_amount >= total_amount, which ignores
---    extra_charge_amount, early_deduction_amount, and
---    additional_discount_amount.  A booking with extra charges
---    can show "paid" when balance is still outstanding.
---    See CLAUDE.md → Known Issues for full details and fix plan.
+-- Formula (Phase 11 #55, authoritative as of 2026-05-15):
+--   effective_total = total_amount
+--                     + COALESCE(extra_charge_amount, 0)
+--                     - COALESCE(additional_discount_amount, 0)
+--   cancelled → 'cancelled'
+--   paid_amount <= 0 → 'unpaid'
+--   paid_amount >= effective_total → 'paid'
+--   else → 'partial'
+--
+-- History:
+--   Initial: compared paid_amount >= total_amount only.
+--   Phase 11 #20 (2026-05-12): extended OF clause + formula to
+--     account for extra_charge_amount. Added cancelled branch.
+--   Phase 11 #55 (2026-05-15): extended OF clause + formula to
+--     subtract additional_discount_amount. early_deduction_amount
+--     intentionally absent — already baked into total_amount via
+--     reduced booking_rooms.nights (Phase 11 #48 design).
 -- ─────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.fn_sync_payment_status()
 RETURNS TRIGGER AS $$
 BEGIN
-  -- Only recalculate when the relevant columns actually change.
-  IF NEW.paid_amount  IS DISTINCT FROM OLD.paid_amount
-  OR NEW.total_amount IS DISTINCT FROM OLD.total_amount
+  -- Recalculate when any of the five governing columns changes.
+  IF NEW.paid_amount                IS DISTINCT FROM OLD.paid_amount
+  OR NEW.total_amount               IS DISTINCT FROM OLD.total_amount
+  OR NEW.status                     IS DISTINCT FROM OLD.status
+  OR NEW.extra_charge_amount        IS DISTINCT FROM OLD.extra_charge_amount
+  OR NEW.additional_discount_amount IS DISTINCT FROM OLD.additional_discount_amount
   THEN
     NEW.payment_status =
       CASE
-        WHEN NEW.paid_amount <= 0                   THEN 'unpaid'::payment_status
-        WHEN NEW.paid_amount >= NEW.total_amount    THEN 'paid'::payment_status
-        ELSE                                             'partial'::payment_status
+        -- Cancelled booking always wins, regardless of amounts.
+        WHEN NEW.status = 'cancelled'
+          THEN 'cancelled'::payment_status
+        WHEN NEW.paid_amount <= 0
+          THEN 'unpaid'::payment_status
+        -- 'paid' when guest has covered rooms + extras, net of any discount.
+        WHEN NEW.paid_amount >= NEW.total_amount
+                                + COALESCE(NEW.extra_charge_amount, 0)
+                                - COALESCE(NEW.additional_discount_amount, 0)
+          THEN 'paid'::payment_status
+        ELSE
+          'partial'::payment_status
       END;
   END IF;
 
@@ -187,7 +217,8 @@ $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_sync_payment_status ON public.bookings;
 CREATE TRIGGER trg_sync_payment_status
-BEFORE UPDATE OF paid_amount, total_amount ON public.bookings
+BEFORE UPDATE OF paid_amount, total_amount, status, extra_charge_amount,
+                 additional_discount_amount ON public.bookings
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_sync_payment_status();
 
