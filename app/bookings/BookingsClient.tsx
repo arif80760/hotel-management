@@ -2099,7 +2099,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       setDiscountError("Discount amount cannot be negative.");
       return undefined;
     }
-    if (amt > remainingAfterPayment) {
+    if (amt > 0 && amt > remainingAfterPayment) {
       setDiscountError(
         `Discount cannot exceed remaining balance of ৳${remainingAfterPayment.toLocaleString()}.`
       );

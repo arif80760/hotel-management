@@ -10,6 +10,10 @@
 --   checkout_booking_room      → 2026-05-08-multi-room-rpc.sql
 --   cancel_booking_room        → 2026-05-09-phase7-rpc-updates.sql
 --   cancel_booking             → 2026-05-09-phase8.6-atomic-cancel-with-disbursement.sql
+--   disburse_refund            → 2026-05-09-phase8.5-refund-disbursement.sql
+--                                Revised: 2026-05-15-phase11-58a-overpayment-auto-refund.sql
+--                                (pre_adjusted branch — see Section 4 of that migration)
+--   deny_refund                → 2026-05-09-phase8.5-refund-disbursement.sql
 --   bulk_checkin_booking_rooms → 2026-05-11-bulk-checkin-booking-rooms-rpc.sql
 --   update_booking_total       → 2026-05-08-multi-room-rpc.sql
 -- =============================================================
@@ -28,15 +32,31 @@
 --        2026-05-13-phase11-48-checkout-booking-per-room-deductions.sql
 --        Signature: (UUID, DATE, INTEGER, NUMERIC) → (UUID, DATE)
 --        Guard removed; RPC now computes per-room deductions internally.
+-- Revised: 2026-05-14 via migration
+--        2026-05-14-phase11-57-checkout-stop-stomping-check-out-date.sql
+--        Removed check_out_date stomp from upd CTE.
+-- Revised: 2026-05-15 via migration
+--        2026-05-15-phase11-58a-overpayment-auto-refund.sql
+--        Added step 3.5: overpayment detection + pending refund auto-creation.
 -- ──────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.checkout_booking(
   p_booking_id           UUID,
   p_actual_checkout_date DATE DEFAULT NULL
 )
 RETURNS VOID
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
 DECLARE
-  v_room_ids UUID[];
+  v_room_ids        UUID[];
+  -- Step 3.5: overpayment detection
+  v_new_rooms_total NUMERIC;
+  v_paid_amount     NUMERIC;
+  v_extra_charge    NUMERIC;
+  v_discount        NUMERIC;
+  v_effective_total NUMERIC;
+  v_overpayment     NUMERIC;
+  v_refund_id       UUID;
 BEGIN
 
   -- ── 1. Validate booking exists ────────────────────────────────────────────
@@ -86,7 +106,7 @@ BEGIN
                                     END,
            checked_out_at         = NOW(),
            actual_checkout_date   = COALESCE(p_actual_checkout_date, ar.check_out_date),
-           check_out_date         = COALESCE(p_actual_checkout_date, ar.check_out_date),
+           -- check_out_date intentionally omitted — stays as original scheduled date
            early_nights_deducted  = ar.early_nights,
            early_deduction_amount = ar.deduction_amt,
            nights                 = GREATEST(1, ar.nights - ar.early_nights),
@@ -99,7 +119,7 @@ BEGIN
   INTO   v_room_ids
   FROM   upd;
 
-  -- ── 3. Set physical rooms to cleaning ────────────────────────────
+  -- ── 3. Set physical rooms to cleaning ─────────────────────────────────────
   -- v_room_ids is NULL when 0 active rows (already-terminal booking).
   -- Guard prevents a vacuous ANY(NULL) match.
   IF v_room_ids IS NOT NULL THEN
@@ -109,13 +129,52 @@ BEGIN
     WHERE  id = ANY(v_room_ids);
   END IF;
 
-  -- ── 4. Recompute booking total ────────────────────────────────────────────────────
-  -- update_booking_total sums SUM(nights × booking_rate) from non-cancelled
-  -- booking_rooms. Step 2 already reduced per-room nights, so this yields
-  -- the correct lower total automatically. Fires trg_sync_payment_status.
+  -- ── 3.5. Detect overpayment and auto-create pending refund ────────────────
+  -- Must run BEFORE update_booking_total (step 4) so that paid_amount is
+  -- already decremented when chk_paid_not_exceed_total evaluates.
+  --
+  -- Reads booking_rooms.nights AFTER step 2's CTE reduced them — same values
+  -- update_booking_total will sum. If no overpayment, this block is a no-op.
+  SELECT COALESCE(SUM(br.nights * br.booking_rate), 0),
+         b.paid_amount,
+         COALESCE(b.extra_charge_amount, 0),
+         COALESCE(b.additional_discount_amount, 0)
+  INTO   v_new_rooms_total, v_paid_amount, v_extra_charge, v_discount
+  FROM   public.bookings b
+  LEFT JOIN public.booking_rooms br
+         ON br.booking_id = b.id
+        AND br.status NOT IN ('cancelled')
+  WHERE  b.id = p_booking_id
+  GROUP BY b.paid_amount, b.extra_charge_amount, b.additional_discount_amount;
+
+  v_effective_total := v_new_rooms_total + v_extra_charge - v_discount;
+
+  IF v_paid_amount > v_effective_total THEN
+    v_overpayment := v_paid_amount - v_effective_total;
+
+    INSERT INTO public.refunds (
+      booking_id, booking_room_id, amount, reason, status, created_by, pre_adjusted
+    ) VALUES (
+      p_booking_id, NULL, v_overpayment,
+      'Auto-created from checkout — overpayment ৳' || v_overpayment::TEXT,
+      'pending', NULL, TRUE
+    ) RETURNING id INTO v_refund_id;
+
+    INSERT INTO public.payments (booking_id, amount, method, notes, refund_id)
+    VALUES (
+      p_booking_id, -v_overpayment, 'other'::public.payment_method,
+      'Auto-refund pre-adjustment — refund row ' || v_refund_id::TEXT,
+      v_refund_id
+    );
+    -- trg_sync_paid_amount fires; paid_amount now = v_effective_total
+  END IF;
+
+  -- ── 4. Recompute booking total ────────────────────────────────────────────
+  -- Step 3.5 already decremented paid_amount when needed, so
+  -- chk_paid_not_exceed_total will not fire. Fires trg_sync_payment_status.
   PERFORM public.update_booking_total(p_booking_id);
 
-  -- ── 5. Promote booking to checked_out ────────────────────────────────────────────
+  -- ── 5. Promote booking to checked_out ─────────────────────────────────────
   -- IS DISTINCT FROM guard prevents a no-op UPDATE from firing triggers.
   UPDATE public.bookings
   SET    status = 'checked_out'
