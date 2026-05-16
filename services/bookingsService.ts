@@ -1579,12 +1579,16 @@ export async function checkoutNormal(
   console.log(
     "[checkoutNormal] Step 1 — RPC checkout_booking" +
     ` | bookingUUID: ${bookingUUID}` +
-    ` | actualCheckoutDate: ${actualCheckoutDate}`
+    ` | actualCheckoutDate: ${actualCheckoutDate}` +
+    ` | additionalDiscountAmount: ${additionalDiscountAmount}`
   );
 
   const { error: rpcErr } = await supabase.rpc("checkout_booking", {
-    p_booking_id:           bookingUUID,
-    p_actual_checkout_date: actualCheckoutDate || null,
+    p_booking_id:                   bookingUUID,
+    p_actual_checkout_date:         actualCheckoutDate         || null,
+    p_additional_discount_amount:   additionalDiscountAmount   || 0,
+    p_additional_discount_reason:   additionalDiscountReason   || null,
+    p_additional_discount_by:       additionalDiscountBy       || null,
   });
 
   if (rpcErr) {
@@ -1615,12 +1619,9 @@ export async function checkoutNormal(
     bookingsPayload.extra_charge_amount = extraChargeAmount;
     bookingsPayload.extra_charge_reason = extraChargeReason || null;
   }
-  if (additionalDiscountAmount > 0) {
-    bookingsPayload.additional_discount_amount = additionalDiscountAmount;
-    bookingsPayload.additional_discount_at     = new Date().toISOString();
-    if (additionalDiscountReason) bookingsPayload.additional_discount_reason = additionalDiscountReason;
-    if (additionalDiscountBy)     bookingsPayload.additional_discount_by     = additionalDiscountBy;
-  }
+  // additional_discount_* is now written inside checkout_booking RPC (step 3.6).
+  // Removed from bookingsPayload to avoid the chk_paid_not_exceed_total
+  // constraint violation that fired when discount was applied post-RPC (#58b).
 
   if (Object.keys(bookingsPayload).length > 0) {
     console.log("[checkoutNormal] Step 2 — UPDATE bookings, booking_ref:", id, "| payload:", bookingsPayload);
@@ -1766,12 +1767,16 @@ export async function checkoutWithOverride(
   console.log(
     "[checkoutWithOverride] Step 1 — RPC checkout_booking" +
     ` | bookingUUID: ${bookingUUID}` +
-    ` | actualCheckoutDate: ${actualCheckoutDate ?? "none"}`
+    ` | actualCheckoutDate: ${actualCheckoutDate ?? "none"}` +
+    ` | additionalDiscountAmount: ${additionalDiscountAmount ?? 0}`
   );
 
   const { error: rpcErr } = await supabase.rpc("checkout_booking", {
-    p_booking_id:           bookingUUID,
-    p_actual_checkout_date: actualCheckoutDate || null,
+    p_booking_id:                   bookingUUID,
+    p_actual_checkout_date:         actualCheckoutDate         || null,
+    p_additional_discount_amount:   additionalDiscountAmount   ?? 0,
+    p_additional_discount_reason:   additionalDiscountReason   ?? null,
+    p_additional_discount_by:       additionalDiscountBy       ?? null,
   });
 
   if (rpcErr) {
@@ -1806,12 +1811,9 @@ export async function checkoutWithOverride(
     updatePayload.extra_charge_amount = extraChargeAmount;
     updatePayload.extra_charge_reason = extraChargeReason || null;
   }
-  if (additionalDiscountAmount && additionalDiscountAmount > 0) {
-    updatePayload.additional_discount_amount = additionalDiscountAmount;
-    updatePayload.additional_discount_at     = new Date().toISOString();
-    if (additionalDiscountReason) updatePayload.additional_discount_reason = additionalDiscountReason;
-    if (additionalDiscountBy)     updatePayload.additional_discount_by     = additionalDiscountBy;
-  }
+  // additional_discount_* is now written inside checkout_booking RPC (step 3.6).
+  // Removed from updatePayload to avoid the chk_paid_not_exceed_total
+  // constraint violation that fired when discount was applied post-RPC (#58b).
 
   console.log("[checkoutWithOverride] Step 2 — UPDATE bookings, booking_ref:", id, "| payload:", updatePayload);
 

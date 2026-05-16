@@ -1,58 +1,54 @@
 -- =============================================================
--- 07-functions.sql
--- RPC function definitions (PostgREST-callable via supabase.rpc()).
+-- 2026-05-16-phase11-58b-discount-in-rpc.sql
+-- Phase 11 #58b — Move additional_discount_* write into checkout_booking RPC
 --
--- These are app-layer RPCs invoked by bookingsService.ts.
--- Trigger functions live in 05-triggers.sql, not here.
+-- Problem:
+--   checkout_booking step 3.5 (overpayment detection) reads
+--   bookings.additional_discount_amount from the DB column.
+--   At RPC call time the column is always 0 — the discount is written
+--   in checkoutNormal / checkoutWithOverride Step 2 AFTER the RPC returns.
+--   When a fully-paid booking has a discount applied at checkout, the
+--   overpayment check sees effective_total too high, skips refund creation,
+--   and then Step 2's UPDATE hits chk_paid_not_exceed_total because
+--   paid_amount > total_amount - discount.
 --
--- Tracking started: 2026-05-13 (Phase 11 #46).
--- Prior RPCs exist only in their migration files:
---   checkout_booking_room      → 2026-05-08-multi-room-rpc.sql
---   cancel_booking_room        → 2026-05-09-phase7-rpc-updates.sql
---   cancel_booking             → 2026-05-09-phase8.6-atomic-cancel-with-disbursement.sql
---   disburse_refund            → 2026-05-09-phase8.5-refund-disbursement.sql
---                                Revised: 2026-05-15-phase11-58a-overpayment-auto-refund.sql
---                                (pre_adjusted branch — see Section 4 of that migration)
---   deny_refund                → 2026-05-09-phase8.5-refund-disbursement.sql
---   bulk_checkin_booking_rooms → 2026-05-11-bulk-checkin-booking-rooms-rpc.sql
---   update_booking_total       → 2026-05-08-multi-room-rpc.sql
+-- Fix (Option B1):
+--   1. Add p_additional_discount_amount / _reason / _by params to checkout_booking.
+--   2. Step 3.5 sources v_discount from the parameter, not the DB column.
+--   3. New step 3.6: write additional_discount_* to bookings AFTER step 3.5
+--      (paid_amount already decremented) and BEFORE step 4 (update_booking_total).
+--      Constraint proof: after step 3.5, paid_amount = effective_total.
+--      After step 3.6 writes the discount, paid_amount = rooms + extra - discount
+--      = total_amount (post-update_booking_total). Constraint holds at every point.
+--   4. bookingsService.ts Step 2: remove additional_discount_* from POST-RPC
+--      bookingsPayload / updatePayload. Extra charge columns stay in Step 2.
+--
+-- Overload note:
+--   checkout_booking(UUID, DATE) is a different overload from
+--   checkout_booking(UUID, DATE, NUMERIC, TEXT, TEXT).
+--   We DROP the old 2-param overload first to avoid PostgREST ambiguity.
+--
+-- GRANT note:
+--   GRANT TO anon is intentional. This app uses the anon key for all
+--   authenticated-user calls (Supabase anon key + RLS). The SECURITY
+--   DEFINER on this function handles the privilege escalation needed
+--   for cross-table writes.
 -- =============================================================
 
 
--- ──────────────────────────────────────────────────────────────
--- checkout_booking
--- Checks out all active rooms on a booking atomically.
--- Computes per-room early deductions from each room's own
--- check_out_date — correct for multi-room bookings with mixed
--- checkout schedules.
--- CTE-based bulk UPDATE — no cursor.
--- Added: 2026-05-13 via migration
---        2026-05-13-phase11-46-checkout-booking-rpc.sql
--- Revised: 2026-05-13 via migration
---        2026-05-13-phase11-48-checkout-booking-per-room-deductions.sql
---        Signature: (UUID, DATE, INTEGER, NUMERIC) → (UUID, DATE)
---        Guard removed; RPC now computes per-room deductions internally.
--- Revised: 2026-05-14 via migration
---        2026-05-14-phase11-57-checkout-stop-stomping-check-out-date.sql
---        Removed check_out_date stomp from upd CTE.
--- Revised: 2026-05-15 via migration
---        2026-05-15-phase11-58a-overpayment-auto-refund.sql
---        Added step 3.5: overpayment detection + pending refund auto-creation.
--- Revised: 2026-05-16 via migration
---        2026-05-16-phase11-58b-discount-in-rpc.sql
---        Signature: added p_additional_discount_amount/reason/by params.
---        Step 3.5: v_discount now sourced from parameter (not DB column).
---        Added step 3.6: write additional_discount_* columns inside RPC.
--- Revised: 2026-05-16 via migration
---        2026-05-16-phase11-58b-fix-discount-by-type.sql
---        p_additional_discount_by: TEXT → UUID (matches bookings column type).
--- ──────────────────────────────────────────────────────────────
+-- ── Section 1: DROP old 2-param overload ────────────────────────────────────
+-- Required before CREATE OR REPLACE — changing the param list creates a new
+-- overload, not a replacement. PostgREST would surface both, causing ambiguity.
+DROP FUNCTION IF EXISTS public.checkout_booking(UUID, DATE);
+
+
+-- ── Section 2: checkout_booking (5-param) ───────────────────────────────────
 CREATE OR REPLACE FUNCTION public.checkout_booking(
   p_booking_id                   UUID,
   p_actual_checkout_date         DATE    DEFAULT NULL,
   p_additional_discount_amount   NUMERIC DEFAULT 0,
   p_additional_discount_reason   TEXT    DEFAULT NULL,
-  p_additional_discount_by       UUID    DEFAULT NULL
+  p_additional_discount_by       TEXT    DEFAULT NULL
 )
 RETURNS VOID
 LANGUAGE plpgsql
@@ -204,5 +200,8 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.checkout_booking(UUID, DATE, NUMERIC, TEXT, UUID)
+GRANT EXECUTE ON FUNCTION public.checkout_booking(UUID, DATE, NUMERIC, TEXT, TEXT)
   TO anon, authenticated;
+
+-- Reload PostgREST schema cache so the new overload is visible immediately.
+NOTIFY pgrst, 'reload schema';

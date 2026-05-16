@@ -1,52 +1,32 @@
 -- =============================================================
--- 07-functions.sql
--- RPC function definitions (PostgREST-callable via supabase.rpc()).
+-- 2026-05-16-phase11-58b-fix-discount-by-type.sql
+-- Phase 11 #58b follow-up — fix p_additional_discount_by type TEXT → UUID
 --
--- These are app-layer RPCs invoked by bookingsService.ts.
--- Trigger functions live in 05-triggers.sql, not here.
+-- Problem:
+--   The prior #58b migration (2026-05-16-phase11-58b-discount-in-rpc.sql)
+--   declared p_additional_discount_by as TEXT. The bookings column
+--   additional_discount_by is UUID. PL/pgSQL does not implicitly cast TEXT
+--   to UUID on assignment, so step 3.6's UPDATE raised:
+--     "column "additional_discount_by" is of type uuid but expression is
+--      of type text"
 --
--- Tracking started: 2026-05-13 (Phase 11 #46).
--- Prior RPCs exist only in their migration files:
---   checkout_booking_room      → 2026-05-08-multi-room-rpc.sql
---   cancel_booking_room        → 2026-05-09-phase7-rpc-updates.sql
---   cancel_booking             → 2026-05-09-phase8.6-atomic-cancel-with-disbursement.sql
---   disburse_refund            → 2026-05-09-phase8.5-refund-disbursement.sql
---                                Revised: 2026-05-15-phase11-58a-overpayment-auto-refund.sql
---                                (pre_adjusted branch — see Section 4 of that migration)
---   deny_refund                → 2026-05-09-phase8.5-refund-disbursement.sql
---   bulk_checkin_booking_rooms → 2026-05-11-bulk-checkin-booking-rooms-rpc.sql
---   update_booking_total       → 2026-05-08-multi-room-rpc.sql
+-- Fix:
+--   Change p_additional_discount_by declaration from TEXT to UUID.
+--   Function body is otherwise unchanged.
+--
+-- GRANT note:
+--   GRANT TO anon is intentional. This app uses the anon key for all
+--   authenticated-user calls (Supabase anon key + RLS). The SECURITY
+--   DEFINER on this function handles the privilege escalation needed
+--   for cross-table writes.
 -- =============================================================
 
 
--- ──────────────────────────────────────────────────────────────
--- checkout_booking
--- Checks out all active rooms on a booking atomically.
--- Computes per-room early deductions from each room's own
--- check_out_date — correct for multi-room bookings with mixed
--- checkout schedules.
--- CTE-based bulk UPDATE — no cursor.
--- Added: 2026-05-13 via migration
---        2026-05-13-phase11-46-checkout-booking-rpc.sql
--- Revised: 2026-05-13 via migration
---        2026-05-13-phase11-48-checkout-booking-per-room-deductions.sql
---        Signature: (UUID, DATE, INTEGER, NUMERIC) → (UUID, DATE)
---        Guard removed; RPC now computes per-room deductions internally.
--- Revised: 2026-05-14 via migration
---        2026-05-14-phase11-57-checkout-stop-stomping-check-out-date.sql
---        Removed check_out_date stomp from upd CTE.
--- Revised: 2026-05-15 via migration
---        2026-05-15-phase11-58a-overpayment-auto-refund.sql
---        Added step 3.5: overpayment detection + pending refund auto-creation.
--- Revised: 2026-05-16 via migration
---        2026-05-16-phase11-58b-discount-in-rpc.sql
---        Signature: added p_additional_discount_amount/reason/by params.
---        Step 3.5: v_discount now sourced from parameter (not DB column).
---        Added step 3.6: write additional_discount_* columns inside RPC.
--- Revised: 2026-05-16 via migration
---        2026-05-16-phase11-58b-fix-discount-by-type.sql
---        p_additional_discount_by: TEXT → UUID (matches bookings column type).
--- ──────────────────────────────────────────────────────────────
+-- ── Section 1: DROP broken TEXT overload ────────────────────────────────────
+DROP FUNCTION IF EXISTS public.checkout_booking(UUID, DATE, NUMERIC, TEXT, TEXT);
+
+
+-- ── Section 2: checkout_booking (corrected — p_additional_discount_by UUID) ─
 CREATE OR REPLACE FUNCTION public.checkout_booking(
   p_booking_id                   UUID,
   p_actual_checkout_date         DATE    DEFAULT NULL,
@@ -206,3 +186,6 @@ $$;
 
 GRANT EXECUTE ON FUNCTION public.checkout_booking(UUID, DATE, NUMERIC, TEXT, UUID)
   TO anon, authenticated;
+
+-- Reload PostgREST schema cache so the corrected overload is visible immediately.
+NOTIFY pgrst, 'reload schema';

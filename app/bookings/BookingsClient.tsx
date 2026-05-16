@@ -2092,16 +2092,16 @@ export default function BookingsClient({ initialRoom }: Props) {
    * Returns { amount } on success, undefined on validation failure (sets discountError).
    */
   function validateAndBuildDiscount(
-    remainingAfterPayment: number,
+    billableTotal: number,
   ): { amount: number } | undefined {
     const amt = parseFloat(moreDiscountAmt) || 0;
     if (amt < 0) {
       setDiscountError("Discount amount cannot be negative.");
       return undefined;
     }
-    if (amt > 0 && amt > remainingAfterPayment) {
+    if (amt > 0 && amt > billableTotal) {
       setDiscountError(
-        `Discount cannot exceed remaining balance of ৳${remainingAfterPayment.toLocaleString()}.`
+        `Discount cannot exceed the billable total of ৳${billableTotal.toLocaleString()}.`
       );
       return undefined;
     }
@@ -2119,9 +2119,9 @@ export default function BookingsClient({ initialRoom }: Props) {
     const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
       calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], checkoutOpenedAt ?? new Date());
     const actualDateISO = new Date().toISOString().split("T")[0];
-    const remainingAfterPayment =
-      checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt - liveAmountPaid;
-    const discount = validateAndBuildDiscount(remainingAfterPayment);
+    const billableTotal         = checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt;
+    const remainingAfterPayment = billableTotal - liveAmountPaid;
+    const discount = validateAndBuildDiscount(billableTotal);
     if (discount === undefined) return;
     const finalPayableBeforeCapture = remainingAfterPayment - discount.amount;
 
@@ -2190,9 +2190,9 @@ export default function BookingsClient({ initialRoom }: Props) {
     const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
       calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], checkoutOpenedAt ?? new Date());
     const actualDateISO = new Date().toISOString().split("T")[0];
-    const remainingAfterPayment =
-      checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt - liveAmountPaid;
-    const discount = validateAndBuildDiscount(remainingAfterPayment);
+    const billableTotal         = checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt;
+    const remainingAfterPayment = billableTotal - liveAmountPaid;
+    const discount = validateAndBuildDiscount(billableTotal);
     if (discount === undefined) return;
     const finalPayableBeforeCapture = remainingAfterPayment - discount.amount;
 
@@ -4785,6 +4785,18 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </div>
                     </div>
                   </div>
+                  {/* #58c — Pending refund hint: shown when discount causes paid_amount > effective_total */}
+                  {finalPayableBeforeModalPay < 0 && (
+                    <div className="flex items-center gap-2 mt-2 px-3 py-2 bg-sky-50 border border-sky-100 rounded-lg">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                        className="w-3.5 h-3.5 flex-shrink-0 text-sky-500">
+                        <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
+                      </svg>
+                      <span className="text-[12px] text-sky-700 font-medium">
+                        Pending refund of ৳{(-finalPayableBeforeModalPay).toLocaleString()} will be created
+                      </span>
+                    </div>
+                  )}
                   {/* Payment status badge */}
                   <div className="flex items-center gap-1.5 mt-2 px-1">
                     <span className={`inline-flex items-center gap-1.5 text-[12px] font-semibold px-2.5 py-0.5 rounded-full ${paymentBadge(payStatus)}`}>
