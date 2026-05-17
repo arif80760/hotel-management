@@ -10,7 +10,8 @@
 // AppShell's isStandaloneDocument regex already covers this route.
 
 import { Fragment }                       from "react";
-import { notFound }                      from "next/navigation";
+import { notFound, redirect }            from "next/navigation";
+import { createSupabaseServerClient }    from "@/lib/supabaseServer";
 import { getBookingByRef,
          getPaymentsByBookingRef }        from "@/services/bookingsService";
 import LetterHead                        from "@/components/invoice/LetterHead";
@@ -30,9 +31,13 @@ interface Props {
 export default async function ReservationPage({ params }: Props) {
   const { id } = await params;
 
+  const serverClient = await createSupabaseServerClient();
+  const { data: { user } } = await serverClient.auth.getUser();
+  if (!user) redirect("/login");
+
   const [booking, payments] = await Promise.all([
-    getBookingByRef(id).catch(() => null),
-    getPaymentsByBookingRef(id).catch(() => []),
+    getBookingByRef(id, serverClient).catch(() => null),
+    getPaymentsByBookingRef(id, serverClient).catch(() => []),
   ]);
 
   if (!booking) notFound();

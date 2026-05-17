@@ -16,7 +16,8 @@
 //   dialog's More settings for fully clean output.
 
 import { Fragment }                       from "react";
-import { notFound }                      from "next/navigation";
+import { notFound, redirect }            from "next/navigation";
+import { createSupabaseServerClient }    from "@/lib/supabaseServer";
 import { getBookingByRef,
          getPaymentsByBookingRef,
          listRefunds }                    from "@/services/bookingsService";
@@ -38,10 +39,14 @@ interface Props {
 export default async function InvoicePage({ params }: Props) {
   const { id } = await params;
 
+  const serverClient = await createSupabaseServerClient();
+  const { data: { user } } = await serverClient.auth.getUser();
+  if (!user) redirect("/login");
+
   const [booking, payments, refunds] = await Promise.all([
-    getBookingByRef(id).catch(() => null),
-    getPaymentsByBookingRef(id).catch(() => []),
-    listRefunds(id).catch(() => []),
+    getBookingByRef(id, serverClient).catch(() => null),
+    getPaymentsByBookingRef(id, serverClient).catch(() => []),
+    listRefunds(id, serverClient).catch(() => []),
   ]);
 
   if (!booking) notFound();
