@@ -19,7 +19,8 @@
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { supabase } from "@/lib/supabase";
+import { supabase }             from "@/lib/supabase";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   type MockBooking,
   type BookingStatus,
@@ -384,8 +385,11 @@ export async function getAllBookings(): Promise<MockBooking[]> {
  * Returns null if no matching row — caller should 404 in that case.
  * Throws on DB error.
  */
-export async function getBookingByRef(bookingRef: string): Promise<MockBooking | null> {
-  const { data, error } = await supabase
+export async function getBookingByRef(
+  bookingRef: string,
+  client: SupabaseClient = supabase,
+): Promise<MockBooking | null> {
+  const { data, error } = await client
     .from("bookings")
     .select(BOOKING_SELECT)
     .eq("booking_ref", bookingRef)
@@ -1909,9 +1913,10 @@ export async function checkoutWithOverride(
  */
 export async function getPaymentsByBookingRef(
   bookingRef: string,
+  client: SupabaseClient = supabase,
 ): Promise<Payment[]> {
   // Step 1: resolve booking_ref → internal UUID
-  const { data: bookingRow, error: bookingErr } = await supabase
+  const { data: bookingRow, error: bookingErr } = await client
     .from("bookings")
     .select("id")
     .eq("booking_ref", bookingRef)
@@ -1946,7 +1951,7 @@ export async function getPaymentsByBookingRef(
   }
 
   // Step 2: fetch all payments for that booking UUID, oldest first
-  const { data, error } = await supabase
+  const { data, error } = await client
     .from("payments")
     .select("id, booking_id, amount, method, recorded_by, notes, created_at")
     .eq("booking_id", bookingRow.id)
@@ -2257,8 +2262,11 @@ export async function bulkCheckinBookingRooms(
  *
  * @param bookingRef  booking_ref string ("BK-1041")
  */
-export async function listRefunds(bookingRef: string): Promise<Refund[]> {
-  const { data: bookingRow, error: bookingErr } = await supabase
+export async function listRefunds(
+  bookingRef: string,
+  client: SupabaseClient = supabase,
+): Promise<Refund[]> {
+  const { data: bookingRow, error: bookingErr } = await client
     .from("bookings")
     .select("id")
     .eq("booking_ref", bookingRef)
@@ -2266,7 +2274,7 @@ export async function listRefunds(bookingRef: string): Promise<Refund[]> {
 
   if (bookingErr || !bookingRow) return [];
 
-  const { data, error } = await supabase
+  const { data, error } = await client
     .from("refunds")
     .select("*")
     .eq("booking_id", bookingRow.id)
