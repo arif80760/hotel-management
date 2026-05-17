@@ -16,12 +16,13 @@
 //      • All other pages     → renders Sidebar + TopBar + HotelProvider + children
 //
 // WHY HERE INSTEAD OF MIDDLEWARE:
-//   Supabase Auth stores the session client-side (localStorage).
-//   A true server-side middleware redirect would require @supabase/ssr and
-//   cookie-based sessions — a bigger change. This client guard achieves the
-//   same result with zero extra packages and is easier to reason about.
-//   The only visible difference is a brief loading spinner on first paint
-//   while the session is being read from localStorage.
+//   The routing guard runs client-side so it can react to auth state changes
+//   from AuthContext (onAuthStateChange). Supabase Auth now stores the session
+//   in cookies (via createBrowserClient, Phase D1), making the JWT readable
+//   server-side. Middleware-level route protection is the Phase D2 step;
+//   this client guard remains in place until then.
+//   The only visible difference from a user perspective is a brief loading
+//   spinner on first paint while AuthContext resolves the initial session.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
