@@ -87,7 +87,7 @@ const navItems = [
   { label: "Rooms",      href: "/rooms",       icon: Icons.rooms      },
   { label: "Guests",     href: "/guests",      icon: Icons.guests     },
   { label: "Bookings",   href: "/bookings",    icon: Icons.bookings   },
-  { label: "Employees",  href: "/employees",   icon: Icons.employees  },
+  { label: "Employees",  href: "/employees",   icon: Icons.employees, adminOnly: true },
   { label: "My Profile", href: "/profile",     icon: Icons.profile    },
 ];
 
@@ -126,7 +126,11 @@ export default function Sidebar() {
 
       {/* ── Navigation links ─────────────────────────────────── */}
       <nav className="flex-1 px-3 space-y-0.5">
-        {navItems.map((item) => {
+        {navItems
+          // adminOnly items are hidden while role is null (profile loading)
+          // — same behaviour as staff. No flash: null → hidden, 'admin' → visible.
+          .filter(item => !item.adminOnly || role === "admin")
+          .map((item) => {
           // Exact match for home "/", prefix match for other routes
           const isActive =
             item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);

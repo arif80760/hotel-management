@@ -1,9 +1,9 @@
 -- =============================================================
 -- 06-rls-policies.sql
--- Row Level Security — authoritative post-D4 state.
+-- Row Level Security — authoritative post-E1 state.
 --
--- Last updated: 2026-05-18 (Phase D authentication workstream)
---   Migration: 2026-05-17-phase-d4-drop-anon-select.sql
+-- Last updated: 2026-05-18 (Phase E role-based access control)
+--   Migration: 2026-05-18-phase-e1-role-aware-rls.sql
 --
 -- History:
 --   2026-05-17 B1b: full overhaul — dropped 51 legacy policies,
@@ -11,12 +11,14 @@
 --              Closed doc-drift (#19). Partially closed #40.
 --   2026-05-18 D4: dropped the 8 anon SELECT policies. The anon
 --              role now has no access to any table. #40 fully closed.
+--   2026-05-18 E1: added current_user_role() helper; employees policies
+--              split into role-aware variants (admin-all / staff-own-row).
 --
 -- ── Security model ────────────────────────────────────────────
 --   authenticated role  — hotel staff / admin with a Supabase login.
 --                         Full CRUD on all operational tables.
 --                         Row-level ownership (admin vs staff) is
---                         enforced in the application layer.
+--                         enforced by current_user_role() in RLS.
 --   anon role           — NO access to any table. The anon key
 --                         ships in the frontend but RLS blocks all
 --                         database operations for unauthenticated
@@ -27,6 +29,8 @@
 --   rooms (4), guests (4), employees (4), bookings (4),
 --   payments (4), booking_guests (4), booking_documents (3),
 --   booking_rooms (4), booking_extra_charges (4), refunds (3)
+--   employees: SELECT/UPDATE allow staff to access own row (for /profile);
+--              INSERT/DELETE are admin-only.
 --   booking_documents: no UPDATE (immutable once uploaded)
 --   refunds:           no DELETE (permanent audit trail)
 --
@@ -34,6 +38,32 @@
 --
 -- ── Total: 40 policies. Zero anon policies. ──────────────────
 -- =============================================================
+
+
+-- =============================================================
+-- SECTION 0 — RLS helper functions
+-- =============================================================
+
+-- ── current_user_role() ───────────────────────────────────────
+-- Returns the calling user's role ('admin' | 'staff') from
+-- public.profiles. Returns NULL if no profile row exists.
+--
+-- STABLE SECURITY DEFINER: executes as owner, bypassing the
+-- caller's RLS on profiles (which restricts reads to own row).
+-- SET search_path guards against search-path injection.
+--
+-- Use this in all admin-only RLS policies:
+--   USING (current_user_role() = 'admin')
+-- =============================================================
+CREATE OR REPLACE FUNCTION public.current_user_role()
+  RETURNS TEXT
+  LANGUAGE sql
+  STABLE
+  SECURITY DEFINER
+  SET search_path = public
+AS $$
+  SELECT role FROM public.profiles WHERE id = auth.uid()
+$$;
 
 
 -- ── RLS enable (idempotent — safe to re-run) ─────────────────
@@ -139,15 +169,33 @@ CREATE POLICY "Authenticated can delete guests"
 
 -- ─────────────────────────────────────────────────────────────
 -- employees (4)
+-- SELECT/UPDATE: admin sees/edits any row; staff sees/edits own row
+-- only (own row = employees.auth_user_id = auth.uid(), used by the
+-- self-service /profile page — accessible to both roles).
+-- INSERT/DELETE: admin only — staff have no use case for these.
 -- ─────────────────────────────────────────────────────────────
-CREATE POLICY "Authenticated can select employees"
-  ON public.employees FOR SELECT TO authenticated USING (true);
-CREATE POLICY "Authenticated can insert employees"
-  ON public.employees FOR INSERT TO authenticated WITH CHECK (true);
-CREATE POLICY "Authenticated can update employees"
-  ON public.employees FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "Authenticated can delete employees"
-  ON public.employees FOR DELETE TO authenticated USING (true);
+CREATE POLICY "Employees select — admin all, staff own row"
+  ON public.employees FOR SELECT TO authenticated
+  USING (
+    current_user_role() = 'admin'
+    OR auth_user_id = auth.uid()
+  );
+CREATE POLICY "Employees insert — admin only"
+  ON public.employees FOR INSERT TO authenticated
+  WITH CHECK (current_user_role() = 'admin');
+CREATE POLICY "Employees update — admin all, staff own row"
+  ON public.employees FOR UPDATE TO authenticated
+  USING (
+    current_user_role() = 'admin'
+    OR auth_user_id = auth.uid()
+  )
+  WITH CHECK (
+    current_user_role() = 'admin'
+    OR auth_user_id = auth.uid()
+  );
+CREATE POLICY "Employees delete — admin only"
+  ON public.employees FOR DELETE TO authenticated
+  USING (current_user_role() = 'admin');
 
 -- ─────────────────────────────────────────────────────────────
 -- payments (4)
@@ -175,7 +223,7 @@ CREATE POLICY "Authenticated can update refunds"
   ON public.refunds FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
 
 -- ─────────────────────────────────────────────────────────────
--- profiles (2 — scoped to own row; untouched by B1b/D4)
+-- profiles (2 — scoped to own row; untouched by B1b/D4/E1)
 -- ─────────────────────────────────────────────────────────────
 CREATE POLICY "Users can read own profile"
   ON public.profiles FOR SELECT TO authenticated
