@@ -2,8 +2,8 @@
 -- 06-rls-policies.sql
 -- Row Level Security — authoritative post-E1 state.
 --
--- Last updated: 2026-05-18 (Phase E role-based access control)
---   Migration: 2026-05-18-phase-e1-role-aware-rls.sql
+-- Last updated: 2026-05-19 (Accounts core Stage 1)
+--   Migration: 2026-05-18-accounts-core-stage1.sql
 --
 -- History:
 --   2026-05-17 B1b: full overhaul — dropped 51 legacy policies,
@@ -13,6 +13,9 @@
 --              role now has no access to any table. #40 fully closed.
 --   2026-05-18 E1: added current_user_role() helper; employees policies
 --              split into role-aware variants (admin-all / staff-own-row).
+--   2026-05-19 Accounts Stage 1: RLS on accounts + account_transactions;
+--              5 admin-only policies (SELECT admin-only; no write policies
+--              from authenticated role — seeding uses service_role).
 --
 -- ── Security model ────────────────────────────────────────────
 --   authenticated role  — hotel staff / admin with a Supabase login.
@@ -36,7 +39,13 @@
 --
 -- ── Profiles policy count: 2 (scoped to own row) ─────────────
 --
--- ── Total: 40 policies. Zero anon policies. ──────────────────
+-- ── Accounts policy count: 5 (admin-only) ────────────────────
+--   accounts (1 SELECT), account_transactions (4)
+--   No write policies from authenticated role on accounts —
+--   the 4 bucket rows are seeded via service_role (bypasses RLS).
+--   account_transactions: SELECT/INSERT/UPDATE/DELETE admin-only.
+--
+-- ── Total: 45 policies. Zero anon policies. ──────────────────
 -- =============================================================
 
 
@@ -78,6 +87,8 @@ ALTER TABLE public.booking_documents      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_rooms          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_extra_charges  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.refunds                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.accounts               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.account_transactions   ENABLE ROW LEVEL SECURITY;
 
 
 -- =============================================================
@@ -231,3 +242,43 @@ CREATE POLICY "Users can read own profile"
 CREATE POLICY "Users can update own profile"
   ON public.profiles FOR UPDATE TO authenticated
   USING (id = auth.uid());
+
+
+-- =============================================================
+-- SECTION 2 — Accounts policies (5) — admin-only
+-- Added: 2026-05-19  Migration: 2026-05-18-accounts-core-stage1.sql
+-- =============================================================
+--
+-- The entire Accounts feature is admin-only (architecture Section 9).
+-- current_user_role() = 'admin' is the enforced pattern.
+--
+-- accounts table: SELECT admin-only. No INSERT/UPDATE/DELETE policies
+-- for authenticated role — the 4 seed rows are inserted via
+-- service_role (bypasses RLS). App never creates or deletes buckets.
+--
+-- account_transactions: full CRUD admin-only.
+-- ─────────────────────────────────────────────────────────────
+
+-- ─────────────────────────────────────────────────────────────
+-- accounts (1 — SELECT only; no write policies for authenticated)
+-- ─────────────────────────────────────────────────────────────
+CREATE POLICY "Accounts select — admin only"
+  ON public.accounts FOR SELECT TO authenticated
+  USING (current_user_role() = 'admin');
+
+-- ─────────────────────────────────────────────────────────────
+-- account_transactions (4)
+-- ─────────────────────────────────────────────────────────────
+CREATE POLICY "Account transactions select — admin only"
+  ON public.account_transactions FOR SELECT TO authenticated
+  USING (current_user_role() = 'admin');
+CREATE POLICY "Account transactions insert — admin only"
+  ON public.account_transactions FOR INSERT TO authenticated
+  WITH CHECK (current_user_role() = 'admin');
+CREATE POLICY "Account transactions update — admin only"
+  ON public.account_transactions FOR UPDATE TO authenticated
+  USING (current_user_role() = 'admin')
+  WITH CHECK (current_user_role() = 'admin');
+CREATE POLICY "Account transactions delete — admin only"
+  ON public.account_transactions FOR DELETE TO authenticated
+  USING (current_user_role() = 'admin');

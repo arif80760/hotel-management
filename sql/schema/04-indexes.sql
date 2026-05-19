@@ -110,3 +110,29 @@ CREATE INDEX IF NOT EXISTS idx_refunds_booking_id
 CREATE INDEX IF NOT EXISTS idx_refunds_status_pending
   ON public.refunds (created_at)
   WHERE status = 'pending';
+
+
+-- ── account_transactions ──────────────────────────────────────
+-- Added: 2026-05-19 via migration 2026-05-18-accounts-core-stage1.sql
+
+-- Daybook: all transactions for a given date (most common query).
+CREATE INDEX IF NOT EXISTS idx_acct_txn_date
+  ON public.account_transactions (txn_date);
+
+-- Balance computation: sum transactions for a specific bucket.
+CREATE INDEX IF NOT EXISTS idx_acct_txn_from_account
+  ON public.account_transactions (from_account_id);
+
+CREATE INDEX IF NOT EXISTS idx_acct_txn_to_account
+  ON public.account_transactions (to_account_id);
+
+-- Transaction type filter (daybook type breakdown, revenue vs expense
+-- reporting, loan queries — 6 values but used in most filtered fetches).
+CREATE INDEX IF NOT EXISTS idx_acct_txn_type
+  ON public.account_transactions (type);
+
+-- Booking-payment lookup (integration seam — find the accounts
+-- transaction linked to a specific payment row).
+CREATE INDEX IF NOT EXISTS idx_acct_txn_booking_payment_id
+  ON public.account_transactions (booking_payment_id)
+  WHERE booking_payment_id IS NOT NULL;

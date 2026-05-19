@@ -411,3 +411,126 @@ COMMENT ON COLUMN public.refunds.disbursed_by
   IS 'Admin who confirmed the physical money was returned to the guest';
 COMMENT ON COLUMN public.refunds.disbursement_method
   IS 'How money was returned: cash | bkash | nagad | bank_transfer | card';
+
+
+-- =============================================================
+-- ACCOUNTS FEATURE — Stage 1 (added 2026-05-19)
+-- =============================================================
+
+-- ── accounts ─────────────────────────────────────────────────
+-- The four money "buckets": Cash in Hand, Bank, bKash, Nagad.
+--
+-- Balance is NOT stored here — it is always derived by summing
+-- account_transactions (from_account_id debits, to_account_id
+-- credits). No denormalised balance column to drift.
+--
+-- Rows are SEEDED once with fixed UUIDs (see migration) and
+-- never created/deleted by the application. The four UUIDs are
+-- stable constants that later stages (daybook, booking-payment
+-- integration) reference directly.
+--
+--   Cash in Hand : a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11
+--   Bank         : b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a22
+--   bKash        : c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a33
+--   Nagad        : d0eebc99-9c0b-4ef8-bb6d-6bb9bd380a44
+--
+-- is_spendable: true only for Cash in Hand. The expense form
+-- enforces this at the UI layer; RLS enforces it at the DB layer
+-- by making all write operations admin-only.
+CREATE TABLE public.accounts (
+  id            UUID          PRIMARY KEY,
+  name          TEXT          NOT NULL UNIQUE,
+  is_spendable  BOOLEAN       NOT NULL DEFAULT false,
+  created_at    TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE  public.accounts
+  IS 'Money buckets (Cash in Hand, Bank, bKash, Nagad). Four fixed rows seeded at migration. Balance is always computed from account_transactions — no stored balance column.';
+COMMENT ON COLUMN public.accounts.is_spendable
+  IS 'true = admin can fund expenses from this bucket (Cash in Hand only). false = receive/transfer only.';
+
+
+-- ── account_transactions ─────────────────────────────────────
+-- Every movement of money. One row per event.
+--
+-- Direction semantics:
+--   from_account_id  — bucket that LOSES money (debit side)
+--   to_account_id    — bucket that GAINS money (credit side)
+--   amount           — always positive
+--
+-- Per-type from/to rules (enforced by chk_txn_accounts):
+--   revenue_in, injection, loan_received  → to NOT NULL, from NULL
+--   expense_out, loan_repayment           → from NOT NULL, to NULL
+--   transfer                              → both NOT NULL, from <> to
+--
+-- Nullable FK columns follow the reserved-column strategy:
+--   category_id, loan_id — plain UUID NULL now; FK added when
+--                          account_categories / loans tables exist.
+--   employee_id, booking_payment_id — FK to existing tables now.
+CREATE TABLE public.account_transactions (
+  id                   UUID                       PRIMARY KEY DEFAULT gen_random_uuid(),
+  txn_date             DATE                       NOT NULL,
+  type                 public.account_transaction_type  NOT NULL,
+  amount               NUMERIC(12, 2)             NOT NULL CHECK (amount > 0),
+
+  -- Direction: which bucket(s) are affected
+  from_account_id      UUID                       REFERENCES public.accounts(id),
+  to_account_id        UUID                       REFERENCES public.accounts(id),
+
+  -- Structural constraint: enforce from/to rules per transaction type.
+  -- OR form (not CASE): a CASE with no ELSE returns NULL, and CHECK passes
+  -- on NULL — so a future enum value with no branch would silently pass.
+  -- The OR form fails closed.
+  CONSTRAINT chk_txn_accounts CHECK (
+    (type IN ('revenue_in','injection','loan_received')
+       AND to_account_id IS NOT NULL AND from_account_id IS NULL)
+    OR (type IN ('expense_out','loan_repayment')
+       AND from_account_id IS NOT NULL AND to_account_id IS NULL)
+    OR (type = 'transfer'
+       AND from_account_id IS NOT NULL AND to_account_id IS NOT NULL
+       AND from_account_id <> to_account_id)
+  ),
+
+  -- Categorisation (expense categories and other-revenue sources)
+  -- FK to account_categories added when that table is created (Stage 3).
+  category_id          UUID,
+
+  -- Voucher (expense_out transactions only)
+  voucher_number       TEXT,                 -- e.g. 'VCH-0001'; NULL for non-expense types; uniqueness deferred to Expense stage
+  payee                TEXT,                 -- paid to (for voucher)
+
+  -- Payroll link (expense_out with Salary category)
+  -- FK to employees exists now.
+  employee_id          UUID        REFERENCES public.employees(id) ON DELETE SET NULL,
+
+  -- Booking-payment link (revenue_in sourced from a booking payment)
+  -- FK to payments exists now.
+  booking_payment_id   UUID        REFERENCES public.payments(id) ON DELETE SET NULL,
+
+  -- Loan link (loan_received / loan_repayment)
+  -- FK to loans added when that table is created (Stage 6).
+  loan_id              UUID,
+
+  -- Receipt image
+  receipt_image_url    TEXT,
+
+  -- Metadata
+  note                 TEXT,
+  created_by           UUID,                -- auth.users(id); plain UUID, no FK (consistent with payments.recorded_by)
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE  public.account_transactions
+  IS 'Every money movement in the Accounts feature. One row per event. Balance for any bucket is computed by summing to_account_id credits minus from_account_id debits.';
+COMMENT ON COLUMN public.account_transactions.from_account_id
+  IS 'Bucket that loses money (debit). NULL for inbound types (revenue_in, injection, loan_received).';
+COMMENT ON COLUMN public.account_transactions.to_account_id
+  IS 'Bucket that gains money (credit). NULL for outbound types (expense_out, loan_repayment).';
+COMMENT ON COLUMN public.account_transactions.voucher_number
+  IS 'Sequential voucher ID (VCH-0001, VCH-0002 …). Non-null only for expense_out rows.';
+COMMENT ON COLUMN public.account_transactions.employee_id
+  IS 'Set for Salary-category expense_out rows (payroll). Links to employees table.';
+COMMENT ON COLUMN public.account_transactions.booking_payment_id
+  IS 'Set when this revenue_in row was auto-generated from a booking payment. Links to payments table.';
+COMMENT ON COLUMN public.account_transactions.loan_id
+  IS 'Set for loan_received and loan_repayment rows. FK to loans table (added Stage 6).';

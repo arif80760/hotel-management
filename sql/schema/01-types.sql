@@ -76,3 +76,21 @@ CREATE TYPE public.payment_method AS ENUM (
   'online',     -- legacy — use 'card' for new payments
   'other'       -- legacy — use most-specific method for new payments
 );
+
+-- ── account_transaction_type ─────────────────────────────────
+-- The six distinct money-movement types in the Accounts feature.
+-- Direction is expressed by from_account_id / to_account_id:
+--   inbound  types → to_account_id NOT NULL, from_account_id NULL
+--   outbound types → from_account_id NOT NULL, to_account_id NULL
+--   transfer       → both NOT NULL, from <> to
+-- Using distinct enum values (not a generic 'debit'/'credit')
+-- keeps revenue/expense reports honest: a loan received and a cash
+-- injection both move Cash up, but they are not revenue.
+CREATE TYPE public.account_transaction_type AS ENUM (
+  'revenue_in',      -- money received for a service (counts as revenue)
+  'expense_out',     -- money paid out (counts as expense; always from Cash)
+  'transfer',        -- internal move between buckets (neutral)
+  'injection',       -- outside money added by owner (not revenue; need not be repaid)
+  'loan_received',   -- borrowed money received (not revenue; must be repaid)
+  'loan_repayment'   -- repaying a loan (not an expense)
+);
