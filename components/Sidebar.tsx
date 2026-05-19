@@ -78,6 +78,15 @@ const Icons = {
       <path d="M6.168 18.849A4 4 0 0110 16h4a4 4 0 013.834 2.855" />
     </svg>
   ),
+  accounts: (
+    /* Banknote — money / accounts daybook */
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">
+      <rect x="2" y="6" width="20" height="12" rx="2" />
+      <circle cx="12" cy="12" r="2.5" />
+      <path d="M6 9v.01" />
+      <path d="M18 15v.01" />
+    </svg>
+  ),
 };
 
 // ── Nav items ─────────────────────────────────────────────────
@@ -88,6 +97,7 @@ const navItems = [
   { label: "Guests",     href: "/guests",      icon: Icons.guests     },
   { label: "Bookings",   href: "/bookings",    icon: Icons.bookings   },
   { label: "Employees",  href: "/employees",   icon: Icons.employees, adminOnly: true },
+  { label: "Accounts",   href: "/accounts",    icon: Icons.accounts,  adminOnly: true },
   { label: "My Profile", href: "/profile",     icon: Icons.profile    },
 ];
 
