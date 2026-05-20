@@ -395,6 +395,14 @@ function emptyForm() {
     note:          "",
   };
 }
+// ── Currency formatter — ৳ X,XXX (whole taka only, thousand-grouped) ──
+// Sub-taka amounts are stored at full precision (NUMERIC(12,2)) but
+// displayed rounded — hotel cash flow doesn't deal in fractions of a taka.
+const moneyFmt = new Intl.NumberFormat("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+function formatBdt(n: number): string {
+  return `৳ ${moneyFmt.format(n)}`;
+}
+
 type FormErrors = Partial<Record<"fromAccountId" | "toAccountId" | "amount" | "txnDate" | "form", string>>;
 
 export default function AccountsClient() {
@@ -609,9 +617,40 @@ export default function AccountsClient() {
         </div>
       )}
 
-      <p className="text-sm text-slate-500">
-        Daybook — {transactions.length} transaction(s), {balances.length} buckets loaded.
-      </p>
+      {/* ── Balance cards — Cash in Hand first, then alphabetical ────── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {[...balances]
+          .sort((a, b) => {
+            if (a.isSpendable && !b.isSpendable) return -1;
+            if (!a.isSpendable && b.isSpendable) return 1;
+            return a.name.localeCompare(b.name);
+          })
+          .map(b => {
+            const negative = b.balance < 0;
+            return (
+              <div
+                key={b.accountId}
+                className="rounded-xl border border-slate-200 bg-white p-5"
+              >
+                <div className="flex items-center justify-between">
+                  <p className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">
+                    {b.name}
+                  </p>
+                  {b.isSpendable && (
+                    <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full uppercase tracking-wider">
+                      Spendable
+                    </span>
+                  )}
+                </div>
+                <p className={`mt-2 text-[22px] font-semibold tabular-nums ${
+                  negative ? "text-rose-600" : "text-slate-800"
+                }`}>
+                  {formatBdt(b.balance)}
+                </p>
+              </div>
+            );
+          })}
+      </div>
 
       {/* ══════════════════════════════════════════════════════
           MODAL — manual transaction entry
