@@ -20,6 +20,7 @@ import {
   getTransactions,
   createTransaction,
   updateTransaction,
+  deleteTransaction,
   type AccountBalance,
   type Account,
   type AccountTransaction,
@@ -478,6 +479,11 @@ export default function AccountsClient() {
   const [saving,    setSaving]    = useState(false);
   // editingId: null = create mode; UUID = edit mode for that transaction.
   const [editingId, setEditingId] = useState<string | null>(null);
+  // deletingId: UUID of the transaction whose delete-confirm dialog is open;
+  // null when no dialog is open.
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  // deleting: true while the delete API call is in flight (disables dialog buttons).
+  const [deleting,   setDeleting]   = useState(false);
 
   // ── Success banner ─────────────────────────────────────────
   const [successMsg, setSuccessMsg] = useState("");
@@ -589,6 +595,42 @@ export default function AccountsClient() {
     if (saving) return;
     setModalOpen(false);
     setEditingId(null);
+  }
+
+  // ── Delete flow ──────────────────────────────────────────
+  function openDeleteDialog(id: string) {
+    setDeletingId(id);
+  }
+  function cancelDelete() {
+    if (deleting) return;
+    setDeletingId(null);
+  }
+  async function confirmDelete() {
+    if (!deletingId) return;
+    setDeleting(true);
+    try {
+      await deleteTransaction(deletingId);
+      // Remove the row from local state by id.
+      setTransactions(prev => prev.filter(t => t.id !== deletingId));
+
+      // Refresh balances — the deleted row was contributing to them.
+      try {
+        const bal = await getBalances();
+        setBalances(bal);
+      } catch {
+        // A balance refresh failure shouldn't block the success path —
+        // the transaction was deleted. The cards will reconcile on next load.
+      }
+
+      setSuccessMsg("Transaction deleted.");
+      setDeletingId(null);
+    } catch (err) {
+      // Surface the failure as a top-of-page error banner via fetchError.
+      setFetchError(err instanceof Error ? err.message : "Failed to delete transaction.");
+      setDeletingId(null);
+    } finally {
+      setDeleting(false);
+    }
   }
 
   // ── Field setters ──────────────────────────────────────────
@@ -883,18 +925,35 @@ export default function AccountsClient() {
                           </div>
 
                           {isManual && (
-                            <button
-                              type="button"
-                              onClick={() => openEditModal(t)}
-                              aria-label="Edit transaction"
-                              title="Edit"
-                              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors flex-shrink-0"
-                            >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
-                                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
-                                <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-                              </svg>
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => openEditModal(t)}
+                                aria-label="Edit transaction"
+                                title="Edit"
+                                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors flex-shrink-0"
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                                  <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                                  <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => openDeleteDialog(t.id)}
+                                aria-label="Delete transaction"
+                                title="Delete"
+                                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors flex-shrink-0"
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                                  <path d="M3 6h18" />
+                                  <path d="M19 6l-2 14a2 2 0 01-2 2H9a2 2 0 01-2-2L5 6" />
+                                  <path d="M10 11v6" />
+                                  <path d="M14 11v6" />
+                                  <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
+                                </svg>
+                              </button>
+                            </>
                           )}
 
                           <p className={`text-[14px] font-semibold tabular-nums whitespace-nowrap ${amountCls}`}>
@@ -907,6 +966,94 @@ export default function AccountsClient() {
                 </div>
               ))
             )}
+          </div>
+        );
+      })()}
+
+      {/* ══════════════════════════════════════════════════════
+          DELETE CONFIRM DIALOG
+      ══════════════════════════════════════════════════════ */}
+      {deletingId && (() => {
+        const t = transactions.find(x => x.id === deletingId);
+        if (!t) return null;
+
+        // Re-derive flow text and amount for the confirmation summary.
+        const bucketName: Record<string, string> = {};
+        for (const a of accounts) bucketName[a.id] = a.name;
+        const meta     = TXN_TYPE_META[t.type] ?? { label: t.type, badgeCls: "" };
+        const dir      = txnDirection(t.type);
+        const fromName = t.fromAccountId ? (bucketName[t.fromAccountId] ?? "Unknown") : null;
+        const toName   = t.toAccountId   ? (bucketName[t.toAccountId]   ?? "Unknown") : null;
+        const flow =
+          dir === "neutral" && fromName && toName ? `${fromName} → ${toName}` :
+          dir === "in"      && toName             ? `→ ${toName}`             :
+          dir === "out"     && fromName           ? `${fromName} →`           :
+          "";
+
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+            onClick={e => { if (e.target === e.currentTarget) cancelDelete(); }}
+          >
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col">
+
+              {/* Body */}
+              <div className="px-6 py-5">
+                <div className="flex items-start gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-rose-50 flex items-center justify-center flex-shrink-0">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4.5 h-4.5 text-rose-600">
+                      <circle cx="12" cy="12" r="10" />
+                      <path d="M12 8v4" />
+                      <path d="M12 16h.01" />
+                    </svg>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-[15px] font-semibold text-slate-800 leading-tight">
+                      Delete this transaction?
+                    </h2>
+                    <p className="text-[12px] text-slate-500 mt-1">This action cannot be undone.</p>
+                  </div>
+                </div>
+
+                {/* Row summary */}
+                <div className="mt-4 px-4 py-3 rounded-lg bg-slate-50 border border-slate-200">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full ${meta.badgeCls}`}>
+                      {meta.label}
+                    </span>
+                    <p className="text-[13px] font-medium text-slate-700">{flow}</p>
+                    <p className="text-[13px] font-semibold text-slate-800 tabular-nums ml-auto">
+                      {formatBdt(t.amount)}
+                    </p>
+                  </div>
+                  <p className="text-[11.5px] text-slate-500 mt-1.5">{formatDayHeader(t.txnDate)}</p>
+                  {t.note && (
+                    <p className="text-[12px] text-slate-600 mt-1.5 italic break-words">{t.note}</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-slate-200 bg-slate-50 rounded-b-2xl">
+                <button
+                  type="button"
+                  onClick={cancelDelete}
+                  disabled={deleting}
+                  className="px-4 py-2 rounded-lg text-[13px] font-semibold text-slate-600 hover:bg-slate-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDelete}
+                  disabled={deleting}
+                  className="px-4 py-2 rounded-lg bg-rose-600 text-white text-[13px] font-semibold hover:bg-rose-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {deleting ? "Deleting…" : "Delete"}
+                </button>
+              </div>
+
+            </div>
           </div>
         );
       })()}

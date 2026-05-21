@@ -20,11 +20,13 @@
 //   -- account_balances (Stage 2 view): one row per bucket with computed
 //   --   balance = sum(inflows) - sum(outflows). security_invoker=true.
 //
-// This service exposes ONLY the Stage 2 surface:
+// This service exposes the Stage 2 + Stage 2.5 surface:
 //   getAccounts()       — the four buckets
 //   getBalances()       — the four buckets with computed balance
 //   getTransactions()   — transaction rows, optional date range filter
 //   createTransaction() — insert a 'transfer' or 'injection' ONLY
+//   updateTransaction() — edit a manual row; refuses rows with booking_payment_id set
+//   deleteTransaction() — hard delete a manual row; same guard
 //
 // Manual entry is deliberately limited to 'transfer' and 'injection'.
 // revenue_in / expense_out / loan_received / loan_repayment get their
