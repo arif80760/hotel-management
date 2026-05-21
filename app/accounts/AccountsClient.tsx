@@ -19,6 +19,7 @@ import {
   getAccounts,
   getTransactions,
   createTransaction,
+  updateTransaction,
   type AccountBalance,
   type Account,
   type AccountTransaction,
@@ -475,6 +476,8 @@ export default function AccountsClient() {
   const [form,      setForm]      = useState(emptyForm);
   const [errors,    setErrors]    = useState<FormErrors>({});
   const [saving,    setSaving]    = useState(false);
+  // editingId: null = create mode; UUID = edit mode for that transaction.
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   // ── Success banner ─────────────────────────────────────────
   const [successMsg, setSuccessMsg] = useState("");
@@ -564,11 +567,28 @@ export default function AccountsClient() {
   function openModal() {
     setForm(emptyForm());
     setErrors({});
+    setEditingId(null);
+    setModalOpen(true);
+  }
+  function openEditModal(t: AccountTransaction) {
+    // Pre-fill the form from the transaction. Cast is safe because the
+    // Edit button is only rendered when t.type is 'transfer' or 'injection'.
+    setForm({
+      type:          t.type as ManualTxnType,
+      txnDate:       t.txnDate,
+      fromAccountId: t.fromAccountId ?? "",
+      toAccountId:   t.toAccountId ?? "",
+      amount:        String(t.amount),
+      note:          t.note ?? "",
+    });
+    setErrors({});
+    setEditingId(t.id);
     setModalOpen(true);
   }
   function closeModal() {
     if (saving) return;
     setModalOpen(false);
+    setEditingId(null);
   }
 
   // ── Field setters ──────────────────────────────────────────
@@ -624,19 +644,30 @@ export default function AccountsClient() {
     setErrors({});
     setSaving(true);
     try {
-      const saved = await createTransaction({
+      const input = {
         type:          form.type,
         txnDate:       form.txnDate,
         amount:        amountNum,
         fromAccountId: form.type === "injection" ? null : form.fromAccountId,
         toAccountId:   form.toAccountId,
         note:          form.note.trim() ? form.note.trim() : null,
-      });
+      };
 
-      // Local update — prepend (newest first, matches getTransactions order).
-      setTransactions(prev => [saved, ...prev]);
+      if (editingId === null) {
+        // ── CREATE mode ──
+        const saved = await createTransaction(input);
+        // Prepend (newest first, matches getTransactions order).
+        setTransactions(prev => [saved, ...prev]);
+        setSuccessMsg(form.type === "transfer" ? "Transfer recorded." : "Cash injection recorded.");
+      } else {
+        // ── EDIT mode ──
+        const saved = await updateTransaction(editingId, input);
+        // Replace the row in place — preserves position in the list.
+        setTransactions(prev => prev.map(t => t.id === saved.id ? saved : t));
+        setSuccessMsg("Transaction updated.");
+      }
 
-      // Refresh balances only (accounts never change).
+      // Refresh balances regardless of mode (an edit may shift any bucket).
       try {
         const bal = await getBalances();
         setBalances(bal);
@@ -645,8 +676,8 @@ export default function AccountsClient() {
         // the transaction was saved. The cards will reconcile on next load.
       }
 
-      setSuccessMsg(form.type === "transfer" ? "Transfer recorded." : "Cash injection recorded.");
       setModalOpen(false);
+      setEditingId(null);
     } catch (err) {
       setErrors({ form: err instanceof Error ? err.message : "Failed to save transaction." });
     } finally {
@@ -828,6 +859,15 @@ export default function AccountsClient() {
                       const amountSign  = dir === "in" ? "+ " : dir === "out" ? "− " : "";
                       const amountCls   = dir === "in" ? "text-emerald-700" : dir === "out" ? "text-rose-700" : "text-slate-700";
 
+                      // A row is "manual" (editable from the daybook) iff it has no
+                      // booking_payment_id AND its type is one of the two manual types.
+                      // Both guards: bookingPaymentId guards against auto-rows once the
+                      // integration ships; type guards against future feature stages
+                      // (expense, payroll, etc.) that won't be editable here either.
+                      const isManual =
+                        t.bookingPaymentId === null &&
+                        (t.type === "transfer" || t.type === "injection");
+
                       return (
                         <div key={t.id} className="px-5 py-3.5 flex items-start gap-4">
                           <div className="flex-1 min-w-0">
@@ -841,6 +881,22 @@ export default function AccountsClient() {
                               <p className="mt-1 text-[12.5px] text-slate-500 break-words">{t.note}</p>
                             )}
                           </div>
+
+                          {isManual && (
+                            <button
+                              type="button"
+                              onClick={() => openEditModal(t)}
+                              aria-label="Edit transaction"
+                              title="Edit"
+                              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors flex-shrink-0"
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                                <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                              </svg>
+                            </button>
+                          )}
+
                           <p className={`text-[14px] font-semibold tabular-nums whitespace-nowrap ${amountCls}`}>
                             {amountSign}{formatBdt(t.amount)}
                           </p>
@@ -874,7 +930,9 @@ export default function AccountsClient() {
                   </svg>
                 </div>
                 <div>
-                  <h2 className="text-[15px] font-semibold text-slate-800 leading-none">Add Transaction</h2>
+                  <h2 className="text-[15px] font-semibold text-slate-800 leading-none">
+                    {editingId === null ? "Add Transaction" : "Edit Transaction"}
+                  </h2>
                   <p className="text-[11.5px] text-slate-400 mt-0.5">Manual daybook entry — transfer or cash injection</p>
                 </div>
               </div>
@@ -1034,7 +1092,9 @@ export default function AccountsClient() {
                 disabled={saving}
                 className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {saving ? "Saving…" : "Save Transaction"}
+                {saving
+                  ? (editingId === null ? "Saving…" : "Updating…")
+                  : (editingId === null ? "Save Transaction" : "Update Transaction")}
               </button>
             </div>
 
