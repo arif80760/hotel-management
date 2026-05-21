@@ -479,6 +479,13 @@ export default function AccountsClient() {
   // ── Success banner ─────────────────────────────────────────
   const [successMsg, setSuccessMsg] = useState("");
 
+  // ── Date range filter — defaults to today (focused daybook view) ──
+  const [filterFromDate, setFilterFromDate] = useState<string>(todayISO);
+  const [filterToDate,   setFilterToDate]   = useState<string>(todayISO);
+  // Tracks the first mount so the filter effect can skip its initial
+  // run (the initial-load Promise.all already used these defaults).
+  const filterMountedRef = useRef(false);
+
   // ── Load on mount — three independent reads in parallel ────
   useEffect(() => {
     let cancelled = false;
@@ -487,7 +494,7 @@ export default function AccountsClient() {
         const [bal, accts, txns] = await Promise.all([
           getBalances(),
           getAccounts(),
-          getTransactions(),
+          getTransactions({ fromDate: filterFromDate || undefined, toDate: filterToDate || undefined }),
         ]);
         if (!cancelled) {
           setBalances(bal);
@@ -524,6 +531,34 @@ export default function AccountsClient() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [modalOpen, saving]);
+
+  // ── Re-fetch transactions when the filter range changes ────
+  // Skipped on the very first mount — the initial Promise.all already
+  // fetched with these defaults. Subsequent changes always re-fetch.
+  useEffect(() => {
+    if (!filterMountedRef.current) {
+      filterMountedRef.current = true;
+      return;
+    }
+    let cancelled = false;
+    async function refetch() {
+      try {
+        const txns = await getTransactions({
+          fromDate: filterFromDate || undefined,
+          toDate:   filterToDate   || undefined,
+        });
+        if (!cancelled) setTransactions(txns);
+      } catch (err) {
+        if (!cancelled) {
+          setFetchError(
+            err instanceof Error ? err.message : "Failed to load transactions.",
+          );
+        }
+      }
+    }
+    refetch();
+    return () => { cancelled = true; };
+  }, [filterFromDate, filterToDate]);
 
   // ── Open / close ───────────────────────────────────────────
   function openModal() {
@@ -709,86 +744,113 @@ export default function AccountsClient() {
 
       {/* ══════════════════════════════════════════════════════
           TRANSACTIONS — grouped by day, newest first
+          The section header (title + filter pickers) renders
+          unconditionally; only the body below switches between
+          empty-state and the grouped list. This keeps the filter
+          UI reachable even when the current range has no rows.
       ══════════════════════════════════════════════════════ */}
       {(() => {
         // UUID -> bucket name. accounts is always 4 items.
         const bucketName: Record<string, string> = {};
         for (const a of accounts) bucketName[a.id] = a.name;
 
-        if (transactions.length === 0) {
-          return (
-            <div>
-              <p className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider mb-3">
+        const hasFilter = !!(filterFromDate || filterToDate);
+
+        return (
+          <div className="space-y-5">
+
+            {/* ── Section header: title + date range filter ─────── */}
+            <div className="flex items-end justify-between gap-4 flex-wrap">
+              <p className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">
                 Transactions
               </p>
+              <div className="flex items-end gap-3 flex-wrap">
+                <div className="w-[200px]">
+                  <label className="block text-[10.5px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">From</label>
+                  <DatePickerField value={filterFromDate} onChange={setFilterFromDate} />
+                </div>
+                <div className="w-[200px]">
+                  <label className="block text-[10.5px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">To</label>
+                  <DatePickerField value={filterToDate} onChange={setFilterToDate} />
+                </div>
+                {hasFilter && (
+                  <button
+                    type="button"
+                    onClick={() => { setFilterFromDate(""); setFilterToDate(""); }}
+                    className="h-[42px] px-3 text-[12.5px] font-semibold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* ── Body: empty-state card OR day-grouped list ─────── */}
+            {transactions.length === 0 ? (
               <div className="rounded-xl border border-dashed border-slate-200 bg-white px-6 py-10 flex flex-col items-center justify-center text-center">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-7 h-7 text-slate-300 mb-2">
                   <path d="M3 7h18" />
                   <path d="M3 12h18" />
                   <path d="M3 17h12" />
                 </svg>
-                <p className="text-[13.5px] font-medium text-slate-500">No transactions yet.</p>
-                <p className="text-[12px] text-slate-400 mt-1">Add a transfer or cash injection to get started.</p>
-              </div>
-            </div>
-          );
-        }
-
-        return (
-          <div className="space-y-5">
-            <p className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">
-              Transactions
-            </p>
-
-            {groupByDay(transactions).map(([day, dayTxns]) => (
-              <div key={day} className="space-y-2">
-                <p className="text-[12.5px] font-semibold text-slate-700">
-                  {formatDayHeader(day)}
+                <p className="text-[13.5px] font-medium text-slate-500">
+                  {hasFilter ? "No transactions in this date range." : "No transactions yet."}
                 </p>
-
-                <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
-                  {dayTxns.map(t => {
-                    const meta = TXN_TYPE_META[t.type] ?? { label: t.type, badgeCls: "bg-slate-100 text-slate-700" };
-                    const dir  = txnDirection(t.type);
-
-                    const fromName = t.fromAccountId ? (bucketName[t.fromAccountId] ?? "Unknown") : null;
-                    const toName   = t.toAccountId   ? (bucketName[t.toAccountId]   ?? "Unknown") : null;
-
-                    // Direction arrow text per type:
-                    //   transfer   →  "Cash in Hand → Bank"
-                    //   in         →  "→ Bank"
-                    //   out        →  "Cash in Hand →"
-                    const flow =
-                      dir === "neutral" && fromName && toName ? `${fromName} → ${toName}` :
-                      dir === "in"      && toName             ? `→ ${toName}`             :
-                      dir === "out"     && fromName           ? `${fromName} →`           :
-                      "";
-
-                    const amountSign  = dir === "in" ? "+ " : dir === "out" ? "− " : "";
-                    const amountCls   = dir === "in" ? "text-emerald-700" : dir === "out" ? "text-rose-700" : "text-slate-700";
-
-                    return (
-                      <div key={t.id} className="px-5 py-3.5 flex items-start gap-4">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className={`text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full ${meta.badgeCls}`}>
-                              {meta.label}
-                            </span>
-                            <p className="text-[13px] font-medium text-slate-700">{flow}</p>
-                          </div>
-                          {t.note && (
-                            <p className="mt-1 text-[12.5px] text-slate-500 break-words">{t.note}</p>
-                          )}
-                        </div>
-                        <p className={`text-[14px] font-semibold tabular-nums whitespace-nowrap ${amountCls}`}>
-                          {amountSign}{formatBdt(t.amount)}
-                        </p>
-                      </div>
-                    );
-                  })}
-                </div>
+                <p className="text-[12px] text-slate-400 mt-1">
+                  {hasFilter ? "Widen the filter or clear it to see other days." : "Add a transfer or cash injection to get started."}
+                </p>
               </div>
-            ))}
+            ) : (
+              groupByDay(transactions).map(([day, dayTxns]) => (
+                <div key={day} className="space-y-2">
+                  <p className="text-[12.5px] font-semibold text-slate-700">
+                    {formatDayHeader(day)}
+                  </p>
+
+                  <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
+                    {dayTxns.map(t => {
+                      const meta = TXN_TYPE_META[t.type] ?? { label: t.type, badgeCls: "bg-slate-100 text-slate-700" };
+                      const dir  = txnDirection(t.type);
+
+                      const fromName = t.fromAccountId ? (bucketName[t.fromAccountId] ?? "Unknown") : null;
+                      const toName   = t.toAccountId   ? (bucketName[t.toAccountId]   ?? "Unknown") : null;
+
+                      // Direction arrow text per type:
+                      //   transfer   →  "Cash in Hand → Bank"
+                      //   in         →  "→ Bank"
+                      //   out        →  "Cash in Hand →"
+                      const flow =
+                        dir === "neutral" && fromName && toName ? `${fromName} → ${toName}` :
+                        dir === "in"      && toName             ? `→ ${toName}`             :
+                        dir === "out"     && fromName           ? `${fromName} →`           :
+                        "";
+
+                      const amountSign  = dir === "in" ? "+ " : dir === "out" ? "− " : "";
+                      const amountCls   = dir === "in" ? "text-emerald-700" : dir === "out" ? "text-rose-700" : "text-slate-700";
+
+                      return (
+                        <div key={t.id} className="px-5 py-3.5 flex items-start gap-4">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className={`text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full ${meta.badgeCls}`}>
+                                {meta.label}
+                              </span>
+                              <p className="text-[13px] font-medium text-slate-700">{flow}</p>
+                            </div>
+                            {t.note && (
+                              <p className="mt-1 text-[12.5px] text-slate-500 break-words">{t.note}</p>
+                            )}
+                          </div>
+                          <p className={`text-[14px] font-semibold tabular-nums whitespace-nowrap ${amountCls}`}>
+                            {amountSign}{formatBdt(t.amount)}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         );
       })()}
