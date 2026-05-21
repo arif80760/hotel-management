@@ -403,6 +403,61 @@ function formatBdt(n: number): string {
   return `৳ ${moneyFmt.format(n)}`;
 }
 
+// ── Transaction direction by type ────────────────────────────
+// in       — money landing in a bucket (no `from`, has `to`)
+// out      — money leaving a bucket (has `from`, no `to`)
+// neutral  — moves between two buckets (transfer)
+// Stage 2 only creates 'transfer' and 'injection'; the other four
+// are wired here in advance so later feature stages render correctly.
+type TxnDirection = "in" | "out" | "neutral";
+function txnDirection(type: string): TxnDirection {
+  switch (type) {
+    case "revenue_in":
+    case "injection":
+    case "loan_received":
+      return "in";
+    case "expense_out":
+    case "loan_repayment":
+      return "out";
+    case "transfer":
+    default:
+      return "neutral";
+  }
+}
+
+// ── Type → human label + badge classes ───────────────────────
+const TXN_TYPE_META: Record<string, { label: string; badgeCls: string }> = {
+  transfer:       { label: "Transfer",       badgeCls: "bg-slate-100 text-slate-700"   },
+  injection:      { label: "Cash Injection", badgeCls: "bg-emerald-50 text-emerald-700" },
+  revenue_in:     { label: "Revenue",        badgeCls: "bg-emerald-50 text-emerald-700" },
+  expense_out:    { label: "Expense",        badgeCls: "bg-rose-50 text-rose-700"       },
+  loan_received:  { label: "Loan Received",  badgeCls: "bg-sky-50 text-sky-700"         },
+  loan_repayment: { label: "Loan Repayment", badgeCls: "bg-amber-50 text-amber-700"     },
+};
+
+// ── Parse YYYY-MM-DD as local time, format as long day header ──
+function formatDayHeader(yyyyMmDd: string): string {
+  // Parsing with "T12:00:00" avoids UTC-midnight-shifts-back-one-day.
+  const d = new Date(`${yyyyMmDd}T12:00:00`);
+  return d.toLocaleDateString("en-US", {
+    weekday: "long",
+    year:    "numeric",
+    month:   "long",
+    day:     "numeric",
+  });
+}
+
+// ── Group transactions by txn_date, preserving newest-first order ──
+function groupByDay(txns: AccountTransaction[]): [string, AccountTransaction[]][] {
+  const map = new Map<string, AccountTransaction[]>();
+  for (const t of txns) {
+    const bucket = map.get(t.txnDate);
+    if (bucket) bucket.push(t);
+    else        map.set(t.txnDate, [t]);
+  }
+  return Array.from(map.entries());
+}
+
 type FormErrors = Partial<Record<"fromAccountId" | "toAccountId" | "amount" | "txnDate" | "form", string>>;
 
 export default function AccountsClient() {
@@ -651,6 +706,92 @@ export default function AccountsClient() {
             );
           })}
       </div>
+
+      {/* ══════════════════════════════════════════════════════
+          TRANSACTIONS — grouped by day, newest first
+      ══════════════════════════════════════════════════════ */}
+      {(() => {
+        // UUID -> bucket name. accounts is always 4 items.
+        const bucketName: Record<string, string> = {};
+        for (const a of accounts) bucketName[a.id] = a.name;
+
+        if (transactions.length === 0) {
+          return (
+            <div>
+              <p className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider mb-3">
+                Transactions
+              </p>
+              <div className="rounded-xl border border-dashed border-slate-200 bg-white px-6 py-10 flex flex-col items-center justify-center text-center">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-7 h-7 text-slate-300 mb-2">
+                  <path d="M3 7h18" />
+                  <path d="M3 12h18" />
+                  <path d="M3 17h12" />
+                </svg>
+                <p className="text-[13.5px] font-medium text-slate-500">No transactions yet.</p>
+                <p className="text-[12px] text-slate-400 mt-1">Add a transfer or cash injection to get started.</p>
+              </div>
+            </div>
+          );
+        }
+
+        return (
+          <div className="space-y-5">
+            <p className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">
+              Transactions
+            </p>
+
+            {groupByDay(transactions).map(([day, dayTxns]) => (
+              <div key={day} className="space-y-2">
+                <p className="text-[12.5px] font-semibold text-slate-700">
+                  {formatDayHeader(day)}
+                </p>
+
+                <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
+                  {dayTxns.map(t => {
+                    const meta = TXN_TYPE_META[t.type] ?? { label: t.type, badgeCls: "bg-slate-100 text-slate-700" };
+                    const dir  = txnDirection(t.type);
+
+                    const fromName = t.fromAccountId ? (bucketName[t.fromAccountId] ?? "Unknown") : null;
+                    const toName   = t.toAccountId   ? (bucketName[t.toAccountId]   ?? "Unknown") : null;
+
+                    // Direction arrow text per type:
+                    //   transfer   →  "Cash in Hand → Bank"
+                    //   in         →  "→ Bank"
+                    //   out        →  "Cash in Hand →"
+                    const flow =
+                      dir === "neutral" && fromName && toName ? `${fromName} → ${toName}` :
+                      dir === "in"      && toName             ? `→ ${toName}`             :
+                      dir === "out"     && fromName           ? `${fromName} →`           :
+                      "";
+
+                    const amountSign  = dir === "in" ? "+ " : dir === "out" ? "− " : "";
+                    const amountCls   = dir === "in" ? "text-emerald-700" : dir === "out" ? "text-rose-700" : "text-slate-700";
+
+                    return (
+                      <div key={t.id} className="px-5 py-3.5 flex items-start gap-4">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full ${meta.badgeCls}`}>
+                              {meta.label}
+                            </span>
+                            <p className="text-[13px] font-medium text-slate-700">{flow}</p>
+                          </div>
+                          {t.note && (
+                            <p className="mt-1 text-[12.5px] text-slate-500 break-words">{t.note}</p>
+                          )}
+                        </div>
+                        <p className={`text-[14px] font-semibold tabular-nums whitespace-nowrap ${amountCls}`}>
+                          {amountSign}{formatBdt(t.amount)}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
 
       {/* ══════════════════════════════════════════════════════
           MODAL — manual transaction entry
