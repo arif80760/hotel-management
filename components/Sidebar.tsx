@@ -6,6 +6,7 @@
 // The active link is highlighted with an amber/gold accent
 // to give the app a premium resort feel.
 
+import { useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
@@ -90,20 +91,72 @@ const Icons = {
 };
 
 // ── Nav items ─────────────────────────────────────────────────
-const navItems = [
+// Two shapes:
+//   NavLeaf  — single link, the historical shape used by every entry.
+//   NavGroup — expandable parent with children, used by Accounts so its
+//              subsections (Cashbook, Expense, Payroll, Revenue Management)
+//              all sit inside the sidebar under one collapsible header.
+//
+// Discriminated union: a leaf has `href`, a group has `children`. The
+// renderer below branches on which shape is present.
+
+type NavLeaf = {
+  label:      string;
+  href:       string;
+  icon:       ReactNode;
+  adminOnly?: boolean;
+};
+
+type NavChild = {
+  label: string;
+  href:  string;
+};
+
+type NavGroup = {
+  label:      string;
+  icon:       ReactNode;
+  adminOnly?: boolean;
+  children:   NavChild[];
+};
+
+type NavItem = NavLeaf | NavGroup;
+
+function isGroup(item: NavItem): item is NavGroup {
+  return "children" in item;
+}
+
+const navItems: NavItem[] = [
   { label: "Dashboard",  href: "/",            icon: Icons.dashboard  },
   { label: "Front Desk", href: "/front-desk",  icon: Icons.frontdesk  },
   { label: "Rooms",      href: "/rooms",       icon: Icons.rooms      },
   { label: "Guests",     href: "/guests",      icon: Icons.guests     },
   { label: "Bookings",   href: "/bookings",    icon: Icons.bookings   },
   { label: "Employees",  href: "/employees",   icon: Icons.employees, adminOnly: true },
-  { label: "Accounts",   href: "/accounts",    icon: Icons.accounts,  adminOnly: true },
+  {
+    label: "Accounts",
+    icon:  Icons.accounts,
+    adminOnly: true,
+    children: [
+      { label: "Cashbook",           href: "/accounts/cashbook" },
+      { label: "Expense",            href: "/accounts/expense" },
+      { label: "Payroll",            href: "/accounts/payroll" },
+      { label: "Revenue Management", href: "/accounts/revenue-management" },
+    ],
+  },
   { label: "My Profile", href: "/profile",     icon: Icons.profile    },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname();
   const { profile, role, signOut } = useAuth();
+
+  // Accounts group expansion state.
+  // Manual toggle when off /accounts/*; sticky-open when on any /accounts/*
+  // route (derived from pathname, not stored — the user can't collapse
+  // the group while inside it because the next render forces it open).
+  const [accountsExpanded, setAccountsExpanded] = useState(false);
+  const isAccountsRoute = pathname.startsWith("/accounts");
+  const showAccountsChildren = accountsExpanded || isAccountsRoute;
 
   return (
     <aside className="w-60 min-h-screen bg-slate-900 text-white flex flex-col flex-shrink-0">
@@ -141,35 +194,111 @@ export default function Sidebar() {
           // — same behaviour as staff. No flash: null → hidden, 'admin' → visible.
           .filter(item => !item.adminOnly || role === "admin")
           .map((item) => {
-          // Exact match for home "/", prefix match for other routes
-          const isActive =
-            item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
 
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`
-                group flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13.5px] font-medium
-                transition-all duration-150 relative
-                ${isActive
-                  ? "bg-slate-800 text-amber-400"
-                  : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-100"
-                }
-              `}
-            >
-              {/* Active indicator bar on the left edge */}
-              {isActive && (
-                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-amber-400 rounded-full" />
-              )}
-              {/* Icon */}
-              <span className={isActive ? "text-amber-400" : "text-slate-500 group-hover:text-slate-300"}>
-                {item.icon}
-              </span>
-              {item.label}
-            </Link>
-          );
-        })}
+            // ─── Group (Accounts) ─────────────────────────────
+            if (isGroup(item)) {
+              // The parent gets a soft "you're inside" highlight when on
+              // any of its children's routes. It does NOT get the full
+              // active treatment — that's reserved for the specific child.
+              const parentSoftActive = isAccountsRoute;
+
+              return (
+                <div key={item.label}>
+                  {/* Parent row — whole-row toggle button */}
+                  <button
+                    type="button"
+                    onClick={() => setAccountsExpanded(v => !v)}
+                    aria-expanded={showAccountsChildren}
+                    className={`
+                      w-full group flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13.5px] font-medium
+                      transition-all duration-150
+                      ${parentSoftActive
+                        ? "text-amber-400 hover:bg-slate-800/70"
+                        : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-100"
+                      }
+                    `}
+                  >
+                    {/* Icon */}
+                    <span className={parentSoftActive ? "text-amber-400" : "text-slate-500 group-hover:text-slate-300"}>
+                      {item.icon}
+                    </span>
+                    <span className="flex-1 text-left">{item.label}</span>
+                    {/* Chevron — rotates to indicate expand state */}
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className={`w-3.5 h-3.5 transition-transform duration-200 ${
+                        showAccountsChildren ? "rotate-180" : ""
+                      } ${parentSoftActive ? "text-amber-400/70" : "text-slate-500 group-hover:text-slate-300"}`}
+                    >
+                      <path d="M6 9l6 6 6-6" />
+                    </svg>
+                  </button>
+
+                  {/* Children — indented, no icons */}
+                  {showAccountsChildren && (
+                    <div className="mt-0.5 space-y-0.5">
+                      {item.children.map((child) => {
+                        const childActive = pathname === child.href || pathname.startsWith(child.href + "/");
+                        return (
+                          <Link
+                            key={child.href}
+                            href={child.href}
+                            className={`
+                              flex items-center pl-12 pr-3 py-2 rounded-lg text-[13px] font-medium
+                              transition-all duration-150 relative
+                              ${childActive
+                                ? "bg-slate-800 text-amber-400"
+                                : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-100"
+                              }
+                            `}
+                          >
+                            {childActive && (
+                              <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-amber-400 rounded-full" />
+                            )}
+                            {child.label}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
+            // ─── Leaf (everything else) ───────────────────────
+            const isActive =
+              item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`
+                  group flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13.5px] font-medium
+                  transition-all duration-150 relative
+                  ${isActive
+                    ? "bg-slate-800 text-amber-400"
+                    : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-100"
+                  }
+                `}
+              >
+                {/* Active indicator bar on the left edge */}
+                {isActive && (
+                  <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-amber-400 rounded-full" />
+                )}
+                {/* Icon */}
+                <span className={isActive ? "text-amber-400" : "text-slate-500 group-hover:text-slate-300"}>
+                  {item.icon}
+                </span>
+                {item.label}
+              </Link>
+            );
+          })}
       </nav>
 
       {/* ── Bottom footer — real user info + sign out ────────── */}
