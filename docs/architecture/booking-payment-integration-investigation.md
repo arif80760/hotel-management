@@ -80,15 +80,38 @@ Branches on `refunds.pre_adjusted`:
 
 | Scenario | Function | Investigated? | Notes |
 |---|---|---|---|
-| Cancel whole booking (atomic) | `cancel_booking()` | No | Phase 8.6, 4 refund INSERTs in migration |
-| Cancel per-room (atomic) | `cancel_booking_room()` | No | Phase 8.6, same migration |
-| Cancel whole booking (pending refund) | `cancel_booking()` (no disbursement params) | Partial — header confirms refund row created, not yet confirmed if payment is INSERTed |
-| Cancel per-room (pending refund) | `cancel_booking_room()` | Partial — same |
-| Extend booking room | `extendBookingRoom()` → unknown RPC | No | May not touch payments at all |
-| Add room to booking | `addRoomToBooking()` | No | Changes total; payments effect unknown |
-| Apply discount at checkout | covered above (step 3.5/3.6 of `checkout_booking`) | Yes | Only touches payments via overpayment path |
-| Apply discount post-booking | Two May-16 migrations | No | `discount-in-rpc` + `fix-discount-by-type` |
-| Update booking (generic) | `updateBooking()` | No | ~460-line function |
+| Cancel whole booking (atomic) | `cancel_booking()` (Branch C) | **Yes (2026-05-23)** | INSERT-only into payments. `refund_id` NULL. `pre_adjusted` defaults to FALSE. Trigger fires normally. |
+| Cancel per-room (atomic) | `cancel_booking_room()` (Branch C) | **Yes (2026-05-23)** | Same as above. |
+| Cancel whole booking (pending refund) | `cancel_booking()` (Branch B) | **Yes (2026-05-23)** | No payment row inserted. Daybook neutral (correct — money hasn't moved). |
+| Cancel per-room (pending refund) | `cancel_booking_room()` (Branch B) | **Yes (2026-05-23)** | Same as above. |
+| Extend booking room | `extend_booking_room()` RPC (Phase 7) | **Yes (2026-05-23)** | Zero payment writes. Updates booking_rooms + bookings.total_amount only. Guest pays later via `recordPayment`, fires trigger normally. |
+| Add room to booking | `add_room_to_booking()` RPC (Phase 7) | **Yes (2026-05-23)** | Zero payment writes. Same pattern as extension — booking_rooms INSERT + update_booking_total only. |
+| Apply discount at checkout | step 3.5/3.6 of `checkout_booking` | **Yes** | Only touches payments via overpayment path (the pre-adjustment case already mapped). |
+| Apply discount post-booking | Two May-16 migrations | **Yes (2026-05-23)** | Both are revisions of `checkout_booking` itself. Same step 3.5 overpayment INSERT pattern. No new write paths. |
+| Update booking (generic) | `updateBooking()` (TS, 877-1339) | **Yes (2026-05-23)** | Zero `.from("payments")` / `.from("refunds")` hits inside line range. Payment-neutral. |
+| Create booking with initial payment | `create_booking_with_rooms()` RPC | **Yes (2026-05-23)** | INSERT into payments at booking creation if `p_initial_payment > 0`. `refund_id = NULL`, real method. **Same pattern as `recordPayment()` — normal inflow, trigger fires normally.** |
+
+---
+
+## Architectural picture (so far)
+
+Every write path into `public.payments`:
+
+1. **INSERTs with `refund_id = NULL`** — `recordPayment()` (positive), `create_booking_with_rooms()` initial-payment (positive), Phase 8.6 cancellation Branch C (negative), `disburse_refund` Path B (negative). All have a real `method` that maps to a real bucket. **Trigger fires normally; daybook gets a correctly-bucketed row.** ✓
+2. **INSERTs with `refund_id = <uuid>`** — only `checkout_booking()` step 3.5 (pre-adjustment from overpayment, `method = 'other'`). This is the *only* producer of `refund_id`-linked INSERTs. **Trigger should skip — money hasn't physically moved.**
+3. **UPDATEs** — only `disburse_refund()` Path A (the matching pre-adjustment row gets its method UPDATEd from `'other'` to actual). **Trigger should fire on this specific UPDATE and write the daybook row at the actual disbursement bucket.**
+4. **DELETEs** — only manual SQL Editor cleanup. **Trigger DELETE branch removes the matching daybook row.**
+
+The full discriminator set:
+- `INSERT … refund_id IS NULL` → write daybook (the common case)
+- `INSERT … refund_id IS NOT NULL` → skip (pre-adjustment, money pending)
+- `UPDATE … OLD.refund_id IS NOT NULL AND OLD.method = 'other' AND NEW.method <> 'other'` → write daybook now (disbursement happened)
+- `UPDATE` (any other) → skip
+- `DELETE` → cascade-delete the matching daybook row
+
+This is the design the trigger needs to implement. As of 2026-05-23,
+the investigation is complete — every write path into `public.payments`
+has been traced and accounted for. No further unknowns.
 
 ---
 
@@ -145,26 +168,39 @@ END IF;
 This handles Path A correctly *and* preserves Path B and the normal
 inflow path.
 
-### Resolved questions about the proposed fix
+### Resolved questions
 
-**Q1: What if a pre-adjustment refund gets denied (not disbursed)?**
-*Resolved 2026-05-23:* The pre-adjustment payment row stays forever with
-`method = 'other'`. The daybook never records the financial event — which
-is correct, because no money physically moved. The cash entered Cash in
-Hand on the original guest payment (correctly recorded by `recordPayment`
-→ trigger) and stayed there. Denied refunds are accounting markers for
+**Q1 (resolved 2026-05-23): What if a pre-adjustment refund gets denied (not disbursed)?**
+The pre-adjustment payment row stays forever with `method = 'other'`.
+The daybook never records the financial event — which is correct,
+because no money physically moved. The cash entered Cash in Hand on
+the original guest payment (correctly recorded by `recordPayment` →
+trigger) and stayed there. Denied refunds are accounting markers for
 gift/tip tracking on the refunds table itself, not bucket movements.
 Daybook owes nothing here. Interpretation 1.
 
-### Open questions about the proposed fix
+**Q2 (resolved 2026-05-23): Phase 8.6 atomic-disburse uses `pre_adjusted = FALSE`.**
+All four `INSERT INTO refunds` sites in
+`2026-05-09-phase8.6-atomic-cancel-with-disbursement.sql` omit the
+`pre_adjusted` column entirely. The column's schema default is
+`BOOLEAN NOT NULL DEFAULT FALSE` (verified directly in the Phase 11-58a
+migration), so all four refund INSERTs land with `pre_adjusted = FALSE`.
 
-1. **Cancellation flows with atomic disbursement (Phase 8.6).** When
-   `cancel_booking` is called with disbursement params, does it use
-   `pre_adjusted = TRUE` or `FALSE`? The trigger's behavior is different
-   for each.
-2. **Other UPDATE paths.** Are there any code paths that UPDATE `payments`
-   for reasons OTHER than refund disbursement? If yes, our UPDATE branch
-   needs to ignore them.
+The two Phase 8.6 payment INSERTs (Branch C in each cancellation RPC)
+also omit `refund_id` from the column list, so it defaults to NULL.
+
+Result: Phase 8.6 payment INSERTs are indistinguishable from
+`recordPayment()` outflows from the trigger's point of view —
+`refund_id IS NULL`, real `method`, real `recorded_by`. Trigger
+fires normally and the daybook gets a correctly-bucketed row.
+
+**Q3 (resolved 2026-05-23): No UPDATE-payments paths exist outside
+`disburse_refund` Path A.** Verified definitively via codebase-wide
+grep: one `UPDATE public.payments` site exists, on line 569 of
+`2026-05-15-phase11-58a-overpayment-auto-refund.sql` — the
+`disburse_refund` Path A branch (Section 4). Zero `UPDATE` paths in
+`services/` or `app/`. Our trigger's UPDATE branch can narrowly target
+this one pattern.
 
 ---
 
@@ -178,20 +214,52 @@ Daybook owes nothing here. Interpretation 1.
   that blocks the original trigger design.
 - **2026-05-23, ~midday:** Resolved Q1 on denied refunds — no daybook trace
   needed (Interpretation 1).
+- **2026-05-23, afternoon:** Read Phase 8.6 migration header + four Branch B/C
+  slices. Resolved Q2 (`pre_adjusted = FALSE` in all 4 refund INSERTs;
+  `refund_id = NULL` in both Branch C payment INSERTs). Resolved Q3 (no UPDATE
+  paths to `payments` in Phase 8.6). Architectural picture section added.
+- **2026-05-23, afternoon:** Verified extension RPC body (`extend_booking_room`
+  Phase 7 version): zero payment writes. Updates booking_rooms + bookings only.
+- **2026-05-23, afternoon:** Verified two May-16 discount migrations: both are
+  iteration-intermediate revisions of `checkout_booking`'s step 3.5 — no new
+  write paths.
+- **2026-05-23, afternoon:** Spot-checked `updateBooking` (lines 877-1339):
+  zero `.from("payments")` / `.from("refunds")` hits. Payment-neutral.
+- **2026-05-23, afternoon:** Spot-checked `add_room_to_booking` (Phase 7
+  version): zero payment writes. Same pattern as extension.
+- **2026-05-23, afternoon:** Codebase-wide closing-out grep surfaced one
+  unaccounted write path: `create_booking_with_rooms` (initial payment INSERT
+  at booking creation). Added to the architecture picture as a `refund_id = NULL`
+  inflow producer — same flow as `recordPayment`.
+- **2026-05-23, late afternoon:** Investigation complete. All payment-write
+  paths mapped. Production data shape verified (105 total payment rows: 95
+  inflows ৳462,500, 7 outflows ৳-39,500, 2 disbursed pre-adjustments ৳-10,000,
+  1 pending pre-adjustment ৳-2,000).
 
 ---
 
-## Next investigation steps
+## Migration plan
 
-1. **Read Phase 8.6 migration** — `cancel_booking()` and `cancel_booking_room()`,
-   both pending-refund and atomic-disbursement branches. Confirm `pre_adjusted`
-   value used in each branch.
-2. **Read `extendBookingRoom`** — TS wrapper and its RPC. Confirm whether it
-   touches `payments` at all.
-3. **Read the two May-16 discount migrations** — post-booking discount path,
-   if it exists, may write to refunds (and via refunds to payments).
-4. **Spot-check `updateBooking`** — large function, but should be a quick scan
-   for any `.from("payments")` or `INSERT INTO payments`.
-5. **Spot-check `addRoomToBooking`** — same — does it touch payments?
+The investigation is complete. The trigger design is final (see "Architectural
+picture" section above). Two migration files to draft:
 
-After steps 1-5, the trigger design is final and we can create the migration files.
+### Migration A (backfill) — revised condition
+
+Backfill all historical payment rows EXCEPT pending pre-adjustments. The
+exclusion condition: `WHERE NOT (refund_id IS NOT NULL AND method = 'other')`.
+
+Based on production data shape (1 pending pre-adjustment at the time of
+investigation), backfill will produce 104 daybook rows from 105 payment rows.
+The 1 excluded row will get its daybook entry later when its refund is
+disbursed — at which point the trigger's UPDATE branch fires.
+
+### Migration B (trigger) — revised body
+
+Implements the full discriminator set:
+- INSERT with `refund_id IS NULL` → write daybook row (the common case).
+- INSERT with `refund_id IS NOT NULL` → skip (pre-adjustment, money pending).
+- UPDATE where `OLD.method = 'other' AND NEW.method <> 'other' AND NEW.refund_id IS NOT NULL` → write daybook row using NEW.method bucket (pre-adjustment disbursement).
+- DELETE → cascade-delete the matching daybook row by `booking_payment_id`.
+
+**Status:** Migrations to be drafted next, then verbatim-reviewed. Running
+deferred to a fresh shift (not end-of-day Saturday).
