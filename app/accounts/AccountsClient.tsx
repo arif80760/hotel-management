@@ -21,6 +21,7 @@ import {
   createTransaction,
   updateTransaction,
   deleteTransaction,
+  transactionsToCsv,
   type AccountBalance,
   type Account,
   type AccountTransaction,
@@ -597,6 +598,35 @@ export default function AccountsClient() {
     setEditingId(null);
   }
 
+  // ── Export CSV ────────────────────────────────────────────
+  // Builds a CSV string from the current transactions state (whatever
+  // the date-range filter is currently showing) and triggers a download
+  // via a temporary Blob URL. No DB access; pure transform of state.
+  function handleExportCsv() {
+    if (transactions.length === 0) return;
+
+    const csv = transactionsToCsv(transactions, accounts);
+
+    // Filename includes today's date so successive exports don't
+    // overwrite each other in the user's Downloads folder.
+    const today = todayISO();
+    const filename =
+      (filterFromDate || filterToDate)
+        ? `accounts-${filterFromDate || "start"}-to-${filterToDate || "today"}.csv`
+        : `accounts-all-${today}.csv`;
+
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url  = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href      = url;
+    a.download  = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   // ── Delete flow ──────────────────────────────────────────
   function openDeleteDialog(id: string) {
     setDeletingId(id);
@@ -757,16 +787,32 @@ export default function AccountsClient() {
     <div className="p-8 space-y-5">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold text-slate-800">Accounts</h1>
-        <button
-          type="button"
-          onClick={openModal}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" className="w-4 h-4">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-          Add Transaction
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={transactions.length === 0}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white border border-slate-200 text-slate-700 text-[13px] font-semibold hover:bg-slate-50 hover:border-slate-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            title={transactions.length === 0 ? "No transactions to export" : "Download current view as CSV"}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+              <path d="M7 10l5 5 5-5" />
+              <path d="M12 15V3" />
+            </svg>
+            Export CSV
+          </button>
+          <button
+            type="button"
+            onClick={openModal}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" className="w-4 h-4">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            Add Transaction
+          </button>
+        </div>
       </div>
 
       {/* ── Success banner ──────────────────────────────────── */}

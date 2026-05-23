@@ -490,3 +490,98 @@ export async function deleteTransaction(id: string): Promise<void> {
 
   console.log("[deleteTransaction] succeeded, id:", id);
 }
+
+// ─────────────────────────────────────────────────────────────
+// CSV EXPORT  (Stage 2.5 — client-side CSV string generation)
+// ─────────────────────────────────────────────────────────────
+//
+// Pure function: takes already-fetched transactions + the four accounts
+// (for bucket name lookup) and returns a CSV string. The caller is
+// responsible for triggering the download. No DB access.
+//
+// Filter respected by virtue of the caller passing in the already-filtered
+// transactions array (whatever's currently displayed on the daybook).
+//
+// Columns:
+//   Date            — YYYY-MM-DD
+//   Type            — pretty label (Revenue, Expense, Transfer, ...)
+//   From bucket     — bucket name or empty
+//   To bucket       — bucket name or empty
+//   Amount (BDT)    — numeric, positive
+//   Note            — free text (CSV-escaped if it contains commas/quotes/newlines)
+//   Source          — "Manual" for daybook entries, "Booking payment" for
+//                      auto-rows linked to a payment. Helps the accountant
+//                      tell why a row exists.
+//
+// "Recorded by" is intentionally omitted in v1 — see Day 19 handoff for
+// rationale. Easy to add later as another column without breaking old
+// exports.
+
+const TXN_TYPE_LABELS: Record<string, string> = {
+  revenue_in:     "Revenue",
+  expense_out:    "Expense",
+  transfer:       "Transfer",
+  injection:      "Cash Injection",
+  loan_received:  "Loan Received",
+  loan_repayment: "Loan Repayment",
+};
+
+// Escape a value for CSV per RFC 4180:
+//   - if value contains comma, double-quote, or newline, wrap in double quotes
+//   - any double-quote inside the value becomes ""
+function csvEscape(value: string): string {
+  if (value === "" || value === null || value === undefined) return "";
+  if (/[",\n\r]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+/**
+ * Convert a list of transactions to a CSV string.
+ *
+ * @param transactions  The rows to export (typically the currently-filtered
+ *                      list from AccountsClient state).
+ * @param accounts      The four bucket accounts (for UUID → name lookup).
+ * @returns             A CSV string with a header row + one row per transaction.
+ *                      Ends with a trailing newline.
+ */
+export function transactionsToCsv(
+  transactions: AccountTransaction[],
+  accounts:     Account[],
+): string {
+  // UUID -> bucket name lookup
+  const bucketName: Record<string, string> = {};
+  for (const a of accounts) bucketName[a.id] = a.name;
+
+  // Header row
+  const lines: string[] = [
+    ["Date", "Type", "From bucket", "To bucket", "Amount (BDT)", "Note", "Source"]
+      .map(csvEscape)
+      .join(","),
+  ];
+
+  // Data rows
+  for (const t of transactions) {
+    const typeLabel = TXN_TYPE_LABELS[t.type] ?? t.type;
+    const fromName  = t.fromAccountId ? (bucketName[t.fromAccountId] ?? "Unknown") : "";
+    const toName    = t.toAccountId   ? (bucketName[t.toAccountId]   ?? "Unknown") : "";
+    const source    = t.bookingPaymentId === null ? "Manual" : "Booking payment";
+
+    const row = [
+      t.txnDate,
+      typeLabel,
+      fromName,
+      toName,
+      // Amount: render as plain number string (Intl formatting belongs in the UI,
+      // not the export — spreadsheets handle their own number formatting).
+      String(t.amount),
+      t.note ?? "",
+      source,
+    ];
+
+    lines.push(row.map(csvEscape).join(","));
+  }
+
+  return lines.join("\n") + "\n";
+}
