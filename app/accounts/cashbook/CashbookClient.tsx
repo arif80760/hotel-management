@@ -1,6 +1,6 @@
 "use client";
 
-// app/accounts/AccountsClient.tsx
+// app/accounts/cashbook/CashbookClient.tsx
 // Accounts daybook — client component.
 //
 // STAGE 2. Built in pieces:
@@ -463,7 +463,7 @@ function groupByDay(txns: AccountTransaction[]): [string, AccountTransaction[]][
 
 type FormErrors = Partial<Record<"fromAccountId" | "toAccountId" | "amount" | "txnDate" | "form", string>>;
 
-export default function AccountsClient() {
+export default function CashbookClient() {
   // ── Data ───────────────────────────────────────────────────
   const [balances,     setBalances]     = useState<AccountBalance[]>([]);
   const [accounts,     setAccounts]     = useState<Account[]>([]);
