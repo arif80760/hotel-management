@@ -2,10 +2,21 @@
 -- Voucher number sequence — atomic generator for expense voucher numbers.
 --
 -- ─── STATUS ───────────────────────────────────────────────────
--- DRAFT — NOT YET APPLIED TO PRODUCTION (as of 2026-05-23).
+-- APPLIED 2026-05-24 (Day 19) — production reconciled to this design.
 --
--- This migration is queued for Day 19+ session review and execution
--- alongside other deferred Accounts work (day-close, Expense Management).
+-- History: this file's design (per-year sequences) was drafted Day 18 and
+-- queued for Day 19 application. When we ran it Day 19, verification
+-- revealed production already had a divergent next_voucher_number()
+-- function using a single, never-resetting sequence (public.voucher_seq).
+-- Origin of the prior version is unknown — it was applied to production
+-- at some untracked earlier point, never tracked in this repo. Day 19
+-- reconciliation: dropped the old function + voucher_seq, then applied
+-- this file's per-year design as the canonical state.
+--
+-- Side effect of reconcile: voucher_seq_2026 ended at last_value=4 after
+-- four verification calls during reconcile. Sequence intentionally left
+-- as-is per design's "gaps are acceptable" property. First real expense
+-- voucher when Expense Management ships will be EV-2026-0005.
 -- ──────────────────────────────────────────────────────────────
 --
 -- Format: EV-{YYYY}-{####}
