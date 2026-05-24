@@ -22,11 +22,18 @@ import {
   updateTransaction,
   deleteTransaction,
   transactionsToCsv,
+  ACCOUNT_IDS,
   type AccountBalance,
   type Account,
   type AccountTransaction,
   type ManualTxnType,
 } from "@/services/accountsService";
+
+import {
+  getDayCloseStatus,
+  closeDay,
+  type DayCloseStatus,
+} from "@/services/dayCloseService";
 
 // ─────────────────────────────────────────────────────────────
 // COPIED FROM app/employees/EmployeesClient.tsx
@@ -489,6 +496,28 @@ export default function CashbookClient() {
   // ── Success banner ─────────────────────────────────────────
   const [successMsg, setSuccessMsg] = useState("");
 
+  // ── Day-close state ────────────────────────────────────────
+  // dayCloseStatus: result of getDayCloseStatus() — last-closed date,
+  // missed-days backlog, can-close-today flag, today's opening balance.
+  // null until first load completes (or load failed).
+  const [dayCloseStatus, setDayCloseStatus] = useState<DayCloseStatus | null>(null);
+  // closingDay: true while closeDay() call is in flight (disables button).
+  const [closingDay, setClosingDay] = useState(false);
+  // closeDayError: error message from a failed close attempt (banner under the button).
+  // null when no error to show.
+  const [closeDayError, setCloseDayError] = useState<string | null>(null);
+
+  // Helper: refresh dayCloseStatus. Called on mount and after a successful close.
+  // Errors are non-fatal — we leave dayCloseStatus null and skip the card.
+  async function loadDayCloseStatus() {
+    try {
+      const status = await getDayCloseStatus();
+      setDayCloseStatus(status);
+    } catch {
+      setDayCloseStatus(null);
+    }
+  }
+
   // ── Date range filter — defaults to today (focused daybook view) ──
   const [filterFromDate, setFilterFromDate] = useState<string>(todayISO);
   const [filterToDate,   setFilterToDate]   = useState<string>(todayISO);
@@ -497,6 +526,7 @@ export default function CashbookClient() {
   const filterMountedRef = useRef(false);
 
   // ── Load on mount — three independent reads in parallel ────
+  // Day-close status loads separately (non-fatal: if it fails, the card hides).
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -510,6 +540,9 @@ export default function CashbookClient() {
           setBalances(bal);
           setAccounts(accts);
           setTransactions(txns);
+          // Fire-and-forget the day-close status load. Non-fatal: if it
+          // fails the card just stays hidden.
+          loadDayCloseStatus();
         }
       } catch (err) {
         if (!cancelled) {
@@ -814,6 +847,124 @@ export default function CashbookClient() {
           </button>
         </div>
       </div>
+
+      {/* ── Close Day card ──────────────────────────────────── */}
+      {dayCloseStatus && (() => {
+        const today = todayISO();
+        const alreadyClosed = dayCloseStatus.lastClosedDate === today;
+        const hasBacklog    = dayCloseStatus.missedDays.length > 0;
+
+        // Today's Cash in Hand activity from the already-loaded transactions
+        // state. Filter to txn_date === today and rows touching Cash in Hand.
+        const cashId = ACCOUNT_IDS.cash;
+        const todaysCashTxns = transactions.filter(
+          (t) => t.txnDate === today && (t.fromAccountId === cashId || t.toAccountId === cashId),
+        );
+
+        // Net delta into Cash in Hand for today (preview only — closeDay()
+        // recomputes server-side from a fresh fetch when the button fires).
+        const netDelta = todaysCashTxns.reduce((acc, t) => {
+          if (t.toAccountId   === cashId) return acc + t.amount;
+          if (t.fromAccountId === cashId) return acc - t.amount;
+          return acc;
+        }, 0);
+
+        const opening   = dayCloseStatus.todaysOpeningBalance;
+        const closing   = +(opening + netDelta).toFixed(2);
+        const fmtMoney  = (n: number) => "৳" + n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+        async function handleCloseDay() {
+          setCloseDayError(null);
+          setClosingDay(true);
+          try {
+            const result = await closeDay(today);
+            if (result.ok) {
+              setSuccessMsg(`Day ${today} closed at ${fmtMoney(result.row.closingBalance)}.`);
+              await loadDayCloseStatus();
+            } else {
+              setCloseDayError(result.message);
+            }
+          } catch (err) {
+            setCloseDayError(err instanceof Error ? err.message : "Close failed.");
+          } finally {
+            setClosingDay(false);
+          }
+        }
+
+        return (
+          <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-[15px] font-semibold text-slate-800">
+                Day Close — Today ({today})
+              </h2>
+              {alreadyClosed && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-[12px] font-medium text-emerald-700">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
+                    <path d="M20 6L9 17l-5-5" />
+                  </svg>
+                  Closed
+                </span>
+              )}
+            </div>
+
+            {hasBacklog && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-[13px] text-amber-800">
+                <strong className="font-semibold">{dayCloseStatus.missedDays.length} day(s) before today are unclosed:</strong>{" "}
+                {dayCloseStatus.missedDays.join(", ")}. Close oldest-first before closing today. (Catch-up screen ships in a future update.)
+              </div>
+            )}
+
+            <div className="flex items-center justify-between text-[13.5px]">
+              <span className="text-slate-600">Opening balance</span>
+              <span className="font-medium text-slate-800 tabular-nums">{fmtMoney(opening)}</span>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="text-[13px] text-slate-600">Today's Cash in Hand activity:</div>
+              {todaysCashTxns.length === 0 ? (
+                <div className="text-[13px] text-slate-400 italic pl-3">No Cash in Hand activity today.</div>
+              ) : (
+                <ul className="space-y-1 pl-3">
+                  {todaysCashTxns.map((t) => {
+                    const sign = t.toAccountId === cashId ? "+" : "−";
+                    const color = t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700";
+                    return (
+                      <li key={t.id} className="flex items-center justify-between text-[13px]">
+                        <span className="text-slate-700 truncate pr-3">{t.note || t.type}</span>
+                        <span className={`font-medium tabular-nums ${color}`}>{sign}{fmtMoney(t.amount).replace("৳", "৳")}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between text-[13.5px] pt-3 border-t border-slate-100">
+              <span className="text-slate-600 font-medium">Closing balance{alreadyClosed ? "" : " (preview)"}</span>
+              <span className="font-semibold text-slate-900 tabular-nums">{fmtMoney(alreadyClosed ? opening : closing)}</span>
+            </div>
+
+            {!alreadyClosed && (
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={handleCloseDay}
+                  disabled={closingDay || hasBacklog}
+                  className="w-full px-4 py-2.5 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={hasBacklog ? "Resolve backlog first" : closingDay ? "Closing..." : "Close today"}
+                >
+                  {closingDay ? "Closing..." : "Close Today"}
+                </button>
+                {closeDayError && (
+                  <div className="mt-2 text-[12.5px] text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-3 py-2">
+                    {closeDayError}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── Success banner ──────────────────────────────────── */}
       {successMsg && (
