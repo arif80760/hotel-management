@@ -1121,6 +1121,19 @@ export default function CashbookClient() {
                             )}
                           </div>
 
+                          {isManual && t.editedAt && (
+                            <span
+                              className="inline-flex items-center text-slate-400 flex-shrink-0"
+                              title={`Edited ${new Date(t.editedAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}`}
+                              aria-label="This transaction has been edited"
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
+                                <circle cx="12" cy="12" r="9" />
+                                <path d="M12 7v5l3 2" />
+                              </svg>
+                            </span>
+                          )}
+
                           {isManual && (
                             <>
                               <button

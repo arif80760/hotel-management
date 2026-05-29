@@ -84,6 +84,10 @@ export type AccountTransaction = {
   bookingPaymentId:  string | null;   // FK to payments.id; non-null means auto-generated
   createdBy:         string | null;   // auth.users(id) of the recorder
   createdAt:         string;
+  editedAt:          string | null;   // ISO timestamp of most recent edit; null if never edited
+  editedBy:          string | null;   // auth.users(id) of most recent editor; null if never edited
+  deletedAt:         string | null;   // ISO timestamp of soft delete; null if live (filtered out of reads)
+  deletedBy:         string | null;   // auth.users(id) of soft-deleter; null if live
 };
 
 // Input for a manual daybook entry (transfer or injection only).
@@ -129,6 +133,10 @@ type AccountTransactionRow = {
   booking_payment_id: string | null;
   created_by:         string | null;
   created_at:         string;
+  edited_at:          string | null;
+  edited_by:          string | null;
+  deleted_at:         string | null;
+  deleted_by:         string | null;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -164,6 +172,10 @@ function mapTransaction(row: AccountTransactionRow): AccountTransaction {
     bookingPaymentId:  row.booking_payment_id,
     createdBy:         row.created_by,
     createdAt:         row.created_at,
+    editedAt:          row.edited_at,
+    editedBy:          row.edited_by,
+    deletedAt:         row.deleted_at,
+    deletedBy:         row.deleted_by,
   };
 }
 
@@ -215,7 +227,7 @@ export async function getTransactions(
 ): Promise<AccountTransaction[]> {
   let query = supabase
     .from("account_transactions")
-    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, created_by, created_at")
+    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, created_by, created_at, edited_at, edited_by, deleted_at, deleted_by")
     .is("deleted_at", null)              // soft-deleted rows are invisible everywhere
     .order("txn_date", { ascending: false })
     .order("created_at", { ascending: false });
@@ -300,7 +312,7 @@ export async function createTransaction(
   const { data, error, status, statusText } = await supabase
     .from("account_transactions")
     .insert(payload)
-    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, created_by, created_at")
+    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, created_by, created_at, edited_at, edited_by, deleted_at, deleted_by")
     .single();
 
   if (error) {
@@ -393,8 +405,16 @@ export async function updateTransaction(
     );
   }
 
+  // ── Audit: who is editing? Same pattern as createTransaction.
+  //    Fails open — if auth is unavailable, edited_by stays null
+  //    rather than blocking the edit entirely.
+  const { data: editAuth } = await supabase.auth.getUser();
+  const editedBy = editAuth?.user?.id ?? null;
+
   // ── Build payload — note: created_by is NOT updated on edit;
   //    the original recorder remains the row's attributed owner.
+  //    edited_at / edited_by ARE updated each edit (overwriting any
+  //    prior edit's stamps — most-recent-edit semantics, not history).
   const payload = {
     txn_date:        input.txnDate,
     type:            input.type,
@@ -402,6 +422,8 @@ export async function updateTransaction(
     from_account_id: input.type === "injection" ? null : input.fromAccountId,
     to_account_id:   input.toAccountId,
     note:            input.note?.trim() || null,
+    edited_at:       new Date().toISOString(),
+    edited_by:       editedBy,
   };
 
   console.log("[updateTransaction] id:", id, "| payload:", payload);
@@ -410,7 +432,7 @@ export async function updateTransaction(
     .from("account_transactions")
     .update(payload)
     .eq("id", id)
-    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, created_by, created_at")
+    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, created_by, created_at, edited_at, edited_by, deleted_at, deleted_by")
     .single();
 
   if (error) {
@@ -465,9 +487,15 @@ export async function deleteTransaction(id: string): Promise<void> {
     );
   }
 
-  console.log("[deleteTransaction] soft-deleting id:", id);
+  // Audit: who is deleting? Mirrors updateTransaction's edited_by pattern.
+  // Fails open — if auth lookup fails, deleted_by stays null rather than
+  // blocking the delete entirely. The row still gets a deleted_at stamp.
+  const { data: delAuth } = await supabase.auth.getUser();
+  const deletedBy = delAuth?.user?.id ?? null;
 
-  // Soft delete: UPDATE deleted_at = now() instead of DELETE.
+  console.log("[deleteTransaction] soft-deleting id:", id, "| deleted_by:", deletedBy);
+
+  // Soft delete: UPDATE deleted_at = now() (+ deleted_by) instead of DELETE.
   // Soft-deleted rows are filtered out of all reads (getTransactions
   // adds .is("deleted_at", null); account_balances view filters via
   // its LEFT JOIN). The DB-level immutability trigger fires on UPDATE,
@@ -475,7 +503,10 @@ export async function deleteTransaction(id: string): Promise<void> {
   // disable the trash icon on closed-day rows.
   const { error, status, statusText } = await supabase
     .from("account_transactions")
-    .update({ deleted_at: new Date().toISOString() })
+    .update({
+      deleted_at: new Date().toISOString(),
+      deleted_by: deletedBy,
+    })
     .eq("id", id)
     .is("deleted_at", null);
 
