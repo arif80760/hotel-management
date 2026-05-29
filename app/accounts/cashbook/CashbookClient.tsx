@@ -871,7 +871,8 @@ export default function CashbookClient() {
 
         const opening   = dayCloseStatus.todaysOpeningBalance;
         const closing   = +(opening + netDelta).toFixed(2);
-        const fmtMoney  = (n: number) => "৳" + n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        // Money formatting uses the module-level formatBdt (Western 1000-grouping,
+        // no decimals) — same as the balance cards and transaction list below.
 
         async function handleCloseDay() {
           setCloseDayError(null);
@@ -879,7 +880,7 @@ export default function CashbookClient() {
           try {
             const result = await closeDay(today);
             if (result.ok) {
-              setSuccessMsg(`Day ${today} closed at ${fmtMoney(result.row.closingBalance)}.`);
+              setSuccessMsg(`Day ${today} closed at ${formatBdt(result.row.closingBalance)}.`);
               await loadDayCloseStatus();
             } else {
               setCloseDayError(result.message);
@@ -916,7 +917,7 @@ export default function CashbookClient() {
 
             <div className="flex items-center justify-between text-[13.5px]">
               <span className="text-slate-600">Opening balance</span>
-              <span className="font-medium text-slate-800 tabular-nums">{fmtMoney(opening)}</span>
+              <span className="font-medium text-slate-800 tabular-nums">{formatBdt(opening)}</span>
             </div>
 
             <div className="space-y-1.5">
@@ -931,7 +932,7 @@ export default function CashbookClient() {
                     return (
                       <li key={t.id} className="flex items-center justify-between text-[13px]">
                         <span className="text-slate-700 truncate pr-3">{t.note || t.type}</span>
-                        <span className={`font-medium tabular-nums ${color}`}>{sign}{fmtMoney(t.amount).replace("৳", "৳")}</span>
+                        <span className={`font-medium tabular-nums ${color}`}>{sign}{formatBdt(t.amount)}</span>
                       </li>
                     );
                   })}
@@ -941,7 +942,7 @@ export default function CashbookClient() {
 
             <div className="flex items-center justify-between text-[13.5px] pt-3 border-t border-slate-100">
               <span className="text-slate-600 font-medium">Closing balance{alreadyClosed ? "" : " (preview)"}</span>
-              <span className="font-semibold text-slate-900 tabular-nums">{fmtMoney(alreadyClosed ? opening : closing)}</span>
+              <span className="font-semibold text-slate-900 tabular-nums">{formatBdt(alreadyClosed ? opening : closing)}</span>
             </div>
 
             {!alreadyClosed && (
@@ -1107,6 +1108,16 @@ export default function CashbookClient() {
                         t.bookingPaymentId === null &&
                         (t.type === "transfer" || t.type === "injection");
 
+                      // A row sits on a closed day iff dayCloseStatus is loaded AND
+                      // the row's txn_date is on or before the latest closed date.
+                      // String compare works because YYYY-MM-DD is lexicographically
+                      // chronological. Closed-day rows can't be edited or deleted —
+                      // the DB-level immutability trigger rejects any UPDATE/DELETE
+                      // touching them. UI mirrors that by disabling the buttons.
+                      const isClosedDay =
+                        dayCloseStatus !== null &&
+                        t.txnDate <= dayCloseStatus.lastClosedDate;
+
                       return (
                         <div key={t.id} className="px-5 py-3.5 flex items-start gap-4">
                           <div className="flex-1 min-w-0">
@@ -1139,9 +1150,10 @@ export default function CashbookClient() {
                               <button
                                 type="button"
                                 onClick={() => openEditModal(t)}
+                                disabled={isClosedDay}
                                 aria-label="Edit transaction"
-                                title="Edit"
-                                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors flex-shrink-0"
+                                title={isClosedDay ? "This day is closed — edit not allowed" : "Edit"}
+                                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-slate-400"
                               >
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
                                   <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
@@ -1151,9 +1163,10 @@ export default function CashbookClient() {
                               <button
                                 type="button"
                                 onClick={() => openDeleteDialog(t.id)}
+                                disabled={isClosedDay}
                                 aria-label="Delete transaction"
-                                title="Delete"
-                                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors flex-shrink-0"
+                                title={isClosedDay ? "This day is closed — delete not allowed" : "Delete"}
+                                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-slate-400"
                               >
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
                                   <path d="M3 6h18" />
