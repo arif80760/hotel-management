@@ -216,6 +216,7 @@ export async function getTransactions(
   let query = supabase
     .from("account_transactions")
     .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, created_by, created_at")
+    .is("deleted_at", null)              // soft-deleted rows are invisible everywhere
     .order("txn_date", { ascending: false })
     .order("created_at", { ascending: false });
 
@@ -464,15 +465,22 @@ export async function deleteTransaction(id: string): Promise<void> {
     );
   }
 
-  console.log("[deleteTransaction] id:", id);
+  console.log("[deleteTransaction] soft-deleting id:", id);
 
+  // Soft delete: UPDATE deleted_at = now() instead of DELETE.
+  // Soft-deleted rows are filtered out of all reads (getTransactions
+  // adds .is("deleted_at", null); account_balances view filters via
+  // its LEFT JOIN). The DB-level immutability trigger fires on UPDATE,
+  // so soft-deleting a row in a closed period is rejected — UI should
+  // disable the trash icon on closed-day rows.
   const { error, status, statusText } = await supabase
     .from("account_transactions")
-    .delete()
-    .eq("id", id);
+    .update({ deleted_at: new Date().toISOString() })
+    .eq("id", id)
+    .is("deleted_at", null);
 
   if (error) {
-    console.error("──────────── [deleteTransaction] DELETE FAILED ────────────");
+    console.error("──────────── [deleteTransaction] SOFT DELETE FAILED ────────────");
     console.error("  message    :", error.message);
     console.error("  details    :", error.details);
     console.error("  hint       :", error.hint);
