@@ -222,14 +222,41 @@ export async function closeDay(closeDate: string): Promise<CloseDayResult> {
     };
   }
 
-  // 4. Compute closing balance: opening + today's Cash in Hand net delta.
+  // 4. Compute closing + INSERT — delegated to shared helper.
+  return _performClose(closeDate, status.todaysOpeningBalance, userId);
+}
+
+// ─────────────────────────────────────────────────────────────
+// SHARED CLOSE LOGIC — used by both closeDay() and closePastDay().
+//
+// Given a date, its opening balance (chain-preserved from prior close),
+// and the user id of the closer, this:
+//   - reads all Cash in Hand transactions on that date
+//   - computes the net delta (in-out)
+//   - inserts the day_closes row
+//   - returns the success/error CloseDayResult
+//
+// All auth/ordering/already-closed guards live in the public callers.
+// This function does no validation beyond what the DB enforces.
+// ─────────────────────────────────────────────────────────────
+
+async function _performClose(
+  closeDate: string,
+  opening: number,
+  userId: string,
+): Promise<CloseDayResult> {
+  // 1. Sum Cash in Hand net delta on closeDate.
   const { data: txnRows, error: txnError } = await supabase
     .from("account_transactions")
     .select("amount, from_account_id, to_account_id")
     .eq("txn_date", closeDate);
 
   if (txnError) {
-    return { ok: false, reason: "db_error", message: `closeDay: failed to read today's transactions (${txnError.message}).` };
+    return {
+      ok: false,
+      reason: "db_error",
+      message: `_performClose: failed to read transactions for ${closeDate} (${txnError.message}).`,
+    };
   }
 
   const cashId = ACCOUNT_IDS.cash;
@@ -240,10 +267,9 @@ export async function closeDay(closeDate: string): Promise<CloseDayResult> {
     if (r.from_account_id === cashId) netDelta -= amt;
   }
 
-  const opening = status.todaysOpeningBalance;
   const closing = +(opening + netDelta).toFixed(2);   // NUMERIC(12,2) parity
 
-  // 5. Insert.
+  // 2. Insert.
   const { data: insertedRow, error: insertError } = await supabase
     .from("day_closes")
     .insert({
@@ -256,8 +282,193 @@ export async function closeDay(closeDate: string): Promise<CloseDayResult> {
     .single();
 
   if (insertError || !insertedRow) {
-    return { ok: false, reason: "db_error", message: `closeDay: insert failed (${insertError?.message ?? "no row returned"}).` };
+    return {
+      ok: false,
+      reason: "db_error",
+      message: `_performClose: insert failed for ${closeDate} (${insertError?.message ?? "no row returned"}).`,
+    };
   }
 
   return { ok: true, row: mapDayClose(insertedRow as DayCloseRow) };
+}
+
+
+// ─────────────────────────────────────────────────────────────
+// CATCH-UP — closing past missed days.
+//
+// Oldest-first enforced at the service level. closePastDay() refuses
+// any date that is not exactly missedDays[0]. This keeps the chain
+// strictly contiguous: each day's opening = prior day's closing.
+//
+// Closing balance for a past day is computed the same way as today:
+// opening + that day's Cash in Hand net delta. The immutability trigger
+// won't fire on the INSERT because day_closes itself is not gated by
+// the trigger (the trigger is on account_transactions only).
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Close a specific past (missed) day. Must be the OLDEST missed day —
+ * see lockedordering policy. Anything else is refused at service level,
+ * regardless of UI state.
+ *
+ *   - Refuses if closeDate is today (use closeDay for that).
+ *   - Refuses if closeDate is not in current missedDays.
+ *   - Refuses if closeDate is not the oldest entry in missedDays.
+ *   - Refuses if not authenticated.
+ *   - Computes opening from the close just prior (missedDays[0] is always
+ *     preceded by a closed day in this model — that's what makes it the
+ *     oldest *missed* day).
+ *   - Delegates to _performClose for the compute + INSERT.
+ */
+export async function closePastDay(closeDate: string): Promise<CloseDayResult> {
+  const today = todayIso();
+
+  // 1. Not-today guard.
+  if (closeDate === today) {
+    return {
+      ok: false,
+      reason: "wrong_date",
+      message: `closePastDay: ${closeDate} is today — use closeDay() instead.`,
+    };
+  }
+
+  // 2. Auth.
+  const { data: userResult, error: userError } = await supabase.auth.getUser();
+  if (userError || !userResult?.user) {
+    return {
+      ok: false,
+      reason: "not_authenticated",
+      message: `closePastDay: no authenticated user (${userError?.message ?? "user is null"}).`,
+    };
+  }
+  const userId = userResult.user.id;
+
+  // 3. Status + ordering.
+  const status = await getDayCloseStatus();
+  if (status.missedDays.length === 0) {
+    return {
+      ok: false,
+      reason: "wrong_date",
+      message: `closePastDay: no missed days currently — nothing to catch up.`,
+    };
+  }
+  if (status.missedDays[0] !== closeDate) {
+    return {
+      ok: false,
+      reason: "wrong_date",
+      message: `closePastDay: ${closeDate} is not the oldest missed day. Oldest is ${status.missedDays[0]} — close that first.`,
+    };
+  }
+
+  // 4. Opening for this day = prior day's close. Since closeDate is
+  //    missedDays[0], the day before it is by definition the most
+  //    recently closed day. So opening = status.lastClosedDate's closing
+  //    = todaysOpeningBalance (which we already have).
+  const opening = status.todaysOpeningBalance;
+
+  // 5. Delegate to shared helper.
+  return _performClose(closeDate, opening, userId);
+}
+
+
+// ─────────────────────────────────────────────────────────────
+// CATCH-UP — review data for the catch-up card.
+//
+// The Close Day card needs to render: opening, list of Cash in Hand
+// transactions, computed closing preview. For today, the card pulls
+// those from already-loaded state. For a past day, the card needs to
+// fetch them. This function bundles that fetch.
+// ─────────────────────────────────────────────────────────────
+
+export type PastDayActivity = {
+  closeDate:       string;
+  opening:         number;
+  netDelta:        number;
+  closingPreview:  number;
+  transactions:    Array<{
+    id:             string;
+    type:           string;
+    amount:         number;
+    fromAccountId:  string | null;
+    toAccountId:    string | null;
+    note:           string | null;
+  }>;
+};
+
+/**
+ * Returns the review data for a single missed day: opening balance,
+ * list of Cash in Hand transactions on that date, and the closing
+ * preview that would result from closing it now.
+ *
+ * Does NOT check ordering — caller responsible for showing the right
+ * day. The service-level ordering enforcement happens at closePastDay()
+ * time.
+ *
+ *   - Refuses if closeDate is today.
+ *   - Refuses if closeDate is already closed.
+ *   - Returns transactions oldest-first within the day (by created_at).
+ */
+export async function getPastDayActivity(closeDate: string): Promise<PastDayActivity> {
+  const today = todayIso();
+  if (closeDate === today) {
+    throw new Error(`getPastDayActivity: ${closeDate} is today — not a past day.`);
+  }
+
+  // Confirm it's actually missed (not already closed). Cheap sanity check.
+  const status = await getDayCloseStatus();
+  if (!status.missedDays.includes(closeDate)) {
+    throw new Error(`getPastDayActivity: ${closeDate} is not in current missed-days list. (Already closed, or future.)`);
+  }
+
+  // Opening = prior day's closing. Since closeDate is in missedDays,
+  // the close just before missedDays[0] is lastClosedDate. But if
+  // closeDate is missedDays[N] for N>0, we need the closing of
+  // missedDays[N-1] — which doesn't exist yet (it's also missed).
+  // In the oldest-first model, the UI only ever calls this for
+  // missedDays[0], so we can use lastClosedDate's closing.
+  // Guard: refuse if not oldest.
+  if (status.missedDays[0] !== closeDate) {
+    throw new Error(`getPastDayActivity: ${closeDate} is not the oldest missed day. Oldest is ${status.missedDays[0]}.`);
+  }
+
+  const opening = status.todaysOpeningBalance;
+
+  // Fetch this day's transactions touching Cash in Hand.
+  const cashId = ACCOUNT_IDS.cash;
+  const { data: txnRows, error: txnError } = await supabase
+    .from("account_transactions")
+    .select("id, type, amount, from_account_id, to_account_id, note")
+    .eq("txn_date", closeDate)
+    .or(`from_account_id.eq.${cashId},to_account_id.eq.${cashId}`)
+    .is("deleted_at", null)
+    .order("created_at", { ascending: true });
+
+  if (txnError) {
+    throw new Error(`getPastDayActivity: failed to read transactions for ${closeDate} (${txnError.message}).`);
+  }
+
+  let netDelta = 0;
+  const transactions = (txnRows ?? []).map((r: { id: string; type: string; amount: string | number; from_account_id: string | null; to_account_id: string | null; note: string | null }) => {
+    const amt = typeof r.amount === "string" ? parseFloat(r.amount) : r.amount;
+    if (r.to_account_id   === cashId) netDelta += amt;
+    if (r.from_account_id === cashId) netDelta -= amt;
+    return {
+      id:            r.id,
+      type:          r.type,
+      amount:        amt,
+      fromAccountId: r.from_account_id,
+      toAccountId:   r.to_account_id,
+      note:          r.note,
+    };
+  });
+
+  const closingPreview = +(opening + netDelta).toFixed(2);
+
+  return {
+    closeDate,
+    opening,
+    netDelta,
+    closingPreview,
+    transactions,
+  };
 }

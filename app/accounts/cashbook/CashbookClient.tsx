@@ -31,8 +31,11 @@ import {
 
 import {
   getDayCloseStatus,
+  getPastDayActivity,
   closeDay,
+  closePastDay,
   type DayCloseStatus,
+  type PastDayActivity,
 } from "@/services/dayCloseService";
 
 // ─────────────────────────────────────────────────────────────
@@ -501,20 +504,43 @@ export default function CashbookClient() {
   // missed-days backlog, can-close-today flag, today's opening balance.
   // null until first load completes (or load failed).
   const [dayCloseStatus, setDayCloseStatus] = useState<DayCloseStatus | null>(null);
+  // pastActivity: data for the oldest missed day (review screen). Loaded by
+  // loadDayCloseStatus when missedDays.length > 0; null otherwise.
+  const [pastActivity, setPastActivity] = useState<PastDayActivity | null>(null);
   // closingDay: true while closeDay() call is in flight (disables button).
   const [closingDay, setClosingDay] = useState(false);
   // closeDayError: error message from a failed close attempt (banner under the button).
   // null when no error to show.
   const [closeDayError, setCloseDayError] = useState<string | null>(null);
 
-  // Helper: refresh dayCloseStatus. Called on mount and after a successful close.
-  // Errors are non-fatal — we leave dayCloseStatus null and skip the card.
+  // Helper: refresh dayCloseStatus, plus pastActivity when there's a backlog.
+  // Errors are non-fatal — we leave the state null and the card skips itself.
+  //
+  // The two fetches are sequential because pastActivity depends on knowing
+  // missedDays[0]. Doing them in parallel would require predicting the oldest
+  // missed date, which we don't know without first fetching status.
   async function loadDayCloseStatus() {
     try {
       const status = await getDayCloseStatus();
       setDayCloseStatus(status);
+
+      if (status.missedDays.length > 0) {
+        // Catch-up mode: fetch the oldest missed day's review data.
+        try {
+          const activity = await getPastDayActivity(status.missedDays[0]);
+          setPastActivity(activity);
+        } catch {
+          // Non-fatal: pastActivity stays null, card will skip itself in
+          // catch-up mode rather than rendering with stale or partial data.
+          setPastActivity(null);
+        }
+      } else {
+        // No backlog → clear any stale catch-up data.
+        setPastActivity(null);
+      }
     } catch {
       setDayCloseStatus(null);
+      setPastActivity(null);
     }
   }
 
@@ -851,36 +877,90 @@ export default function CashbookClient() {
       {/* ── Close Day card ──────────────────────────────────── */}
       {dayCloseStatus && (() => {
         const today = todayISO();
-        const alreadyClosed = dayCloseStatus.lastClosedDate === today;
-        const hasBacklog    = dayCloseStatus.missedDays.length > 0;
-
-        // Today's Cash in Hand activity from the already-loaded transactions
-        // state. Filter to txn_date === today and rows touching Cash in Hand.
+        const hasBacklog = dayCloseStatus.missedDays.length > 0;
+        const alreadyClosedToday = !hasBacklog && dayCloseStatus.lastClosedDate === today;
         const cashId = ACCOUNT_IDS.cash;
-        const todaysCashTxns = transactions.filter(
-          (t) => t.txnDate === today && (t.fromAccountId === cashId || t.toAccountId === cashId),
-        );
 
-        // Net delta into Cash in Hand for today (preview only — closeDay()
-        // recomputes server-side from a fresh fetch when the button fires).
-        const netDelta = todaysCashTxns.reduce((acc, t) => {
-          if (t.toAccountId   === cashId) return acc + t.amount;
-          if (t.fromAccountId === cashId) return acc - t.amount;
-          return acc;
-        }, 0);
+        // Mode discriminator. catchup > closed > today (priority for rendering).
+        // catchup: backlog exists, render the oldest missed day's review.
+        // closed:  no backlog AND today already closed, show the pill.
+        // today:   no backlog AND today not yet closed, render today's preview.
+        type CardMode = "catchup" | "closed" | "today";
+        const mode: CardMode =
+          hasBacklog          ? "catchup" :
+          alreadyClosedToday  ? "closed"  :
+          "today";
 
-        const opening   = dayCloseStatus.todaysOpeningBalance;
-        const closing   = +(opening + netDelta).toFixed(2);
-        // Money formatting uses the module-level formatBdt (Western 1000-grouping,
-        // no decimals) — same as the balance cards and transaction list below.
+        // In catchup mode we render from pastActivity. If it hasn't loaded yet,
+        // skip rendering rather than showing partial/stale data.
+        if (mode === "catchup" && !pastActivity) return null;
 
-        async function handleCloseDay() {
+        // ── Derive per-mode data ──────────────────────────────
+        // For "today" mode: pull from the already-loaded transactions state.
+        // For "catchup" mode: use pastActivity (a separate service fetch).
+        // For "closed" mode: show today's opening, no activity list.
+        type DerivedRow = { id: string; note: string | null; type: string; amount: number; sign: "+" | "−"; color: string };
+
+        let displayDate:        string;
+        let opening:            number;
+        let closingShown:       number;
+        let displayRows:        DerivedRow[];
+        let isClosing:          boolean;
+
+        if (mode === "catchup") {
+          const pa = pastActivity!;
+          displayDate  = pa.closeDate;
+          opening      = pa.opening;
+          closingShown = pa.closingPreview;
+          displayRows  = pa.transactions.map((t) => ({
+            id:     t.id,
+            note:   t.note,
+            type:   t.type,
+            amount: t.amount,
+            sign:   t.toAccountId === cashId ? "+" : "−",
+            color:  t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700",
+          }));
+          isClosing = closingDay;
+        } else if (mode === "today") {
+          displayDate = today;
+          opening     = dayCloseStatus.todaysOpeningBalance;
+          const todaysCashTxns = transactions.filter(
+            (t) => t.txnDate === today && (t.fromAccountId === cashId || t.toAccountId === cashId),
+          );
+          const netDelta = todaysCashTxns.reduce((acc, t) => {
+            if (t.toAccountId   === cashId) return acc + t.amount;
+            if (t.fromAccountId === cashId) return acc - t.amount;
+            return acc;
+          }, 0);
+          closingShown = +(opening + netDelta).toFixed(2);
+          displayRows = todaysCashTxns.map((t) => ({
+            id:     t.id,
+            note:   t.note,
+            type:   t.type,
+            amount: t.amount,
+            sign:   t.toAccountId === cashId ? "+" : "−",
+            color:  t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700",
+          }));
+          isClosing = closingDay;
+        } else {
+          // closed
+          displayDate  = today;
+          opening      = dayCloseStatus.todaysOpeningBalance;
+          closingShown = dayCloseStatus.todaysOpeningBalance;
+          displayRows  = [];
+          isClosing    = false;
+        }
+
+        // ── Handlers ─────────────────────────────────────────
+        async function handleClose() {
           setCloseDayError(null);
           setClosingDay(true);
           try {
-            const result = await closeDay(today);
+            const result = mode === "catchup"
+              ? await closePastDay(displayDate)
+              : await closeDay(today);
             if (result.ok) {
-              setSuccessMsg(`Day ${today} closed at ${formatBdt(result.row.closingBalance)}.`);
+              setSuccessMsg(`Day ${displayDate} closed at ${formatBdt(result.row.closingBalance)}.`);
               await loadDayCloseStatus();
             } else {
               setCloseDayError(result.message);
@@ -892,14 +972,49 @@ export default function CashbookClient() {
           }
         }
 
+        // ── Styling, label, copy ─────────────────────────────
+        // catchup gets amber accent on border + header background. today/closed
+        // stays neutral slate.
+        const cardCls = mode === "catchup"
+          ? "bg-white border border-amber-300 rounded-xl p-5 space-y-4"
+          : "bg-white border border-slate-200 rounded-xl p-5 space-y-4";
+
+        const headerLabel = mode === "catchup"
+          ? `Day Close — Catch up (${displayDate})`
+          : `Day Close — Today (${displayDate})`;
+
+        const buttonLabel = isClosing
+          ? "Closing..."
+          : mode === "catchup"
+            ? `Catch up: close ${displayDate}`
+            : "Close Today";
+
+        const activityLabel = mode === "catchup"
+          ? `Cash in Hand activity on ${displayDate}:`
+          : "Today's Cash in Hand activity:";
+
+        const emptyActivityLabel = mode === "catchup"
+          ? `No Cash in Hand activity on ${displayDate}.`
+          : "No Cash in Hand activity today.";
+
+        // Backlog count pill — shown in catchup header only.
+        const backlogCount = dayCloseStatus.missedDays.length;
+
         return (
-          <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-[15px] font-semibold text-slate-800">
-                Day Close — Today ({today})
-              </h2>
-              {alreadyClosed && (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-[12px] font-medium text-emerald-700">
+          <div className={cardCls}>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-[15px] font-semibold text-slate-800">
+                  {headerLabel}
+                </h2>
+                {mode === "catchup" && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-amber-100 border border-amber-200 text-[11px] font-semibold text-amber-800 uppercase tracking-wide">
+                    {backlogCount} day{backlogCount === 1 ? "" : "s"} behind
+                  </span>
+                )}
+              </div>
+              {mode === "closed" && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-[12px] font-medium text-emerald-700 flex-shrink-0">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
                     <path d="M20 6L9 17l-5-5" />
                   </svg>
@@ -908,10 +1023,9 @@ export default function CashbookClient() {
               )}
             </div>
 
-            {hasBacklog && (
-              <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-[13px] text-amber-800">
-                <strong className="font-semibold">{dayCloseStatus.missedDays.length} day(s) before today are unclosed:</strong>{" "}
-                {dayCloseStatus.missedDays.join(", ")}. Close oldest-first before closing today. (Catch-up screen ships in a future update.)
+            {mode === "catchup" && backlogCount >= 3 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-[12.5px] text-amber-800">
+                All missed days: {dayCloseStatus.missedDays.join(", ")}. Close oldest-first; today becomes closable after backlog clears.
               </div>
             )}
 
@@ -921,40 +1035,42 @@ export default function CashbookClient() {
             </div>
 
             <div className="space-y-1.5">
-              <div className="text-[13px] text-slate-600">Today's Cash in Hand activity:</div>
-              {todaysCashTxns.length === 0 ? (
-                <div className="text-[13px] text-slate-400 italic pl-3">No Cash in Hand activity today.</div>
+              <div className="text-[13px] text-slate-600">{activityLabel}</div>
+              {displayRows.length === 0 ? (
+                <div className="text-[13px] text-slate-400 italic pl-3">{emptyActivityLabel}</div>
               ) : (
                 <ul className="space-y-1 pl-3">
-                  {todaysCashTxns.map((t) => {
-                    const sign = t.toAccountId === cashId ? "+" : "−";
-                    const color = t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700";
-                    return (
-                      <li key={t.id} className="flex items-center justify-between text-[13px]">
-                        <span className="text-slate-700 truncate pr-3">{t.note || t.type}</span>
-                        <span className={`font-medium tabular-nums ${color}`}>{sign}{formatBdt(t.amount)}</span>
-                      </li>
-                    );
-                  })}
+                  {displayRows.map((r) => (
+                    <li key={r.id} className="flex items-center justify-between text-[13px]">
+                      <span className="text-slate-700 truncate pr-3">{r.note || r.type}</span>
+                      <span className={`font-medium tabular-nums ${r.color}`}>{r.sign}{formatBdt(r.amount)}</span>
+                    </li>
+                  ))}
                 </ul>
               )}
             </div>
 
             <div className="flex items-center justify-between text-[13.5px] pt-3 border-t border-slate-100">
-              <span className="text-slate-600 font-medium">Closing balance{alreadyClosed ? "" : " (preview)"}</span>
-              <span className="font-semibold text-slate-900 tabular-nums">{formatBdt(alreadyClosed ? opening : closing)}</span>
+              <span className="text-slate-600 font-medium">
+                Closing balance{mode === "closed" ? "" : " (preview)"}
+              </span>
+              <span className="font-semibold text-slate-900 tabular-nums">{formatBdt(closingShown)}</span>
             </div>
 
-            {!alreadyClosed && (
+            {mode !== "closed" && (
               <div className="pt-2">
                 <button
                   type="button"
-                  onClick={handleCloseDay}
-                  disabled={closingDay || hasBacklog}
-                  className="w-full px-4 py-2.5 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                  title={hasBacklog ? "Resolve backlog first" : closingDay ? "Closing..." : "Close today"}
+                  onClick={handleClose}
+                  disabled={isClosing}
+                  className={
+                    mode === "catchup"
+                      ? "w-full px-4 py-2.5 rounded-lg bg-amber-600 text-white text-[13px] font-semibold hover:bg-amber-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      : "w-full px-4 py-2.5 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  }
+                  title={isClosing ? "Closing..." : buttonLabel}
                 >
-                  {closingDay ? "Closing..." : "Close Today"}
+                  {buttonLabel}
                 </button>
                 {closeDayError && (
                   <div className="mt-2 text-[12.5px] text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-3 py-2">
