@@ -101,8 +101,12 @@ export type NewManualTransaction = {
 };
 
 export type TransactionFilters = {
-  fromDate?: string;                 // inclusive "YYYY-MM-DD"
-  toDate?:   string;                 // inclusive "YYYY-MM-DD"
+  fromDate?:       string;                 // inclusive "YYYY-MM-DD"
+  toDate?:         string;                 // inclusive "YYYY-MM-DD"
+  // When true, include soft-deleted rows in the result. Defaults to false:
+  // getTransactions filters them out so the cashbook never accidentally shows
+  // a deleted row in operational views. Set true only for audit/forensic views.
+  includeDeleted?: boolean;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -228,9 +232,12 @@ export async function getTransactions(
   let query = supabase
     .from("account_transactions")
     .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, created_by, created_at, edited_at, edited_by, deleted_at, deleted_by")
-    .is("deleted_at", null)              // soft-deleted rows are invisible everywhere
     .order("txn_date", { ascending: false })
     .order("created_at", { ascending: false });
+
+  // Soft-deleted rows are invisible by default. Audit/forensic views can opt
+  // in via filters.includeDeleted = true.
+  if (!filters.includeDeleted) query = query.is("deleted_at", null);
 
   if (filters.fromDate) query = query.gte("txn_date", filters.fromDate);
   if (filters.toDate)   query = query.lte("txn_date", filters.toDate);

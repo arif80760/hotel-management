@@ -245,11 +245,15 @@ async function _performClose(
   opening: number,
   userId: string,
 ): Promise<CloseDayResult> {
-  // 1. Sum Cash in Hand net delta on closeDate.
+  // 1. Sum Cash in Hand net delta on closeDate. Exclude soft-deleted rows
+  // — they don't represent real money movement and must not contribute to
+  // the closing balance. This filter is critical: without it, deleting a
+  // row after close would produce a chain inconsistency.
   const { data: txnRows, error: txnError } = await supabase
     .from("account_transactions")
     .select("amount, from_account_id, to_account_id")
-    .eq("txn_date", closeDate);
+    .eq("txn_date", closeDate)
+    .is("deleted_at", null);
 
   if (txnError) {
     return {

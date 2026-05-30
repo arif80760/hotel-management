@@ -544,6 +544,11 @@ export default function CashbookClient() {
     }
   }
 
+  // ── Show-deleted toggle (audit/forensic view) ──
+  // When true, getTransactions includes soft-deleted rows. They render
+  // struck-through with inline deleted_at metadata. Default false.
+  const [showDeleted, setShowDeleted] = useState(false);
+
   // ── Date range filter — defaults to today (focused daybook view) ──
   const [filterFromDate, setFilterFromDate] = useState<string>(todayISO);
   const [filterToDate,   setFilterToDate]   = useState<string>(todayISO);
@@ -560,7 +565,7 @@ export default function CashbookClient() {
         const [bal, accts, txns] = await Promise.all([
           getBalances(),
           getAccounts(),
-          getTransactions({ fromDate: filterFromDate || undefined, toDate: filterToDate || undefined }),
+          getTransactions({ fromDate: filterFromDate || undefined, toDate: filterToDate || undefined, includeDeleted: showDeleted }),
         ]);
         if (!cancelled) {
           setBalances(bal);
@@ -613,8 +618,9 @@ export default function CashbookClient() {
     async function refetch() {
       try {
         const txns = await getTransactions({
-          fromDate: filterFromDate || undefined,
-          toDate:   filterToDate   || undefined,
+          fromDate:       filterFromDate || undefined,
+          toDate:         filterToDate   || undefined,
+          includeDeleted: showDeleted,
         });
         if (!cancelled) setTransactions(txns);
       } catch (err) {
@@ -627,7 +633,7 @@ export default function CashbookClient() {
     }
     refetch();
     return () => { cancelled = true; };
-  }, [filterFromDate, filterToDate]);
+  }, [filterFromDate, filterToDate, showDeleted]);
 
   // ── Open / close ───────────────────────────────────────────
   function openModal() {
@@ -924,8 +930,14 @@ export default function CashbookClient() {
         } else if (mode === "today") {
           displayDate = today;
           opening     = dayCloseStatus.todaysOpeningBalance;
+          // Filter out soft-deleted rows independent of the showDeleted toggle.
+          // The card's closing-balance preview must reflect live money only —
+          // deleted rows don't contribute to the actual close. Without this
+          // filter, toggling "Show Deleted" would inflate the preview.
           const todaysCashTxns = transactions.filter(
-            (t) => t.txnDate === today && (t.fromAccountId === cashId || t.toAccountId === cashId),
+            (t) => t.txnDate === today
+              && t.deletedAt === null
+              && (t.fromAccountId === cashId || t.toAccountId === cashId),
           );
           const netDelta = todaysCashTxns.reduce((acc, t) => {
             if (t.toAccountId   === cashId) return acc + t.amount;
@@ -1169,6 +1181,18 @@ export default function CashbookClient() {
                     Clear
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setShowDeleted(v => !v)}
+                  className={`h-[42px] px-3 text-[12.5px] font-semibold rounded-lg transition-colors ${
+                    showDeleted
+                      ? "bg-rose-50 text-rose-600 hover:bg-rose-100"
+                      : "text-slate-500 hover:text-slate-800 hover:bg-slate-100"
+                  }`}
+                  title={showDeleted ? "Hide deleted transactions" : "Show deleted transactions"}
+                >
+                  {showDeleted ? "Hide Deleted" : "Show Deleted"}
+                </button>
               </div>
             </div>
 
@@ -1234,21 +1258,40 @@ export default function CashbookClient() {
                         dayCloseStatus !== null &&
                         t.txnDate <= dayCloseStatus.lastClosedDate;
 
+                      const isDeleted = t.deletedAt !== null;
+
                       return (
-                        <div key={t.id} className="px-5 py-3.5 flex items-start gap-4">
+                        <div key={t.id} className={`px-5 py-3.5 flex items-start gap-4 ${isDeleted ? "opacity-50 bg-rose-50/40" : ""}`}>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
                               <span className={`text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full ${meta.badgeCls}`}>
                                 {meta.label}
                               </span>
+                              {isDeleted && (
+                                <span className="text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-rose-100 text-rose-600"
+                                  title={`Deleted ${new Date(t.deletedAt!).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}`}
+                                >
+                                  Deleted
+                                </span>
+                              )}
                               <p className="text-[13px] font-medium text-slate-700">{flow}</p>
                             </div>
                             {t.note && (
-                              <p className="mt-1 text-[12.5px] text-slate-500 break-words">{t.note}</p>
+                              <p className={`mt-1 text-[12.5px] text-slate-500 break-words ${isDeleted ? "line-through decoration-slate-400" : ""}`}>{t.note}</p>
+                            )}
+                            {isDeleted && (
+                              <p className="mt-1 text-[11.5px] text-rose-600/90 italic">
+                                Deleted by {t.deletedBy ? "Admin" : "—"}{" "}
+                                {t.deletedAt && (
+                                  <>
+                                    on {new Date(t.deletedAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}
+                                  </>
+                                )}
+                              </p>
                             )}
                           </div>
 
-                          {isManual && t.editedAt && (
+                          {isManual && !isDeleted && t.editedAt && (
                             <span
                               className="inline-flex items-center text-slate-400 flex-shrink-0"
                               title={`Edited ${new Date(t.editedAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}`}
@@ -1261,7 +1304,7 @@ export default function CashbookClient() {
                             </span>
                           )}
 
-                          {isManual && (
+                          {isManual && !isDeleted && (
                             <>
                               <button
                                 type="button"
@@ -1295,7 +1338,7 @@ export default function CashbookClient() {
                             </>
                           )}
 
-                          <p className={`text-[14px] font-semibold tabular-nums whitespace-nowrap ${amountCls}`}>
+                          <p className={`text-[14px] font-semibold tabular-nums whitespace-nowrap ${amountCls} ${isDeleted ? "line-through decoration-current" : ""}`}>
                             {amountSign}{formatBdt(t.amount)}
                           </p>
                         </div>
