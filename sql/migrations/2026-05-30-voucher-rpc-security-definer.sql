@@ -2,8 +2,7 @@
 -- Hotfix during Phase 4C: change next_voucher_number() to SECURITY DEFINER.
 --
 -- ─── STATUS ───────────────────────────────────────────────────
--- APPLIED 2026-05-30 (Day 21) — ALTER FUNCTION SECURITY DEFINER applied.
--- Verified: prosecdef = true; SELECT public.next_voucher_number() returns EV-2026-NNNN.
+-- DRAFT — not yet applied to production.
 -- ──────────────────────────────────────────────────────────────
 --
 -- Problem discovered Day 21 during Phase 4C smoke test:
