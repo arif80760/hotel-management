@@ -2,23 +2,27 @@
 
 // app/accounts/expense/ExpenseClient.tsx
 //
-// Expense Management page — Phase 4B (categories admin) ships first.
-// 4C wires the "Add Expense" button. 4D adds the voucher route.
+// Expense Management page — Phase 4C ships the expense entry modal and
+// a daybook-style list view grouped by date.
 //
 // Layout:
-//   - Header: "Expense" title + two buttons (Manage Categories, Add Expense)
-//   - Body: placeholder for the expense list (built in 4C)
-//   - Manage Categories modal: list, inline rename, active toggle, create
+//   - Header: "Expense" title + two top-right buttons
+//     (Manage Categories, Add Expense)
+//   - Date filter row (default: today)
+//   - Body: daybook-style list grouped by txn_date, newest first
+//   - Manage Categories modal (Phase 4B, unchanged)
+//   - Add Expense modal (Phase 4C, NEW)
 //
-// State patterns copied from app/accounts/cashbook/CashbookClient.tsx:
-//   - useState declarations grouped by concern
-//   - Modal pattern: open/close + saving + errors
-//   - Inline editing via per-row editingId state
-//   - Escape closes the modal when not saving
+// Service-layer pattern: this page fetches expenses, categories, and
+// employees separately on mount, then resolves category/employee names
+// in the UI via lookup maps. (The service layer returns flat IDs to keep
+// the Supabase queries simple and avoid PostgREST nested-select typing
+// issues.)
 //
 // ─────────────────────────────────────────────────────────────
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
+
 import {
   getExpenseCategories,
   createExpenseCategory,
@@ -27,7 +31,21 @@ import {
   type ExpenseCategory,
 } from "@/services/expenseCategoriesService";
 
-// ── Input styling helper (copied from CashbookClient — same convention) ──
+import {
+  getExpenses,
+  getDistinctPayees,
+  createExpense,
+  type Expense,
+  type NewExpense,
+} from "@/services/expensesService";
+
+import {
+  getAllEmployees,
+  type Employee,
+} from "@/services/employeesService";
+
+
+// ── Input styling helper ───────────────────────────────────
 function inputCls(hasError = false): string {
   return [
     "w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg",
@@ -36,31 +54,88 @@ function inputCls(hasError = false): string {
   ].join(" ");
 }
 
+// ── Date helpers ───────────────────────────────────────────
+
+function todayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function formatDateLabel(iso: string): string {
+  // Returns a human-friendly grouping label.
+  // Today => "Today, Sat 30 May 2026"
+  // Yesterday => "Yesterday, Fri 29 May 2026"
+  // Otherwise => "Wed 28 May 2026"
+  const today = todayISO();
+  const d = new Date(iso + "T00:00:00");
+  const weekday  = d.toLocaleDateString("en-GB", { weekday: "short" });
+  const day      = d.getDate();
+  const month    = d.toLocaleDateString("en-GB", { month: "short" });
+  const year     = d.getFullYear();
+  const base = `${weekday} ${day} ${month} ${year}`;
+
+  if (iso === today) return `Today, ${base}`;
+
+  // Yesterday check
+  const yest = new Date();
+  yest.setDate(yest.getDate() - 1);
+  const yISO = `${yest.getFullYear()}-${String(yest.getMonth() + 1).padStart(2, "0")}-${String(yest.getDate()).padStart(2, "0")}`;
+  if (iso === yISO) return `Yesterday, ${base}`;
+
+  return base;
+}
+
+function formatAmount(n: number): string {
+  // Bangladeshi locale grouping (1,23,456.78). Cashbook uses en-IN; keep consistent.
+  return new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+}
+
 
 export default function ExpenseClient() {
   // ── Data ───────────────────────────────────────────────────
+  const [expenses,   setExpenses]   = useState<Expense[]>([]);
   const [categories, setCategories] = useState<ExpenseCategory[]>([]);
+  const [employees,  setEmployees]  = useState<Employee[]>([]);
+  const [payeesHistory, setPayeesHistory] = useState<string[]>([]);
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching,   setFetching]   = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  // ── Manage Categories modal ────────────────────────────────
+  // ── Filter state ───────────────────────────────────────────
+  const [filterFromDate, setFilterFromDate] = useState<string>(todayISO());
+  const [filterToDate,   setFilterToDate]   = useState<string>(todayISO());
+
+  // ── Manage Categories modal (Phase 4B, unchanged) ──────────
   const [categoryModalOpen, setCategoryModalOpen] = useState(false);
-  // editingId: null = no inline edit; UUID = the row currently in edit mode.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
-  // ── Create category (inline-input at top of modal) ─────────
   const [newCategoryName, setNewCategoryName] = useState("");
   const [creatingCategory, setCreatingCategory] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
+  const [createCategoryError, setCreateCategoryError] = useState<string | null>(null);
 
-  // ── Per-row toggle state (active/inactive flip) ────────────
-  // togglingId: UUID of the row whose toggle is currently in flight.
   const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  // ── Add Expense modal (Phase 4C, NEW) ──────────────────────
+  const [expenseModalOpen, setExpenseModalOpen] = useState(false);
+  const [exTxnDate,     setExTxnDate]     = useState<string>(todayISO());
+  const [exAmount,      setExAmount]      = useState<string>("");
+  const [exCategoryId,  setExCategoryId]  = useState<string>("");
+  const [exPayeeMode,   setExPayeeMode]   = useState<"employee" | "vendor">("employee");
+  const [exEmployeeId,  setExEmployeeId]  = useState<string>("");
+  const [exPayeeText,   setExPayeeText]   = useState<string>("");
+  const [exNote,        setExNote]        = useState<string>("");
+
+  const [creatingExpense, setCreatingExpense] = useState(false);
+  const [createExpenseError, setCreateExpenseError] = useState<string | null>(null);
+  const [createExpenseFieldErrors, setCreateExpenseFieldErrors] = useState<{
+    amount?: string;
+    category?: string;
+    payee?: string;
+  }>({});
 
   // ── Success banner ─────────────────────────────────────────
   const [successMsg, setSuccessMsg] = useState("");
@@ -70,11 +145,20 @@ export default function ExpenseClient() {
     let cancelled = false;
     async function load() {
       try {
-        const cats = await getExpenseCategories();
-        if (!cancelled) setCategories(cats);
+        const [exps, cats, emps, payeesH] = await Promise.all([
+          getExpenses({ fromDate: filterFromDate, toDate: filterToDate }),
+          getExpenseCategories(),
+          getAllEmployees(),
+          getDistinctPayees(),
+        ]);
+        if (cancelled) return;
+        setExpenses(exps);
+        setCategories(cats);
+        setEmployees(emps);
+        setPayeesHistory(payeesH);
       } catch (err) {
         if (!cancelled) {
-          setFetchError(err instanceof Error ? err.message : "Failed to load categories.");
+          setFetchError(err instanceof Error ? err.message : "Failed to load.");
         }
       } finally {
         if (!cancelled) setFetching(false);
@@ -82,7 +166,23 @@ export default function ExpenseClient() {
     }
     load();
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Refetch expenses when filter changes ───────────────────
+  useEffect(() => {
+    if (fetching) return; // initial load handles its own range
+    let cancelled = false;
+    (async () => {
+      try {
+        const exps = await getExpenses({ fromDate: filterFromDate, toDate: filterToDate });
+        if (!cancelled) setExpenses(exps);
+      } catch (err) {
+        console.error("[ExpenseClient] refilter failed:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [filterFromDate, filterToDate, fetching]);
 
   // ── Auto-clear success banner ──────────────────────────────
   useEffect(() => {
@@ -91,50 +191,86 @@ export default function ExpenseClient() {
     return () => clearTimeout(t);
   }, [successMsg]);
 
-  // ── Escape closes the modal (when nothing is saving) ───────
+  // ── Escape closes modals (when nothing is saving) ──────────
   useEffect(() => {
-    if (!categoryModalOpen) return;
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && !savingEdit && !creatingCategory && !togglingId) {
-        closeModal();
+      if (e.key !== "Escape") return;
+      if (categoryModalOpen && !savingEdit && !creatingCategory && !togglingId) {
+        closeCategoryModal();
+      } else if (expenseModalOpen && !creatingExpense) {
+        closeExpenseModal();
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [categoryModalOpen, savingEdit, creatingCategory, togglingId]);
+  }, [categoryModalOpen, expenseModalOpen, savingEdit, creatingCategory, togglingId, creatingExpense]);
 
-  // ── Modal helpers ──────────────────────────────────────────
-  function openModal() {
+  // ── Lookup maps ────────────────────────────────────────────
+  const categoryById = new Map(categories.map(c => [c.id, c]));
+  const employeeById = new Map(employees.map(e => [e.id, e]));
+
+  const activeCategories = categories.filter(c => c.isActive);
+  const activeEmployees  = employees.filter(e => e.isActive);
+
+  // ── Category Modal helpers ─────────────────────────────────
+  function openCategoryModal() {
     setCategoryModalOpen(true);
     setEditingId(null);
     setEditingValue("");
     setEditError(null);
     setNewCategoryName("");
-    setCreateError(null);
+    setCreateCategoryError(null);
   }
-  function closeModal() {
+  function closeCategoryModal() {
     if (savingEdit || creatingCategory || togglingId) return;
     setCategoryModalOpen(false);
   }
 
-  // ── Refresh categories from server ─────────────────────────
+  // ── Expense Modal helpers ──────────────────────────────────
+  function openExpenseModal() {
+    setExpenseModalOpen(true);
+    setExTxnDate(todayISO());
+    setExAmount("");
+    setExCategoryId("");
+    setExPayeeMode("employee");
+    setExEmployeeId("");
+    setExPayeeText("");
+    setExNote("");
+    setCreateExpenseError(null);
+    setCreateExpenseFieldErrors({});
+  }
+  function closeExpenseModal() {
+    if (creatingExpense) return;
+    setExpenseModalOpen(false);
+  }
+
+  // ── Reload helpers ─────────────────────────────────────────
   async function reloadCategories() {
     try {
       const cats = await getExpenseCategories();
       setCategories(cats);
     } catch (err) {
-      console.error("[ExpenseClient] reload failed:", err);
+      console.error("[ExpenseClient] reloadCategories failed:", err);
+    }
+  }
+  async function reloadExpenses() {
+    try {
+      const [exps, payeesH] = await Promise.all([
+        getExpenses({ fromDate: filterFromDate, toDate: filterToDate }),
+        getDistinctPayees(),
+      ]);
+      setExpenses(exps);
+      setPayeesHistory(payeesH);
+    } catch (err) {
+      console.error("[ExpenseClient] reloadExpenses failed:", err);
     }
   }
 
-  // ── Handlers ───────────────────────────────────────────────
-  async function handleCreate() {
+  // ── Category Handlers (4B, unchanged behavior) ─────────────
+  async function handleCreateCategory() {
     const trimmed = newCategoryName.trim();
-    if (!trimmed) {
-      setCreateError("Name is required.");
-      return;
-    }
-    setCreateError(null);
+    if (!trimmed) { setCreateCategoryError("Name is required."); return; }
+    setCreateCategoryError(null);
     setCreatingCategory(true);
     try {
       await createExpenseCategory(trimmed);
@@ -142,12 +278,11 @@ export default function ExpenseClient() {
       setSuccessMsg(`Category "${trimmed}" created.`);
       await reloadCategories();
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : "Create failed.");
+      setCreateCategoryError(err instanceof Error ? err.message : "Create failed.");
     } finally {
       setCreatingCategory(false);
     }
   }
-
   function startEdit(c: ExpenseCategory) {
     setEditingId(c.id);
     setEditingValue(c.name);
@@ -161,10 +296,7 @@ export default function ExpenseClient() {
   async function handleSaveEdit() {
     if (!editingId) return;
     const trimmed = editingValue.trim();
-    if (!trimmed) {
-      setEditError("Name is required.");
-      return;
-    }
+    if (!trimmed) { setEditError("Name is required."); return; }
     setEditError(null);
     setSavingEdit(true);
     try {
@@ -179,7 +311,6 @@ export default function ExpenseClient() {
       setSavingEdit(false);
     }
   }
-
   async function handleToggleActive(c: ExpenseCategory) {
     setTogglingId(c.id);
     try {
@@ -188,11 +319,69 @@ export default function ExpenseClient() {
       await reloadCategories();
     } catch (err) {
       console.error("[ExpenseClient] toggle failed:", err);
-      setSuccessMsg(""); // suppress success when failed
     } finally {
       setTogglingId(null);
     }
   }
+
+  // ── Expense Handler ────────────────────────────────────────
+  async function handleCreateExpense() {
+    // Field-level validation
+    const fieldErrors: { amount?: string; category?: string; payee?: string } = {};
+    const amountNum = parseFloat(exAmount);
+    if (!exAmount.trim() || isNaN(amountNum) || amountNum <= 0) {
+      fieldErrors.amount = "Amount must be a positive number.";
+    }
+    if (!exCategoryId) fieldErrors.category = "Category is required.";
+    if (exPayeeMode === "employee" && !exEmployeeId) fieldErrors.payee = "Select an employee.";
+    if (exPayeeMode === "vendor"   && !exPayeeText.trim()) fieldErrors.payee = "Payee name is required.";
+
+    if (Object.keys(fieldErrors).length > 0) {
+      setCreateExpenseFieldErrors(fieldErrors);
+      return;
+    }
+    setCreateExpenseFieldErrors({});
+    setCreateExpenseError(null);
+    setCreatingExpense(true);
+
+    try {
+      const input: NewExpense = {
+        txnDate:     exTxnDate,
+        amount:      amountNum,
+        categoryId:  exCategoryId,
+        payeeMode:   exPayeeMode,
+        employeeId:  exPayeeMode === "employee" ? exEmployeeId : undefined,
+        payee:       exPayeeMode === "vendor"   ? exPayeeText.trim() : undefined,
+        note:        exNote.trim() || undefined,
+      };
+      const newExpense = await createExpense(input);
+      setSuccessMsg(`Expense ${newExpense.voucherNumber} created.`);
+      closeExpenseModal();
+      await reloadExpenses();
+    } catch (err) {
+      setCreateExpenseError(err instanceof Error ? err.message : "Create failed.");
+    } finally {
+      setCreatingExpense(false);
+    }
+  }
+
+  // ── Group expenses by date for daybook layout ──────────────
+  function groupByDate(list: Expense[]): Array<{ date: string; rows: Expense[]; total: number }> {
+    const byDate = new Map<string, Expense[]>();
+    for (const e of list) {
+      if (!byDate.has(e.txnDate)) byDate.set(e.txnDate, []);
+      byDate.get(e.txnDate)!.push(e);
+    }
+    // Sort dates descending (newest first)
+    return Array.from(byDate.entries())
+      .sort(([a], [b]) => b.localeCompare(a))
+      .map(([date, rows]) => ({
+        date,
+        rows,
+        total: rows.reduce((sum, r) => sum + r.amount, 0),
+      }));
+  }
+  const groups = groupByDate(expenses);
 
   // ── Loading state ──────────────────────────────────────────
   if (fetching) {
@@ -220,16 +409,17 @@ export default function ExpenseClient() {
     );
   }
 
-  // ── Loaded ─────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────
   return (
     <div className="p-8 space-y-5">
 
+      {/* ── Header ──────────────────────────────────────────── */}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold text-slate-800">Expense</h1>
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={openModal}
+            onClick={openCategoryModal}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white border border-slate-200 text-slate-700 text-[13px] font-semibold hover:bg-slate-50 hover:border-slate-300 transition-colors"
             title="Manage expense categories"
           >
@@ -245,15 +435,44 @@ export default function ExpenseClient() {
           </button>
           <button
             type="button"
-            disabled
-            title="Coming in Phase 4C"
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            onClick={openExpenseModal}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" className="w-4 h-4">
               <path d="M12 5v14M5 12h14" />
             </svg>
             Add Expense
           </button>
+        </div>
+      </div>
+
+      {/* ── Date filter ─────────────────────────────────────── */}
+      <div className="flex items-center gap-3 bg-white border border-slate-200 rounded-xl px-4 py-3">
+        <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">From</span>
+        <input
+          type="date"
+          value={filterFromDate}
+          max={filterToDate}
+          onChange={(e) => setFilterFromDate(e.target.value)}
+          className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-400"
+        />
+        <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">To</span>
+        <input
+          type="date"
+          value={filterToDate}
+          min={filterFromDate}
+          onChange={(e) => setFilterToDate(e.target.value)}
+          className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-400"
+        />
+        <button
+          type="button"
+          onClick={() => { const t = todayISO(); setFilterFromDate(t); setFilterToDate(t); }}
+          className="ml-2 px-3 py-1.5 text-[12.5px] text-slate-600 hover:bg-slate-100 rounded-md font-medium transition-colors"
+        >
+          Today
+        </button>
+        <div className="ml-auto text-[12.5px] text-slate-500">
+          {expenses.length} {expenses.length === 1 ? "expense" : "expenses"}
         </div>
       </div>
 
@@ -268,47 +487,90 @@ export default function ExpenseClient() {
         </div>
       )}
 
-      {/* ── Body placeholder (4C will replace this with expense list) ──── */}
-      <div className="rounded-xl border border-dashed border-slate-200 bg-white px-6 py-12 flex flex-col items-center justify-center text-center">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-8 h-8 text-slate-300 mb-3">
-          <rect x="3" y="6" width="18" height="14" rx="2" />
-          <path d="M3 10h18" />
-          <path d="M7 14h4" />
-          <path d="M7 17h7" />
-        </svg>
-        <p className="text-[14px] font-semibold text-slate-600 mb-1">Expense entries</p>
-        <p className="text-[12.5px] text-slate-400 max-w-md">
-          The Add Expense flow ships in the next phase. Categories are managed via the button above.
-        </p>
-      </div>
+      {/* ── Daybook list ────────────────────────────────────── */}
+      {groups.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-slate-200 bg-white px-6 py-12 flex flex-col items-center justify-center text-center">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-8 h-8 text-slate-300 mb-3">
+            <rect x="3" y="6" width="18" height="14" rx="2" />
+            <path d="M3 10h18" />
+            <path d="M7 14h4" />
+            <path d="M7 17h7" />
+          </svg>
+          <p className="text-[14px] font-semibold text-slate-600 mb-1">No expenses in this date range</p>
+          <p className="text-[12.5px] text-slate-400 max-w-md">
+            Click <span className="font-semibold text-slate-600">Add Expense</span> to record one,
+            or widen the date filter above.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {groups.map((g) => (
+            <div key={g.date} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+              {/* Date header */}
+              <div className="flex items-center justify-between px-5 py-3 bg-slate-50 border-b border-slate-200">
+                <h3 className="text-[13.5px] font-semibold text-slate-700">{formatDateLabel(g.date)}</h3>
+                <span className="text-[12.5px] text-slate-500">
+                  <span className="font-semibold text-slate-700">৳{formatAmount(g.total)}</span>{" "}
+                  · {g.rows.length} {g.rows.length === 1 ? "expense" : "expenses"}
+                </span>
+              </div>
+              {/* Rows */}
+              <ul className="divide-y divide-slate-100">
+                {g.rows.map((e) => {
+                  const cat = e.categoryId ? categoryById.get(e.categoryId) : undefined;
+                  const emp = e.employeeId ? employeeById.get(e.employeeId) : undefined;
+                  const payeeDisplay = emp ? emp.fullName : (e.payee ?? "—");
+                  return (
+                    <li key={e.id} className="px-5 py-3.5 flex items-center gap-4">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-3">
+                          <span className="text-[14px] font-semibold text-slate-800">৳{formatAmount(e.amount)}</span>
+                          <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[11px] font-semibold uppercase tracking-wider border border-amber-100">
+                            {cat?.name ?? "—"}
+                          </span>
+                          <span className="text-[12.5px] text-slate-500 truncate">{payeeDisplay}</span>
+                        </div>
+                        {e.note && (
+                          <p className="mt-1 text-[12px] text-slate-400 truncate">{e.note}</p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3 flex-shrink-0">
+                        <span className="font-mono text-[11.5px] text-slate-400">{e.voucherNumber}</span>
+                        <a
+                          href={`/accounts/voucher/${e.id}`}
+                          className="px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11.5px] font-semibold uppercase tracking-wider transition-colors"
+                          title="View voucher (Phase 4D)"
+                        >
+                          Voucher
+                        </a>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
 
-      {/* ── Manage Categories modal ─────────────────────────── */}
+      {/* ────────────────────────────────────────────────────── */}
+      {/* MANAGE CATEGORIES MODAL (Phase 4B)                     */}
+      {/* ────────────────────────────────────────────────────── */}
       {categoryModalOpen && (
-        <div
-          className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6"
-          onClick={closeModal}
-        >
-          <div
-            className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Modal header */}
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeCategoryModal}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
               <h2 className="text-[15px] font-semibold text-slate-800">Manage Categories</h2>
               <button
                 type="button"
-                onClick={closeModal}
+                onClick={closeCategoryModal}
                 disabled={!!(savingEdit || creatingCategory || togglingId)}
                 className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 aria-label="Close"
               >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5">
-                  <path d="M18 6L6 18M6 6l12 12" />
-                </svg>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
               </button>
             </div>
-
-            {/* Create new category */}
             <div className="px-5 py-4 border-b border-slate-200 space-y-2">
               <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Add category</label>
               <div className="flex items-center gap-2">
@@ -316,26 +578,22 @@ export default function ExpenseClient() {
                   type="text"
                   value={newCategoryName}
                   onChange={(e) => setNewCategoryName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") handleCreate(); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleCreateCategory(); }}
                   placeholder="e.g. Room Supplies"
                   disabled={creatingCategory}
-                  className={inputCls(!!createError)}
+                  className={inputCls(!!createCategoryError)}
                 />
                 <button
                   type="button"
-                  onClick={handleCreate}
+                  onClick={handleCreateCategory}
                   disabled={creatingCategory || !newCategoryName.trim()}
                   className="px-4 py-2.5 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
                 >
                   {creatingCategory ? "Adding…" : "Add"}
                 </button>
               </div>
-              {createError && (
-                <p className="text-[12px] text-rose-600">{createError}</p>
-              )}
+              {createCategoryError && (<p className="text-[12px] text-rose-600">{createCategoryError}</p>)}
             </div>
-
-            {/* Category list */}
             <div className="flex-1 overflow-y-auto px-5 py-3">
               {categories.length === 0 ? (
                 <div className="py-8 text-center text-[13px] text-slate-400 italic">
@@ -347,10 +605,7 @@ export default function ExpenseClient() {
                     const isEditing = editingId === c.id;
                     const isToggling = togglingId === c.id;
                     return (
-                      <li
-                        key={c.id}
-                        className={`py-3 flex items-center gap-3 ${c.isActive ? "" : "opacity-60"}`}
-                      >
+                      <li key={c.id} className={`py-3 flex items-center gap-3 ${c.isActive ? "" : "opacity-60"}`}>
                         {isEditing ? (
                           <>
                             <input
@@ -365,47 +620,26 @@ export default function ExpenseClient() {
                               disabled={savingEdit}
                               className={inputCls(!!editError)}
                             />
-                            <button
-                              type="button"
-                              onClick={handleSaveEdit}
-                              disabled={savingEdit || !editingValue.trim()}
-                              className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[12.5px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-                            >
+                            <button type="button" onClick={handleSaveEdit} disabled={savingEdit || !editingValue.trim()} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[12.5px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
                               {savingEdit ? "Saving…" : "Save"}
                             </button>
-                            <button
-                              type="button"
-                              onClick={cancelEdit}
-                              disabled={savingEdit}
-                              className="px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-100 text-[12.5px] font-medium transition-colors disabled:opacity-40"
-                            >
+                            <button type="button" onClick={cancelEdit} disabled={savingEdit} className="px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-100 text-[12.5px] font-medium transition-colors disabled:opacity-40">
                               Cancel
                             </button>
                           </>
                         ) : (
                           <>
-                            <button
-                              type="button"
-                              onClick={() => startEdit(c)}
-                              className="flex-1 text-left text-[13.5px] font-medium text-slate-800 hover:text-amber-700 transition-colors"
-                              title="Click to rename"
-                            >
+                            <button type="button" onClick={() => startEdit(c)} className="flex-1 text-left text-[13.5px] font-medium text-slate-800 hover:text-amber-700 transition-colors" title="Click to rename">
                               {c.name}
                             </button>
                             {!c.isActive && (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10.5px] font-semibold uppercase tracking-wider">
-                                Inactive
-                              </span>
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10.5px] font-semibold uppercase tracking-wider">Inactive</span>
                             )}
                             <button
                               type="button"
                               onClick={() => handleToggleActive(c)}
                               disabled={isToggling}
-                              className={`px-3 py-1.5 rounded-md text-[11.5px] font-semibold uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                                c.isActive
-                                  ? "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                                  : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                              }`}
+                              className={`px-3 py-1.5 rounded-md text-[11.5px] font-semibold uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${c.isActive ? "bg-slate-100 text-slate-600 hover:bg-slate-200" : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"}`}
                             >
                               {isToggling ? "…" : c.isActive ? "Deactivate" : "Reactivate"}
                             </button>
@@ -416,22 +650,207 @@ export default function ExpenseClient() {
                   })}
                 </ul>
               )}
-              {editError && editingId && (
-                <p className="mt-2 text-[12px] text-rose-600">{editError}</p>
-              )}
+              {editError && editingId && (<p className="mt-2 text-[12px] text-rose-600">{editError}</p>)}
             </div>
-
-            {/* Modal footer */}
             <div className="flex items-center justify-end px-5 py-3 border-t border-slate-200">
-              <button
-                type="button"
-                onClick={closeModal}
-                disabled={!!(savingEdit || creatingCategory || togglingId)}
-                className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
+              <button type="button" onClick={closeCategoryModal} disabled={!!(savingEdit || creatingCategory || togglingId)} className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                 Done
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ────────────────────────────────────────────────────── */}
+      {/* ADD EXPENSE MODAL (Phase 4C — NEW)                      */}
+      {/* ────────────────────────────────────────────────────── */}
+      {expenseModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeExpenseModal}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+              <h2 className="text-[15px] font-semibold text-slate-800">Add Expense</h2>
+              <button
+                type="button"
+                onClick={closeExpenseModal}
+                disabled={creatingExpense}
+                className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                aria-label="Close"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+
+              {/* Date + Amount */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Date</label>
+                  <input
+                    type="date"
+                    value={exTxnDate}
+                    max={todayISO()}
+                    onChange={(e) => setExTxnDate(e.target.value)}
+                    disabled={creatingExpense}
+                    className={inputCls(false)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Amount (৳)</label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="0.01"
+                    min="0.01"
+                    value={exAmount}
+                    onChange={(e) => setExAmount(e.target.value)}
+                    placeholder="0.00"
+                    disabled={creatingExpense}
+                    className={inputCls(!!createExpenseFieldErrors.amount)}
+                  />
+                  {createExpenseFieldErrors.amount && (
+                    <p className="text-[11.5px] text-rose-600">{createExpenseFieldErrors.amount}</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Category */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Category</label>
+                <select
+                  value={exCategoryId}
+                  onChange={(e) => setExCategoryId(e.target.value)}
+                  disabled={creatingExpense}
+                  className={inputCls(!!createExpenseFieldErrors.category)}
+                >
+                  <option value="">Select a category…</option>
+                  {activeCategories.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+                {activeCategories.length === 0 && (
+                  <p className="text-[11.5px] text-amber-700">No active categories. Add one via "Manage Categories" first.</p>
+                )}
+                {createExpenseFieldErrors.category && (
+                  <p className="text-[11.5px] text-rose-600">{createExpenseFieldErrors.category}</p>
+                )}
+              </div>
+
+              {/* Payee mode toggle */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Paid to</label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setExPayeeMode("employee"); setExPayeeText(""); }}
+                    disabled={creatingExpense}
+                    className={`flex-1 px-4 py-2 rounded-lg text-[13px] font-semibold transition-colors disabled:opacity-40 ${exPayeeMode === "employee" ? "bg-amber-100 text-amber-800 border border-amber-300" : "bg-slate-50 text-slate-600 border border-slate-200 hover:bg-slate-100"}`}
+                  >
+                    Staff member
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setExPayeeMode("vendor"); setExEmployeeId(""); }}
+                    disabled={creatingExpense}
+                    className={`flex-1 px-4 py-2 rounded-lg text-[13px] font-semibold transition-colors disabled:opacity-40 ${exPayeeMode === "vendor" ? "bg-amber-100 text-amber-800 border border-amber-300" : "bg-slate-50 text-slate-600 border border-slate-200 hover:bg-slate-100"}`}
+                  >
+                    Other (vendor)
+                  </button>
+                </div>
+              </div>
+
+              {/* Payee value (employee select or free-text input) */}
+              {exPayeeMode === "employee" ? (
+                <div className="space-y-1">
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Employee</label>
+                  <select
+                    value={exEmployeeId}
+                    onChange={(e) => setExEmployeeId(e.target.value)}
+                    disabled={creatingExpense}
+                    className={inputCls(!!createExpenseFieldErrors.payee)}
+                  >
+                    <option value="">Select an employee…</option>
+                    {activeEmployees.map((e) => (
+                      <option key={e.id} value={e.id}>{e.fullName}</option>
+                    ))}
+                  </select>
+                  {activeEmployees.length === 0 && (
+                    <p className="text-[11.5px] text-amber-700">No active employees. Add one via the Employees page.</p>
+                  )}
+                  {createExpenseFieldErrors.payee && (
+                    <p className="text-[11.5px] text-rose-600">{createExpenseFieldErrors.payee}</p>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Payee name</label>
+                  <input
+                    type="text"
+                    value={exPayeeText}
+                    onChange={(e) => setExPayeeText(e.target.value)}
+                    list="expense-payee-suggestions"
+                    placeholder="e.g. DESCO, Local Plumbing Store"
+                    disabled={creatingExpense}
+                    className={inputCls(!!createExpenseFieldErrors.payee)}
+                  />
+                  <datalist id="expense-payee-suggestions">
+                    {payeesHistory.map((p) => (<option key={p} value={p} />))}
+                  </datalist>
+                  {createExpenseFieldErrors.payee && (
+                    <p className="text-[11.5px] text-rose-600">{createExpenseFieldErrors.payee}</p>
+                  )}
+                </div>
+              )}
+
+              {/* Note */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Item description (optional)</label>
+                <input
+                  type="text"
+                  value={exNote}
+                  onChange={(e) => setExNote(e.target.value)}
+                  placeholder="e.g. 4 aerosols for rooms"
+                  disabled={creatingExpense}
+                  className={inputCls(false)}
+                />
+              </div>
+
+              {/* Funding source notice */}
+              <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[11.5px] text-slate-500">
+                Funded from <span className="font-semibold text-slate-700">Cash in Hand</span> (per accounts policy).
+              </div>
+
+              {/* Top-level error */}
+              {createExpenseError && (
+                <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-[12px] text-rose-700">
+                  {createExpenseError}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={closeExpenseModal}
+                disabled={creatingExpense}
+                className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleCreateExpense}
+                disabled={creatingExpense}
+                className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {creatingExpense ? "Saving…" : "Save Expense"}
+              </button>
+            </div>
+
           </div>
         </div>
       )}
