@@ -2,7 +2,9 @@
 -- Hotfix during Phase 4C: change next_voucher_number() to SECURITY DEFINER.
 --
 -- ─── STATUS ───────────────────────────────────────────────────
--- DRAFT — not yet applied to production.
+-- APPLIED 2026-05-30 (Day 21, Phase 4C smoke test).
+-- Verified: prosecdef=true (was false). next_voucher_number() now
+-- callable from authenticated role; smoke test consumed EV-2026-0005.
 -- ──────────────────────────────────────────────────────────────
 --
 -- Problem discovered Day 21 during Phase 4C smoke test:
