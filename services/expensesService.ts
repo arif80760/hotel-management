@@ -155,6 +155,49 @@ export async function getDistinctPayees(): Promise<string[]> {
   return Array.from(seen).sort((a, b) => a.localeCompare(b));
 }
 
+/**
+ * Fetch a single expense by ID. Returns null if not found or if the row is
+ * not a user-recorded expense_out (e.g. someone tries to load a booking
+ * refund-disbursement row as a voucher — those aren't user vouchers).
+ *
+ * Used by the voucher print page.
+ */
+export async function getExpenseById(id: string): Promise<Expense | null> {
+  const { data, error } = await supabase
+    .from("account_transactions")
+    .select("id, type, txn_date, amount, voucher_number, category_id, payee, employee_id, note, booking_payment_id, created_at, created_by, deleted_at")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    console.error("──────────── [getExpenseById] FAILED ────────────");
+    console.error("  message:", error.message, "| code:", error.code);
+    throw new Error(`[getExpenseById] ${error.message}`);
+  }
+
+  if (!data) return null;
+
+  // Domain guards: only user-recorded expense_out rows count as
+  // "expenses" for voucher rendering. Soft-deleted rows return null too.
+  if (data.type !== "expense_out") return null;
+  if (data.booking_payment_id !== null) return null;
+  if (data.deleted_at !== null) return null;
+
+  return {
+    id:            data.id,
+    txnDate:       data.txn_date,
+    amount:        typeof data.amount === "string" ? parseFloat(data.amount) : data.amount,
+    voucherNumber: data.voucher_number ?? "",
+    categoryId:    data.category_id ?? "",
+    payee:         data.payee,
+    employeeId:    data.employee_id,
+    note:          data.note,
+    createdAt:     data.created_at,
+    createdBy:     data.created_by,
+  };
+}
+
+
 // ─────────────────────────────────────────────────────────────
 // WRITE
 // ─────────────────────────────────────────────────────────────

@@ -41,7 +41,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const isLoginPage = pathname === "/login";
   // Standalone document routes (invoice, reservation details) —
   // render without app shell so they print cleanly
-  const isStandaloneDocument = /^\/bookings\/[^/]+\/(invoice|reservation)$/.test(pathname);
+  const isStandaloneDocument =
+    /^\/bookings\/[^/]+\/(invoice|reservation)$/.test(pathname) ||
+    /^\/accounts\/voucher\/[^/]+$/.test(pathname);
 
   // ── Routing guard ─────────────────────────────────────────────
   useEffect(() => {
