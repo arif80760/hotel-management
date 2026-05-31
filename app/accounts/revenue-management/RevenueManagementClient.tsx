@@ -2,23 +2,25 @@
 
 // app/accounts/revenue-management/RevenueManagementClient.tsx
 //
-// Revenue Management page — Phase R-B (categories admin) ships first.
-// R-C wires the "Add Revenue" button. No voucher equivalent today; a
-// rent receipt page would be Phase R-D (deferred unless time permits).
+// Revenue Management page — Phase R-C ships the revenue entry modal
+// and a daybook-style list view grouped by date.
 //
-// Mirror of Phase 4B's ExpenseClient.tsx categories-admin scaffold:
-//   - Header: "Revenue Management" title + two buttons
-//     (Manage Categories, Add Revenue)
-//   - Body: placeholder for the revenue list (built in R-C)
-//   - Manage Categories modal: list, inline rename, active toggle, create
+// Mirror of Phase 4C ExpenseClient.tsx with differences:
+//   - Default date filter: ALL-TIME newest-first (revenue is monthly;
+//     today's revenue is usually empty). Expense defaults to today.
+//   - Modal: bucket picker (4 accounts) instead of hardcoded Cash.
+//   - Modal: no employee/vendor toggle — just a single required payee
+//     free-text field with browser datalist autocomplete from history.
+//   - Modal: no voucher generation; receipts (Phase R-D) are optional
+//     and not built today.
+//   - Theming: emerald (revenue = money in) vs expense's amber.
 //
-// State and modal patterns copied from ExpenseClient.tsx for cross-page
-// consistency — same inputCls helper, same modal escape/outside-click
-// behavior, same success-banner auto-clear.
+// State patterns copied from ExpenseClient for consistency.
 //
 // ─────────────────────────────────────────────────────────────
 
 import { useState, useEffect } from "react";
+
 import {
   getRevenueCategories,
   createRevenueCategory,
@@ -26,6 +28,20 @@ import {
   setRevenueCategoryActive,
   type RevenueCategory,
 } from "@/services/revenueCategoriesService";
+
+import {
+  getRevenues,
+  getDistinctRevenuePayees,
+  createRevenue,
+  type Revenue,
+  type NewRevenue,
+} from "@/services/revenueService";
+
+import {
+  getAccounts,
+  type Account,
+} from "@/services/accountsService";
+
 
 // ── Input styling helper ───────────────────────────────────
 function inputCls(hasError = false): string {
@@ -36,29 +52,83 @@ function inputCls(hasError = false): string {
   ].join(" ");
 }
 
+// ── Date helpers ───────────────────────────────────────────
+
+function todayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function formatDateLabel(iso: string): string {
+  const today = todayISO();
+  const d = new Date(iso + "T00:00:00");
+  const weekday  = d.toLocaleDateString("en-GB", { weekday: "short" });
+  const day      = d.getDate();
+  const month    = d.toLocaleDateString("en-GB", { month: "short" });
+  const year     = d.getFullYear();
+  const base = `${weekday} ${day} ${month} ${year}`;
+
+  if (iso === today) return `Today, ${base}`;
+
+  const yest = new Date();
+  yest.setDate(yest.getDate() - 1);
+  const yISO = `${yest.getFullYear()}-${String(yest.getMonth() + 1).padStart(2, "0")}-${String(yest.getDate()).padStart(2, "0")}`;
+  if (iso === yISO) return `Yesterday, ${base}`;
+
+  return base;
+}
+
+function formatAmount(n: number): string {
+  return new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+}
+
 
 export default function RevenueManagementClient() {
   // ── Data ───────────────────────────────────────────────────
-  const [categories, setCategories] = useState<RevenueCategory[]>([]);
+  const [revenues,       setRevenues]       = useState<Revenue[]>([]);
+  const [categories,     setCategories]     = useState<RevenueCategory[]>([]);
+  const [accounts,       setAccounts]       = useState<Account[]>([]);
+  const [payeesHistory,  setPayeesHistory]  = useState<string[]>([]);
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching,   setFetching]   = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  // ── Manage Categories modal ────────────────────────────────
+  // ── Filter state ───────────────────────────────────────────
+  // Default: all-time, newest-first. User can narrow.
+  const [filterFromDate, setFilterFromDate] = useState<string>("");
+  const [filterToDate,   setFilterToDate]   = useState<string>("");
+
+  // ── Manage Categories modal (Phase R-B, unchanged) ─────────
   const [categoryModalOpen, setCategoryModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
-  // ── Create category (inline-input at top of modal) ─────────
   const [newCategoryName, setNewCategoryName] = useState("");
   const [creatingCategory, setCreatingCategory] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
+  const [createCategoryError, setCreateCategoryError] = useState<string | null>(null);
 
-  // ── Per-row toggle state ────────────────────────────────────
   const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  // ── Add Revenue modal (Phase R-C, NEW) ─────────────────────
+  const [revenueModalOpen, setRevenueModalOpen] = useState(false);
+  const [rvTxnDate,     setRvTxnDate]     = useState<string>(todayISO());
+  const [rvAmount,      setRvAmount]      = useState<string>("");
+  const [rvAccountId,   setRvAccountId]   = useState<string>("");
+  const [rvCategoryId,  setRvCategoryId]  = useState<string>("");
+  const [rvPayee,       setRvPayee]       = useState<string>("");
+  const [rvNote,        setRvNote]        = useState<string>("");
+
+  const [creatingRevenue, setCreatingRevenue] = useState(false);
+  const [createRevenueError, setCreateRevenueError] = useState<string | null>(null);
+  const [createRevenueFieldErrors, setCreateRevenueFieldErrors] = useState<{
+    amount?:   string;
+    account?:  string;
+    category?: string;
+    payee?:    string;
+  }>({});
 
   // ── Success banner ─────────────────────────────────────────
   const [successMsg, setSuccessMsg] = useState("");
@@ -68,11 +138,20 @@ export default function RevenueManagementClient() {
     let cancelled = false;
     async function load() {
       try {
-        const cats = await getRevenueCategories();
-        if (!cancelled) setCategories(cats);
+        const [revs, cats, accts, payeesH] = await Promise.all([
+          getRevenues({}),
+          getRevenueCategories(),
+          getAccounts(),
+          getDistinctRevenuePayees(),
+        ]);
+        if (cancelled) return;
+        setRevenues(revs);
+        setCategories(cats);
+        setAccounts(accts);
+        setPayeesHistory(payeesH);
       } catch (err) {
         if (!cancelled) {
-          setFetchError(err instanceof Error ? err.message : "Failed to load categories.");
+          setFetchError(err instanceof Error ? err.message : "Failed to load.");
         }
       } finally {
         if (!cancelled) setFetching(false);
@@ -82,6 +161,24 @@ export default function RevenueManagementClient() {
     return () => { cancelled = true; };
   }, []);
 
+  // ── Refetch revenues when filter changes ───────────────────
+  useEffect(() => {
+    if (fetching) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const revs = await getRevenues({
+          fromDate: filterFromDate || undefined,
+          toDate:   filterToDate   || undefined,
+        });
+        if (!cancelled) setRevenues(revs);
+      } catch (err) {
+        console.error("[RevenueManagementClient] refilter failed:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [filterFromDate, filterToDate, fetching]);
+
   // ── Auto-clear success banner ──────────────────────────────
   useEffect(() => {
     if (!successMsg) return;
@@ -89,48 +186,90 @@ export default function RevenueManagementClient() {
     return () => clearTimeout(t);
   }, [successMsg]);
 
-  // ── Escape closes the modal (when nothing is saving) ───────
+  // ── Escape closes modals (when nothing is saving) ──────────
   useEffect(() => {
-    if (!categoryModalOpen) return;
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && !savingEdit && !creatingCategory && !togglingId) {
-        closeModal();
+      if (e.key !== "Escape") return;
+      if (categoryModalOpen && !savingEdit && !creatingCategory && !togglingId) {
+        closeCategoryModal();
+      } else if (revenueModalOpen && !creatingRevenue) {
+        closeRevenueModal();
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoryModalOpen, savingEdit, creatingCategory, togglingId]);
+  }, [categoryModalOpen, revenueModalOpen, savingEdit, creatingCategory, togglingId, creatingRevenue]);
 
-  // ── Modal helpers ──────────────────────────────────────────
-  function openModal() {
+  // ── Lookup maps ────────────────────────────────────────────
+  const categoryById = new Map(categories.map(c => [c.id, c]));
+  const accountById  = new Map(accounts.map(a => [a.id, a]));
+
+  const activeCategories = categories.filter(c => c.isActive);
+  const spendableAccounts = accounts; // for revenue, all accounts are valid receivers
+                                       // (is_spendable applies to expense source only)
+
+  // ── Category Modal helpers (Phase R-B logic, unchanged) ────
+  function openCategoryModal() {
     setCategoryModalOpen(true);
     setEditingId(null);
     setEditingValue("");
     setEditError(null);
     setNewCategoryName("");
-    setCreateError(null);
+    setCreateCategoryError(null);
   }
-  function closeModal() {
+  function closeCategoryModal() {
     if (savingEdit || creatingCategory || togglingId) return;
     setCategoryModalOpen(false);
   }
 
-  // ── Refresh categories from server ─────────────────────────
+  // ── Revenue Modal helpers ──────────────────────────────────
+  function openRevenueModal() {
+    setRevenueModalOpen(true);
+    setRvTxnDate(todayISO());
+    setRvAmount("");
+    setRvAccountId("");
+    setRvCategoryId("");
+    setRvPayee("");
+    setRvNote("");
+    setCreateRevenueError(null);
+    setCreateRevenueFieldErrors({});
+  }
+  function closeRevenueModal() {
+    if (creatingRevenue) return;
+    setRevenueModalOpen(false);
+  }
+
+  // ── Reload helpers ─────────────────────────────────────────
   async function reloadCategories() {
     try {
       const cats = await getRevenueCategories();
       setCategories(cats);
     } catch (err) {
-      console.error("[RevenueManagementClient] reload failed:", err);
+      console.error("[RevenueManagementClient] reloadCategories failed:", err);
+    }
+  }
+  async function reloadRevenues() {
+    try {
+      const [revs, payeesH] = await Promise.all([
+        getRevenues({
+          fromDate: filterFromDate || undefined,
+          toDate:   filterToDate   || undefined,
+        }),
+        getDistinctRevenuePayees(),
+      ]);
+      setRevenues(revs);
+      setPayeesHistory(payeesH);
+    } catch (err) {
+      console.error("[RevenueManagementClient] reloadRevenues failed:", err);
     }
   }
 
-  // ── Handlers ───────────────────────────────────────────────
+  // ── Category Handlers (R-B logic, unchanged behavior) ──────
   async function handleCreateCategory() {
     const trimmed = newCategoryName.trim();
-    if (!trimmed) { setCreateError("Name is required."); return; }
-    setCreateError(null);
+    if (!trimmed) { setCreateCategoryError("Name is required."); return; }
+    setCreateCategoryError(null);
     setCreatingCategory(true);
     try {
       await createRevenueCategory(trimmed);
@@ -138,12 +277,11 @@ export default function RevenueManagementClient() {
       setSuccessMsg(`Category "${trimmed}" created.`);
       await reloadCategories();
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : "Create failed.");
+      setCreateCategoryError(err instanceof Error ? err.message : "Create failed.");
     } finally {
       setCreatingCategory(false);
     }
   }
-
   function startEdit(c: RevenueCategory) {
     setEditingId(c.id);
     setEditingValue(c.name);
@@ -172,7 +310,6 @@ export default function RevenueManagementClient() {
       setSavingEdit(false);
     }
   }
-
   async function handleToggleActive(c: RevenueCategory) {
     setTogglingId(c.id);
     try {
@@ -186,7 +323,63 @@ export default function RevenueManagementClient() {
     }
   }
 
-  // ── Loading state ──────────────────────────────────────────
+  // ── Revenue Handler ────────────────────────────────────────
+  async function handleCreateRevenue() {
+    const fieldErrors: { amount?: string; account?: string; category?: string; payee?: string } = {};
+    const amountNum = parseFloat(rvAmount);
+    if (!rvAmount.trim() || isNaN(amountNum) || amountNum <= 0) {
+      fieldErrors.amount = "Amount must be a positive number.";
+    }
+    if (!rvAccountId)   fieldErrors.account  = "Choose where the money was received.";
+    if (!rvCategoryId)  fieldErrors.category = "Category is required.";
+    if (!rvPayee.trim()) fieldErrors.payee   = "Payee is required.";
+
+    if (Object.keys(fieldErrors).length > 0) {
+      setCreateRevenueFieldErrors(fieldErrors);
+      return;
+    }
+    setCreateRevenueFieldErrors({});
+    setCreateRevenueError(null);
+    setCreatingRevenue(true);
+
+    try {
+      const input: NewRevenue = {
+        txnDate:           rvTxnDate,
+        amount:            amountNum,
+        toAccountId:       rvAccountId,
+        revenueCategoryId: rvCategoryId,
+        payee:             rvPayee.trim(),
+        note:              rvNote.trim() || undefined,
+      };
+      await createRevenue(input);
+      setSuccessMsg(`Revenue from "${rvPayee.trim()}" recorded.`);
+      closeRevenueModal();
+      await reloadRevenues();
+    } catch (err) {
+      setCreateRevenueError(err instanceof Error ? err.message : "Create failed.");
+    } finally {
+      setCreatingRevenue(false);
+    }
+  }
+
+  // ── Group revenues by date for daybook layout ──────────────
+  function groupByDate(list: Revenue[]): Array<{ date: string; rows: Revenue[]; total: number }> {
+    const byDate = new Map<string, Revenue[]>();
+    for (const r of list) {
+      if (!byDate.has(r.txnDate)) byDate.set(r.txnDate, []);
+      byDate.get(r.txnDate)!.push(r);
+    }
+    return Array.from(byDate.entries())
+      .sort(([a], [b]) => b.localeCompare(a))
+      .map(([date, rows]) => ({
+        date,
+        rows,
+        total: rows.reduce((sum, r) => sum + r.amount, 0),
+      }));
+  }
+  const groups = groupByDate(revenues);
+
+  // ── Loading / Error states ─────────────────────────────────
   if (fetching) {
     return (
       <div className="p-8">
@@ -222,7 +415,7 @@ export default function RevenueManagementClient() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={openModal}
+            onClick={openCategoryModal}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white border border-slate-200 text-slate-700 text-[13px] font-semibold hover:bg-slate-50 hover:border-slate-300 transition-colors"
             title="Manage revenue categories"
           >
@@ -238,15 +431,45 @@ export default function RevenueManagementClient() {
           </button>
           <button
             type="button"
-            disabled
-            title="Coming in Phase R-C"
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-700 text-white text-[13px] font-semibold hover:bg-emerald-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            onClick={openRevenueModal}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-700 text-white text-[13px] font-semibold hover:bg-emerald-800 transition-colors"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" className="w-4 h-4">
               <path d="M12 5v14M5 12h14" />
             </svg>
             Add Revenue
           </button>
+        </div>
+      </div>
+
+      {/* ── Date filter ─────────────────────────────────────── */}
+      <div className="flex items-center gap-3 bg-white border border-slate-200 rounded-xl px-4 py-3">
+        <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">From</span>
+        <input
+          type="date"
+          value={filterFromDate}
+          max={filterToDate || undefined}
+          onChange={(e) => setFilterFromDate(e.target.value)}
+          className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-400"
+        />
+        <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">To</span>
+        <input
+          type="date"
+          value={filterToDate}
+          min={filterFromDate || undefined}
+          onChange={(e) => setFilterToDate(e.target.value)}
+          className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-400"
+        />
+        <button
+          type="button"
+          onClick={() => { setFilterFromDate(""); setFilterToDate(""); }}
+          className="ml-2 px-3 py-1.5 text-[12.5px] text-slate-600 hover:bg-slate-100 rounded-md font-medium transition-colors"
+          title="Clear the filter to see all-time"
+        >
+          All time
+        </button>
+        <div className="ml-auto text-[12.5px] text-slate-500">
+          {revenues.length} {revenues.length === 1 ? "entry" : "entries"}
         </div>
       </div>
 
@@ -261,44 +484,71 @@ export default function RevenueManagementClient() {
         </div>
       )}
 
-      {/* ── Body placeholder (R-C will replace this with revenue list) ──── */}
-      <div className="rounded-xl border border-dashed border-slate-200 bg-white px-6 py-12 flex flex-col items-center justify-center text-center">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-8 h-8 text-slate-300 mb-3">
-          <path d="M12 2v20M5 9l7-7 7 7M5 15l7 7 7-7"/>
-        </svg>
-        <p className="text-[14px] font-semibold text-slate-600 mb-1">Revenue entries</p>
-        <p className="text-[12.5px] text-slate-400 max-w-md">
-          The Add Revenue flow ships in the next phase. Categories are managed via the button above.
-        </p>
-      </div>
+      {/* ── Daybook list ────────────────────────────────────── */}
+      {groups.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-slate-200 bg-white px-6 py-12 flex flex-col items-center justify-center text-center">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-8 h-8 text-slate-300 mb-3">
+            <path d="M12 2v20M5 9l7-7 7 7M5 15l7 7 7-7"/>
+          </svg>
+          <p className="text-[14px] font-semibold text-slate-600 mb-1">No revenue in this date range</p>
+          <p className="text-[12.5px] text-slate-400 max-w-md">
+            Click <span className="font-semibold text-slate-600">Add Revenue</span> to record one,
+            or widen the date filter.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {groups.map((g) => (
+            <div key={g.date} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+              <div className="flex items-center justify-between px-5 py-3 bg-slate-50 border-b border-slate-200">
+                <h3 className="text-[13.5px] font-semibold text-slate-700">{formatDateLabel(g.date)}</h3>
+                <span className="text-[12.5px] text-slate-500">
+                  <span className="font-semibold text-emerald-700">৳{formatAmount(g.total)}</span>{" "}
+                  · {g.rows.length} {g.rows.length === 1 ? "entry" : "entries"}
+                </span>
+              </div>
+              <ul className="divide-y divide-slate-100">
+                {g.rows.map((r) => {
+                  const cat = r.revenueCategoryId ? categoryById.get(r.revenueCategoryId) : undefined;
+                  const acct = r.toAccountId ? accountById.get(r.toAccountId) : undefined;
+                  return (
+                    <li key={r.id} className="px-5 py-3.5 flex items-center gap-4">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-3">
+                          <span className="text-[14px] font-semibold text-emerald-700">+ ৳{formatAmount(r.amount)}</span>
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[11px] font-semibold uppercase tracking-wider border border-emerald-100">
+                            {cat?.name ?? "—"}
+                          </span>
+                          <span className="text-[12.5px] text-slate-600 font-medium truncate">{r.payee}</span>
+                          <span className="text-[11px] text-slate-400">
+                            → {acct?.name ?? "—"}
+                          </span>
+                        </div>
+                        {r.note && (
+                          <p className="mt-1 text-[12px] text-slate-400 truncate">{r.note}</p>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
 
-      {/* ── Manage Categories modal ─────────────────────────── */}
+      {/* ────────────────────────────────────────────────────── */}
+      {/* MANAGE CATEGORIES MODAL (Phase R-B, unchanged)          */}
+      {/* ────────────────────────────────────────────────────── */}
       {categoryModalOpen && (
-        <div
-          className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6"
-          onClick={closeModal}
-        >
-          <div
-            className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Modal header */}
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeCategoryModal}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
               <h2 className="text-[15px] font-semibold text-slate-800">Manage Revenue Categories</h2>
-              <button
-                type="button"
-                onClick={closeModal}
-                disabled={!!(savingEdit || creatingCategory || togglingId)}
-                className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
-                aria-label="Close"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5">
-                  <path d="M18 6L6 18M6 6l12 12" />
-                </svg>
+              <button type="button" onClick={closeCategoryModal} disabled={!!(savingEdit || creatingCategory || togglingId)} className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed" aria-label="Close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
               </button>
             </div>
-
-            {/* Create new category */}
             <div className="px-5 py-4 border-b border-slate-200 space-y-2">
               <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Add category</label>
               <div className="flex items-center gap-2">
@@ -309,7 +559,7 @@ export default function RevenueManagementClient() {
                   onKeyDown={(e) => { if (e.key === "Enter") handleCreateCategory(); }}
                   placeholder="e.g. Shop Rent"
                   disabled={creatingCategory}
-                  className={inputCls(!!createError)}
+                  className={inputCls(!!createCategoryError)}
                 />
                 <button
                   type="button"
@@ -320,12 +570,8 @@ export default function RevenueManagementClient() {
                   {creatingCategory ? "Adding…" : "Add"}
                 </button>
               </div>
-              {createError && (
-                <p className="text-[12px] text-rose-600">{createError}</p>
-              )}
+              {createCategoryError && (<p className="text-[12px] text-rose-600">{createCategoryError}</p>)}
             </div>
-
-            {/* Category list */}
             <div className="flex-1 overflow-y-auto px-5 py-3">
               {categories.length === 0 ? (
                 <div className="py-8 text-center text-[13px] text-slate-400 italic">
@@ -337,10 +583,7 @@ export default function RevenueManagementClient() {
                     const isEditing = editingId === c.id;
                     const isToggling = togglingId === c.id;
                     return (
-                      <li
-                        key={c.id}
-                        className={`py-3 flex items-center gap-3 ${c.isActive ? "" : "opacity-60"}`}
-                      >
+                      <li key={c.id} className={`py-3 flex items-center gap-3 ${c.isActive ? "" : "opacity-60"}`}>
                         {isEditing ? (
                           <>
                             <input
@@ -355,47 +598,26 @@ export default function RevenueManagementClient() {
                               disabled={savingEdit}
                               className={inputCls(!!editError)}
                             />
-                            <button
-                              type="button"
-                              onClick={handleSaveEdit}
-                              disabled={savingEdit || !editingValue.trim()}
-                              className="px-3 py-2 rounded-lg bg-emerald-700 text-white text-[12.5px] font-semibold hover:bg-emerald-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-                            >
+                            <button type="button" onClick={handleSaveEdit} disabled={savingEdit || !editingValue.trim()} className="px-3 py-2 rounded-lg bg-emerald-700 text-white text-[12.5px] font-semibold hover:bg-emerald-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
                               {savingEdit ? "Saving…" : "Save"}
                             </button>
-                            <button
-                              type="button"
-                              onClick={cancelEdit}
-                              disabled={savingEdit}
-                              className="px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-100 text-[12.5px] font-medium transition-colors disabled:opacity-40"
-                            >
+                            <button type="button" onClick={cancelEdit} disabled={savingEdit} className="px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-100 text-[12.5px] font-medium transition-colors disabled:opacity-40">
                               Cancel
                             </button>
                           </>
                         ) : (
                           <>
-                            <button
-                              type="button"
-                              onClick={() => startEdit(c)}
-                              className="flex-1 text-left text-[13.5px] font-medium text-slate-800 hover:text-emerald-700 transition-colors"
-                              title="Click to rename"
-                            >
+                            <button type="button" onClick={() => startEdit(c)} className="flex-1 text-left text-[13.5px] font-medium text-slate-800 hover:text-emerald-700 transition-colors" title="Click to rename">
                               {c.name}
                             </button>
                             {!c.isActive && (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10.5px] font-semibold uppercase tracking-wider">
-                                Inactive
-                              </span>
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10.5px] font-semibold uppercase tracking-wider">Inactive</span>
                             )}
                             <button
                               type="button"
                               onClick={() => handleToggleActive(c)}
                               disabled={isToggling}
-                              className={`px-3 py-1.5 rounded-md text-[11.5px] font-semibold uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                                c.isActive
-                                  ? "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                                  : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                              }`}
+                              className={`px-3 py-1.5 rounded-md text-[11.5px] font-semibold uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${c.isActive ? "bg-slate-100 text-slate-600 hover:bg-slate-200" : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"}`}
                             >
                               {isToggling ? "…" : c.isActive ? "Deactivate" : "Reactivate"}
                             </button>
@@ -406,22 +628,156 @@ export default function RevenueManagementClient() {
                   })}
                 </ul>
               )}
-              {editError && editingId && (
-                <p className="mt-2 text-[12px] text-rose-600">{editError}</p>
-              )}
+              {editError && editingId && (<p className="mt-2 text-[12px] text-rose-600">{editError}</p>)}
             </div>
-
-            {/* Modal footer */}
             <div className="flex items-center justify-end px-5 py-3 border-t border-slate-200">
-              <button
-                type="button"
-                onClick={closeModal}
-                disabled={!!(savingEdit || creatingCategory || togglingId)}
-                className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
+              <button type="button" onClick={closeCategoryModal} disabled={!!(savingEdit || creatingCategory || togglingId)} className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                 Done
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ────────────────────────────────────────────────────── */}
+      {/* ADD REVENUE MODAL (Phase R-C, NEW)                      */}
+      {/* ────────────────────────────────────────────────────── */}
+      {revenueModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeRevenueModal}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+              <h2 className="text-[15px] font-semibold text-slate-800">Add Revenue</h2>
+              <button type="button" onClick={closeRevenueModal} disabled={creatingRevenue} className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed" aria-label="Close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+
+              {/* Date + Amount */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Date</label>
+                  <input
+                    type="date"
+                    value={rvTxnDate}
+                    max={todayISO()}
+                    onChange={(e) => setRvTxnDate(e.target.value)}
+                    disabled={creatingRevenue}
+                    className={inputCls(false)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Amount (৳)</label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="0.01"
+                    min="0.01"
+                    value={rvAmount}
+                    onChange={(e) => setRvAmount(e.target.value)}
+                    placeholder="0.00"
+                    disabled={creatingRevenue}
+                    className={inputCls(!!createRevenueFieldErrors.amount)}
+                  />
+                  {createRevenueFieldErrors.amount && (
+                    <p className="text-[11.5px] text-rose-600">{createRevenueFieldErrors.amount}</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Received to (bucket) */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Received in</label>
+                <select
+                  value={rvAccountId}
+                  onChange={(e) => setRvAccountId(e.target.value)}
+                  disabled={creatingRevenue}
+                  className={inputCls(!!createRevenueFieldErrors.account)}
+                >
+                  <option value="">Select bucket…</option>
+                  {spendableAccounts.map((a) => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
+                {createRevenueFieldErrors.account && (
+                  <p className="text-[11.5px] text-rose-600">{createRevenueFieldErrors.account}</p>
+                )}
+              </div>
+
+              {/* Category */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Category</label>
+                <select
+                  value={rvCategoryId}
+                  onChange={(e) => setRvCategoryId(e.target.value)}
+                  disabled={creatingRevenue}
+                  className={inputCls(!!createRevenueFieldErrors.category)}
+                >
+                  <option value="">Select a category…</option>
+                  {activeCategories.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+                {activeCategories.length === 0 && (
+                  <p className="text-[11.5px] text-amber-700">No active categories. Add one via "Manage Categories" first.</p>
+                )}
+                {createRevenueFieldErrors.category && (
+                  <p className="text-[11.5px] text-rose-600">{createRevenueFieldErrors.category}</p>
+                )}
+              </div>
+
+              {/* Payee */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Payee (tenant / source)</label>
+                <input
+                  type="text"
+                  value={rvPayee}
+                  onChange={(e) => setRvPayee(e.target.value)}
+                  list="revenue-payee-suggestions"
+                  placeholder="e.g. ABC Restaurant, XYZ Telecom"
+                  disabled={creatingRevenue}
+                  className={inputCls(!!createRevenueFieldErrors.payee)}
+                />
+                <datalist id="revenue-payee-suggestions">
+                  {payeesHistory.map((p) => (<option key={p} value={p} />))}
+                </datalist>
+                {createRevenueFieldErrors.payee && (
+                  <p className="text-[11.5px] text-rose-600">{createRevenueFieldErrors.payee}</p>
+                )}
+              </div>
+
+              {/* Note */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Description (optional)</label>
+                <input
+                  type="text"
+                  value={rvNote}
+                  onChange={(e) => setRvNote(e.target.value)}
+                  placeholder="e.g. May rent, Q2 advance"
+                  disabled={creatingRevenue}
+                  className={inputCls(false)}
+                />
+              </div>
+
+              {/* Top-level error */}
+              {createRevenueError && (
+                <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-[12px] text-rose-700">
+                  {createRevenueError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200">
+              <button type="button" onClick={closeRevenueModal} disabled={creatingRevenue} className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                Cancel
+              </button>
+              <button type="button" onClick={handleCreateRevenue} disabled={creatingRevenue} className="px-4 py-2 rounded-lg bg-emerald-700 text-white text-[13px] font-semibold hover:bg-emerald-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                {creatingRevenue ? "Saving…" : "Save Revenue"}
+              </button>
+            </div>
+
           </div>
         </div>
       )}
