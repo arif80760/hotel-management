@@ -44,6 +44,12 @@ import {
   type Employee,
 } from "@/services/employeesService";
 
+import {
+  getInventoryItems,
+  createPurchaseMovement,
+  type InventoryItem,
+} from "@/services/inventoryService";
+
 
 // ── Input styling helper ───────────────────────────────────
 function inputCls(hasError = false): string {
@@ -93,10 +99,11 @@ function formatAmount(n: number): string {
 
 export default function ExpenseClient() {
   // ── Data ───────────────────────────────────────────────────
-  const [expenses,   setExpenses]   = useState<Expense[]>([]);
-  const [categories, setCategories] = useState<ExpenseCategory[]>([]);
-  const [employees,  setEmployees]  = useState<Employee[]>([]);
-  const [payeesHistory, setPayeesHistory] = useState<string[]>([]);
+  const [expenses,        setExpenses]        = useState<Expense[]>([]);
+  const [categories,      setCategories]      = useState<ExpenseCategory[]>([]);
+  const [employees,       setEmployees]       = useState<Employee[]>([]);
+  const [payeesHistory,   setPayeesHistory]   = useState<string[]>([]);
+  const [inventoryItems,  setInventoryItems]  = useState<InventoryItem[]>([]);
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching,   setFetching]   = useState(true);
@@ -128,6 +135,12 @@ export default function ExpenseClient() {
   const [exEmployeeId,  setExEmployeeId]  = useState<string>("");
   const [exPayeeText,   setExPayeeText]   = useState<string>("");
   const [exNote,        setExNote]        = useState<string>("");
+  // ── Inventory purchase toggle state ───────────────────────
+  const [exIsInventory,   setExIsInventory]   = useState<boolean>(false);
+  const [exInvItemId,     setExInvItemId]     = useState<string>("");
+  const [exInvItemSearch, setExInvItemSearch] = useState<string>("");
+  const [exInvQuantity,   setExInvQuantity]   = useState<string>("");
+  const [exInvUnitPrice,  setExInvUnitPrice]  = useState<string>("");
 
   const [creatingExpense, setCreatingExpense] = useState(false);
   const [createExpenseError, setCreateExpenseError] = useState<string | null>(null);
@@ -145,17 +158,19 @@ export default function ExpenseClient() {
     let cancelled = false;
     async function load() {
       try {
-        const [exps, cats, emps, payeesH] = await Promise.all([
+        const [exps, cats, emps, payeesH, invItems] = await Promise.all([
           getExpenses({ fromDate: filterFromDate, toDate: filterToDate }),
           getExpenseCategories(),
           getAllEmployees(),
           getDistinctPayees(),
+          getInventoryItems({ activeOnly: false }),
         ]);
         if (cancelled) return;
         setExpenses(exps);
         setCategories(cats);
         setEmployees(emps);
         setPayeesHistory(payeesH);
+        setInventoryItems(invItems);
       } catch (err) {
         if (!cancelled) {
           setFetchError(err instanceof Error ? err.message : "Failed to load.");
@@ -238,6 +253,11 @@ export default function ExpenseClient() {
     setExNote("");
     setCreateExpenseError(null);
     setCreateExpenseFieldErrors({});
+    setExIsInventory(false);
+    setExInvItemId("");
+    setExInvItemSearch("");
+    setExInvQuantity("");
+    setExInvUnitPrice("");
   }
   function closeExpenseModal() {
     if (creatingExpense) return;
@@ -327,7 +347,7 @@ export default function ExpenseClient() {
   // ── Expense Handler ────────────────────────────────────────
   async function handleCreateExpense() {
     // Field-level validation
-    const fieldErrors: { amount?: string; category?: string; payee?: string } = {};
+    const fieldErrors: { amount?: string; category?: string; payee?: string; invItem?: string; invQty?: string } = {};
     const amountNum = parseFloat(exAmount);
     if (!exAmount.trim() || isNaN(amountNum) || amountNum <= 0) {
       fieldErrors.amount = "Amount must be a positive number.";
@@ -335,6 +355,14 @@ export default function ExpenseClient() {
     if (!exCategoryId) fieldErrors.category = "Category is required.";
     if (exPayeeMode === "employee" && !exEmployeeId) fieldErrors.payee = "Select an employee.";
     if (exPayeeMode === "vendor"   && !exPayeeText.trim()) fieldErrors.payee = "Payee name is required.";
+    // Inventory sub-form validation (only when toggle is ON)
+    if (exIsInventory) {
+      if (!exInvItemId) fieldErrors.invItem = "Select a valid inventory item from the list.";
+      const invQtyNum = parseFloat(exInvQuantity);
+      if (!exInvQuantity.trim() || isNaN(invQtyNum) || invQtyNum <= 0) {
+        fieldErrors.invQty = "Quantity must be a positive number.";
+      }
+    }
 
     if (Object.keys(fieldErrors).length > 0) {
       setCreateExpenseFieldErrors(fieldErrors);
@@ -355,6 +383,24 @@ export default function ExpenseClient() {
         note:        exNote.trim() || undefined,
       };
       const newExpense = await createExpense(input);
+
+      // Inventory seam (Phase I-D): when toggle is ON, write the
+      // purchase movement immediately after the expense row, linking
+      // them via source_account_transaction_id.
+      if (exIsInventory && exInvItemId) {
+        const invQtyNum = parseFloat(exInvQuantity);
+        const invUpNum  = exInvUnitPrice.trim()
+          ? parseFloat(exInvUnitPrice)
+          : amountNum / invQtyNum;
+        await createPurchaseMovement({
+          itemId:                      exInvItemId,
+          quantity:                    invQtyNum,
+          unitPrice:                   isFinite(invUpNum) ? invUpNum : amountNum,
+          happenedAt:                  new Date(exTxnDate + "T12:00:00").toISOString(),
+          sourceAccountTransactionId:  newExpense.id,
+        });
+      }
+
       setSuccessMsg(`Expense ${newExpense.voucherNumber} created.`);
       closeExpenseModal();
       await reloadExpenses();
@@ -817,6 +863,124 @@ export default function ExpenseClient() {
                   className={inputCls(false)}
                 />
               </div>
+
+              {/* ── Inventory purchase toggle (Phase I-D) ─────────── */}
+              <div className="flex items-center justify-between bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2.5">
+                <div>
+                  <p className="text-[13px] font-semibold text-indigo-800">This is an inventory purchase</p>
+                  <p className="text-[11.5px] text-indigo-500 mt-0.5">Links this expense to an inventory item stock entry.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExIsInventory(!exIsInventory);
+                    setExInvItemId(""); setExInvItemSearch(""); setExInvQuantity(""); setExInvUnitPrice("");
+                  }}
+                  disabled={creatingExpense}
+                  className={`relative flex-shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-40 ${exIsInventory ? "bg-indigo-600" : "bg-slate-300"}`}
+                  aria-pressed={exIsInventory}
+                  aria-label="Toggle inventory purchase"
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${exIsInventory ? "translate-x-5" : "translate-x-0"}`} />
+                </button>
+              </div>
+
+              {/* Inventory sub-form (visible when toggle is ON) */}
+              {exIsInventory && (
+                <div className="space-y-3 rounded-lg border border-indigo-200 bg-indigo-50/50 px-3 py-3">
+
+                  {/* Item picker */}
+                  <div className="space-y-1">
+                    <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Inventory item</label>
+                    <input
+                      type="text"
+                      list="inv-item-datalist"
+                      value={exInvItemSearch}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setExInvItemSearch(val);
+                        const match = inventoryItems.find((it) => it.name === val);
+                        setExInvItemId(match ? match.id : "");
+                        // auto-compute unit price when qty already entered
+                        if (match && exInvQuantity) {
+                          const qty = parseFloat(exInvQuantity);
+                          const amt = parseFloat(exAmount) || 0;
+                          if (qty > 0 && amt > 0) setExInvUnitPrice((amt / qty).toFixed(2));
+                        }
+                      }}
+                      placeholder="Type to search items…"
+                      disabled={creatingExpense}
+                      className={inputCls(!!(createExpenseFieldErrors as Record<string,string>).invItem)}
+                    />
+                    <datalist id="inv-item-datalist">
+                      {inventoryItems.filter((it) => it.isActive).map((it) => (
+                        <option key={it.id} value={it.name} />
+                      ))}
+                    </datalist>
+                    {(createExpenseFieldErrors as Record<string,string>).invItem && (
+                      <p className="text-[11.5px] text-rose-600">{(createExpenseFieldErrors as Record<string,string>).invItem}</p>
+                    )}
+                    {!exInvItemId && exInvItemSearch.length > 0 && !(createExpenseFieldErrors as Record<string,string>).invItem && (
+                      <p className="text-[11.5px] text-amber-700">No matching item — add it on the Inventory page first.</p>
+                    )}
+                  </div>
+
+                  {/* Quantity + Unit price */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Quantity</label>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        step="0.01"
+                        min="0.01"
+                        value={exInvQuantity}
+                        onChange={(e) => {
+                          setExInvQuantity(e.target.value);
+                          const qty = parseFloat(e.target.value);
+                          const amt = parseFloat(exAmount) || 0;
+                          if (qty > 0 && amt > 0) setExInvUnitPrice((amt / qty).toFixed(2));
+                        }}
+                        placeholder="e.g. 50"
+                        disabled={creatingExpense}
+                        className={inputCls(!!(createExpenseFieldErrors as Record<string,string>).invQty)}
+                      />
+                      {(createExpenseFieldErrors as Record<string,string>).invQty && (
+                        <p className="text-[11.5px] text-rose-600">{(createExpenseFieldErrors as Record<string,string>).invQty}</p>
+                      )}
+                    </div>
+                    <div className="space-y-1">
+                      <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Unit price (৳)</label>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        step="0.01"
+                        min="0.01"
+                        value={exInvUnitPrice}
+                        onChange={(e) => setExInvUnitPrice(e.target.value)}
+                        placeholder="auto"
+                        disabled={creatingExpense}
+                        className={inputCls(false)}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Mismatch warning */}
+                  {(() => {
+                    const qty = parseFloat(exInvQuantity);
+                    const up  = parseFloat(exInvUnitPrice);
+                    const amt = parseFloat(exAmount) || 0;
+                    if (qty > 0 && up > 0 && Math.abs(qty * up - amt) > 0.01) {
+                      return (
+                        <p className="text-[11.5px] text-amber-700">
+                          Qty × unit price = ৳{(qty * up).toFixed(2)} — differs from expense amount ৳{amt.toFixed(2)}. This is allowed.
+                        </p>
+                      );
+                    }
+                    return null;
+                  })()}
+                </div>
+              )}
 
               {/* Funding source notice */}
               <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[11.5px] text-slate-500">
