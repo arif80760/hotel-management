@@ -46,9 +46,18 @@ import {
 
 import {
   getInventoryItems,
+  createInventoryItem,
   createPurchaseMovement,
   type InventoryItem,
+  type InventoryItemType,
+  type InventoryItemUnit,
+  type NewInventoryItem,
 } from "@/services/inventoryService";
+
+import {
+  getInventoryCategories,
+  type InventoryCategory,
+} from "@/services/inventoryCategoriesService";
 
 
 // ── Input styling helper ───────────────────────────────────
@@ -142,6 +151,16 @@ export default function ExpenseClient() {
   const [exInvQuantity,   setExInvQuantity]   = useState<string>("");
   const [exInvUnitPrice,  setExInvUnitPrice]  = useState<string>("");
 
+  // ── Inline item creation state (mini-form, shows when typed name doesn't match) ──
+  const [inventoryCategories, setInventoryCategories] = useState<InventoryCategory[]>([]);
+  const [exInvCreateMode,     setExInvCreateMode]     = useState<boolean>(false);
+  const [exInvNewType,        setExInvNewType]        = useState<InventoryItemType>("consumable");
+  const [exInvNewUnit,        setExInvNewUnit]        = useState<InventoryItemUnit>("piece");
+  const [exInvNewCategoryId,  setExInvNewCategoryId]  = useState<string>("");
+  const [exInvNewNotes,       setExInvNewNotes]       = useState<string>("");
+  const [creatingInvItem,     setCreatingInvItem]     = useState<boolean>(false);
+  const [createInvItemError,  setCreateInvItemError]  = useState<string | null>(null);
+
   const [creatingExpense, setCreatingExpense] = useState(false);
   const [createExpenseError, setCreateExpenseError] = useState<string | null>(null);
   const [createExpenseFieldErrors, setCreateExpenseFieldErrors] = useState<{
@@ -158,12 +177,13 @@ export default function ExpenseClient() {
     let cancelled = false;
     async function load() {
       try {
-        const [exps, cats, emps, payeesH, invItems] = await Promise.all([
+        const [exps, cats, emps, payeesH, invItems, invCats] = await Promise.all([
           getExpenses({ fromDate: filterFromDate, toDate: filterToDate }),
           getExpenseCategories(),
           getAllEmployees(),
           getDistinctPayees(),
           getInventoryItems({ activeOnly: false }),
+          getInventoryCategories(),
         ]);
         if (cancelled) return;
         setExpenses(exps);
@@ -171,6 +191,7 @@ export default function ExpenseClient() {
         setEmployees(emps);
         setPayeesHistory(payeesH);
         setInventoryItems(invItems);
+        setInventoryCategories(invCats);
       } catch (err) {
         if (!cancelled) {
           setFetchError(err instanceof Error ? err.message : "Failed to load.");
@@ -258,6 +279,12 @@ export default function ExpenseClient() {
     setExInvItemSearch("");
     setExInvQuantity("");
     setExInvUnitPrice("");
+    setExInvCreateMode(false);
+    setExInvNewType("consumable");
+    setExInvNewUnit("piece");
+    setExInvNewCategoryId("");
+    setExInvNewNotes("");
+    setCreateInvItemError(null);
   }
   function closeExpenseModal() {
     if (creatingExpense) return;
@@ -345,6 +372,48 @@ export default function ExpenseClient() {
   }
 
   // ── Expense Handler ────────────────────────────────────────
+  /**
+   * Inline item creation — called from the mini-form inside the inventory
+   * sub-form. Validates inputs, calls createInventoryItem, on success
+   * selects the new item (populates exInvItemId, sets the search field
+   * to the new name) and exits create mode.
+   *
+   * Orphan-tolerant: if the user later cancels or the expense save fails,
+   * the inventory_items row stays. Zero stock; no harm. Per Day 22 design.
+   */
+  async function handleCreateInventoryItemInline() {
+    const name = exInvItemSearch.trim();
+    if (!name) {
+      setCreateInvItemError("Type an item name in the picker first.");
+      return;
+    }
+    setCreateInvItemError(null);
+    setCreatingInvItem(true);
+    try {
+      const input: NewInventoryItem = {
+        name,
+        type: exInvNewType,
+        unit: exInvNewUnit,
+        categoryId: exInvNewCategoryId || undefined,
+        notes:      exInvNewNotes.trim() || undefined,
+      };
+      const created = await createInventoryItem(input);
+      // Refresh the items list so the new item appears in the datalist
+      const refreshed = await getInventoryItems({ activeOnly: false });
+      setInventoryItems(refreshed);
+      // Select the new item and exit create mode
+      setExInvItemId(created.id);
+      setExInvItemSearch(created.name);
+      setExInvCreateMode(false);
+      // Don't reset type/unit/category/notes here — keep them in case the
+      // user immediately creates another item in the same modal session.
+    } catch (err) {
+      setCreateInvItemError(err instanceof Error ? err.message : "Create failed.");
+    } finally {
+      setCreatingInvItem(false);
+    }
+  }
+
   async function handleCreateExpense() {
     // Field-level validation
     const fieldErrors: { amount?: string; category?: string; payee?: string; invItem?: string; invQty?: string } = {};
@@ -920,10 +989,118 @@ export default function ExpenseClient() {
                     {(createExpenseFieldErrors as Record<string,string>).invItem && (
                       <p className="text-[11.5px] text-rose-600">{(createExpenseFieldErrors as Record<string,string>).invItem}</p>
                     )}
-                    {!exInvItemId && exInvItemSearch.length > 0 && !(createExpenseFieldErrors as Record<string,string>).invItem && (
-                      <p className="text-[11.5px] text-amber-700">No matching item — add it on the Inventory page first.</p>
+                    {!exInvItemId && exInvItemSearch.length > 0 && !exInvCreateMode && !(createExpenseFieldErrors as Record<string,string>).invItem && (
+                      <div className="space-y-1">
+                        <p className="text-[11.5px] text-amber-700">No matching item.</p>
+                        <button
+                          type="button"
+                          onClick={() => { setExInvCreateMode(true); setCreateInvItemError(null); }}
+                          disabled={creatingExpense}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-indigo-600 text-white text-[12px] font-semibold hover:bg-indigo-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" className="w-3.5 h-3.5">
+                            <path d="M12 5v14M5 12h14" />
+                          </svg>
+                          Create "{exInvItemSearch}" as new inventory item
+                        </button>
+                      </div>
                     )}
                   </div>
+
+                  {/* Inline mini-form: create new item ──────────── */}
+                  {exInvCreateMode && (
+                    <div className="space-y-3 rounded-lg border border-indigo-300 bg-white px-3 py-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-[12.5px] font-semibold text-indigo-700">
+                          New item: <span className="text-slate-800">{exInvItemSearch || "(type a name in the picker above)"}</span>
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => { setExInvCreateMode(false); setCreateInvItemError(null); }}
+                          disabled={creatingInvItem}
+                          className="text-[11.5px] text-slate-500 hover:text-slate-700 underline disabled:opacity-40"
+                        >
+                          cancel
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Type</label>
+                          <select
+                            value={exInvNewType}
+                            onChange={(e) => setExInvNewType(e.target.value as InventoryItemType)}
+                            disabled={creatingInvItem}
+                            className="w-full px-2.5 py-1.5 text-[12.5px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                          >
+                            <option value="consumable">Consumable</option>
+                            <option value="durable">Durable</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Unit</label>
+                          <select
+                            value={exInvNewUnit}
+                            onChange={(e) => setExInvNewUnit(e.target.value as InventoryItemUnit)}
+                            disabled={creatingInvItem}
+                            className="w-full px-2.5 py-1.5 text-[12.5px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                          >
+                            <option value="piece">piece</option>
+                            <option value="kg">kg</option>
+                            <option value="gram">gram</option>
+                            <option value="litre">litre</option>
+                            <option value="millilitre">ml</option>
+                            <option value="metre">metre</option>
+                            <option value="set">set</option>
+                            <option value="box">box</option>
+                            <option value="other">other</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Category (optional)</label>
+                        <select
+                          value={exInvNewCategoryId}
+                          onChange={(e) => setExInvNewCategoryId(e.target.value)}
+                          disabled={creatingInvItem}
+                          className="w-full px-2.5 py-1.5 text-[12.5px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                        >
+                          <option value="">— uncategorized —</option>
+                          {inventoryCategories.filter(c => c.isActive).map((c) => (
+                            <option key={c.id} value={c.id}>{c.name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Notes (optional)</label>
+                        <input
+                          type="text"
+                          value={exInvNewNotes}
+                          onChange={(e) => setExInvNewNotes(e.target.value)}
+                          placeholder="brand, supplier, model"
+                          disabled={creatingInvItem}
+                          className="w-full px-2.5 py-1.5 text-[12.5px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                        />
+                      </div>
+
+                      {createInvItemError && (
+                        <div className="bg-rose-50 border border-rose-200 rounded px-2.5 py-1.5 text-[11.5px] text-rose-700">{createInvItemError}</div>
+                      )}
+
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          onClick={handleCreateInventoryItemInline}
+                          disabled={creatingInvItem || !exInvItemSearch.trim()}
+                          className="px-3 py-1.5 rounded-md bg-indigo-700 text-white text-[12px] font-semibold hover:bg-indigo-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {creatingInvItem ? "Creating…" : "Create item"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Quantity + Unit price */}
                   <div className="grid grid-cols-2 gap-3">
