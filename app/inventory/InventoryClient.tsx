@@ -34,6 +34,7 @@ import {
   updateInventoryItem,
   getMovementCountForItem,
   createPurchaseMovement,
+  createIssueMovement,
   getStockForAllItems,
   type InventoryItem,
   type InventoryItemType,
@@ -41,6 +42,11 @@ import {
   type NewInventoryItem,
   type UpdateInventoryItem,
 } from "@/services/inventoryService";
+
+import {
+  getAllEmployees,
+  type Employee,
+} from "@/services/employeesService";
 
 const ITEM_TYPES: { value: InventoryItemType; label: string }[] = [
   { value: "consumable", label: "Consumable (water bottles, soap, etc.)" },
@@ -115,6 +121,9 @@ export default function InventoryClient() {
   const [createItemError, setCreateItemError] = useState<string | null>(null);
   const [createItemFieldErrors, setCreateItemFieldErrors] = useState<{ name?: string }>({});
 
+  // ── Employees (for issue recipient dropdown) ──────────────
+  const [employees, setEmployees] = useState<Employee[]>([]);
+
   // ── Add Stock (manual purchase) modal ──────────────────────
   const [stockModalOpen, setStockModalOpen] = useState(false);
   const [stockItemId,    setStockItemId]    = useState("");
@@ -126,6 +135,19 @@ export default function InventoryClient() {
   const [createStockError, setCreateStockError] = useState<string | null>(null);
   const [createStockFieldErrors, setCreateStockFieldErrors] = useState<{
     itemId?: string; date?: string; quantity?: string; unitPrice?: string; reason?: string;
+  }>({});
+
+  // ── Issue movement modal ───────────────────────────────────
+  const [issueModalOpen,         setIssueModalOpen]         = useState(false);
+  const [issueItemId,            setIssueItemId]            = useState("");
+  const [issueDate,              setIssueDate]              = useState<string>(todayISO());
+  const [issueQuantity,          setIssueQuantity]          = useState("");
+  const [issueEmployeeId,        setIssueEmployeeId]        = useState("");
+  const [issueNote,              setIssueNote]              = useState("");
+  const [creatingIssue,          setCreatingIssue]          = useState(false);
+  const [createIssueError,       setCreateIssueError]       = useState<string | null>(null);
+  const [createIssueFieldErrors, setCreateIssueFieldErrors] = useState<{
+    itemId?: string; date?: string; quantity?: string;
   }>({});
 
   // ── Edit Item modal ────────────────────────────────────────
@@ -150,15 +172,17 @@ export default function InventoryClient() {
     let cancelled = false;
     async function load() {
       try {
-        const [it, cats, stk] = await Promise.all([
+        const [it, cats, stk, emps] = await Promise.all([
           getInventoryItems({}),
           getInventoryCategories(),
           getStockForAllItems(),
+          getAllEmployees(),
         ]);
         if (cancelled) return;
         setItems(it);
         setCategories(cats);
         setStockMap(stk);
+        setEmployees(emps);
       } catch (err) {
         if (!cancelled) setFetchError(err instanceof Error ? err.message : "Failed to load.");
       } finally {
@@ -183,12 +207,13 @@ export default function InventoryClient() {
       if (categoryModalOpen && !savingCatEdit && !creatingCat && !togglingCatId) closeCategoryModal();
       else if (itemModalOpen && !creatingItem) closeItemModal();
       else if (stockModalOpen && !creatingStock) closeStockModal();
+      else if (issueModalOpen && !creatingIssue) closeIssueModal();
       else if (editModalOpen && !savingEdit) closeEditModal();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoryModalOpen, itemModalOpen, stockModalOpen, editModalOpen, savingCatEdit, creatingCat, togglingCatId, creatingItem, creatingStock, savingEdit]);
+  }, [categoryModalOpen, itemModalOpen, stockModalOpen, issueModalOpen, editModalOpen, savingCatEdit, creatingCat, togglingCatId, creatingItem, creatingStock, creatingIssue, savingEdit]);
 
   // ── Lookup maps ────────────────────────────────────────────
   const categoryById = new Map(categories.map(c => [c.id, c]));
@@ -309,6 +334,39 @@ export default function InventoryClient() {
     setCreateStockError(null); setCreateStockFieldErrors({});
   }
   function closeStockModal() { if (creatingStock) return; setStockModalOpen(false); }
+
+  // ── Issue modal helpers ────────────────────────────────────
+  function openIssueModal() {
+    setIssueModalOpen(true);
+    setIssueItemId(""); setIssueDate(todayISO()); setIssueQuantity("");
+    setIssueEmployeeId(""); setIssueNote("");
+    setCreateIssueError(null); setCreateIssueFieldErrors({});
+  }
+  function closeIssueModal() { if (creatingIssue) return; setIssueModalOpen(false); }
+  async function handleCreateIssue() {
+    const fieldErrors: { itemId?: string; date?: string; quantity?: string } = {};
+    if (!issueItemId) fieldErrors.itemId = "Item is required.";
+    if (!issueDate)   fieldErrors.date   = "Date is required.";
+    const qty = parseFloat(issueQuantity);
+    if (!issueQuantity.trim() || isNaN(qty) || qty <= 0) fieldErrors.quantity = "Quantity must be > 0.";
+    if (Object.keys(fieldErrors).length) { setCreateIssueFieldErrors(fieldErrors); return; }
+    setCreateIssueFieldErrors({}); setCreateIssueError(null); setCreatingIssue(true);
+    try {
+      const happenedAt = new Date(issueDate + "T12:00:00").toISOString();
+      await createIssueMovement({
+        itemId:             issueItemId,
+        quantity:           qty,
+        happenedAt,
+        issuedToEmployeeId: issueEmployeeId || undefined,
+        reasonNote:         issueNote.trim() || undefined,
+      });
+      setSuccessMsg("Issue recorded.");
+      closeIssueModal();
+      await reloadAll();
+    } catch (err) {
+      setCreateIssueError(err instanceof Error ? err.message : "Create failed.");
+    } finally { setCreatingIssue(false); }
+  }
   async function handleCreateStock() {
     const fieldErrors: { itemId?: string; date?: string; quantity?: string; unitPrice?: string; reason?: string } = {};
     if (!stockItemId) fieldErrors.itemId = "Item is required.";
@@ -428,6 +486,13 @@ export default function InventoryClient() {
               <path d="M12 5v14M5 12h14" />
             </svg>
             Add Stock
+          </button>
+          <button type="button" onClick={openIssueModal}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white border border-indigo-200 text-indigo-700 text-[13px] font-semibold hover:bg-indigo-50 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <path d="M22 2L11 13" /><path d="M22 2L15 22l-4-9-9-4 20-7z" />
+            </svg>
+            Issue
           </button>
           <button type="button" onClick={openItemModal}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors">
@@ -723,6 +788,99 @@ export default function InventoryClient() {
               <button type="button" onClick={handleCreateStock} disabled={creatingStock}
                 className="px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                 {creatingStock ? "Saving…" : "Save Stock"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── ISSUE MOVEMENT MODAL ────────────────────────── */}
+      {issueModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeIssueModal}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+              <h2 className="text-[15px] font-semibold text-slate-800">Issue Items</h2>
+              <button type="button" onClick={closeIssueModal} disabled={creatingIssue} className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed" aria-label="Close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+
+              {/* Date */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Date</label>
+                <input type="date" value={issueDate} max={todayISO()}
+                  onChange={(e) => setIssueDate(e.target.value)} disabled={creatingIssue}
+                  className={inputCls(!!createIssueFieldErrors.date)} />
+                {createIssueFieldErrors.date && <p className="text-[11.5px] text-rose-600">{createIssueFieldErrors.date}</p>}
+              </div>
+
+              {/* Item — consumables only */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Item</label>
+                <select value={issueItemId} onChange={(e) => setIssueItemId(e.target.value)} disabled={creatingIssue}
+                  className={inputCls(!!createIssueFieldErrors.itemId)}>
+                  <option value="">Select a consumable item…</option>
+                  {items.filter(i => i.isActive && i.type === "consumable").map((i) => {
+                    const stock = stockMap.get(i.id) ?? 0;
+                    return <option key={i.id} value={i.id}>{i.name} ({i.unit}) — stock: {stock}</option>;
+                  })}
+                </select>
+                {createIssueFieldErrors.itemId && <p className="text-[11.5px] text-rose-600">{createIssueFieldErrors.itemId}</p>}
+              </div>
+
+              {/* Quantity */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Quantity</label>
+                <input type="number" inputMode="decimal" step="0.01" min="0.01" value={issueQuantity}
+                  onChange={(e) => setIssueQuantity(e.target.value)} placeholder="0" disabled={creatingIssue}
+                  className={inputCls(!!createIssueFieldErrors.quantity)} />
+                {createIssueFieldErrors.quantity && <p className="text-[11.5px] text-rose-600">{createIssueFieldErrors.quantity}</p>}
+                {/* Soft over-stock warning */}
+                {issueItemId && issueQuantity && (() => {
+                  const qty = parseFloat(issueQuantity);
+                  const stock = stockMap.get(issueItemId) ?? 0;
+                  if (qty > 0 && qty > stock) {
+                    return (
+                      <p className="text-[11.5px] text-amber-700">
+                        Quantity ({qty}) exceeds current stock ({stock}). This will result in negative stock. Proceed only if intentional.
+                      </p>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+
+              {/* Issued to (optional employee) */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Issued to (optional)</label>
+                <select value={issueEmployeeId} onChange={(e) => setIssueEmployeeId(e.target.value)} disabled={creatingIssue}
+                  className={inputCls(false)}>
+                  <option value="">— no specific recipient —</option>
+                  {employees.filter(e => e.isActive).map((e) => (
+                    <option key={e.id} value={e.id}>{e.fullName} ({e.employeeId})</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Note (optional) */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Note (optional)</label>
+                <input type="text" value={issueNote} onChange={(e) => setIssueNote(e.target.value)}
+                  placeholder="e.g. Room 203 restocking, housekeeping weekly" disabled={creatingIssue}
+                  className={inputCls(false)} />
+              </div>
+
+              {createIssueError && (
+                <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-[12px] text-rose-700">{createIssueError}</div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200">
+              <button type="button" onClick={closeIssueModal} disabled={creatingIssue}
+                className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">Cancel</button>
+              <button type="button" onClick={handleCreateIssue} disabled={creatingIssue}
+                className="px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                {creatingIssue ? "Saving…" : "Record Issue"}
               </button>
             </div>
           </div>

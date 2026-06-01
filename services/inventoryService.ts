@@ -96,6 +96,14 @@ export type NewPurchaseMovement = {
   reasonNote?:                  string;          // recommended for manual purchases (opening stock, corrections)
 };
 
+export type NewIssueMovement = {
+  itemId:              string;
+  quantity:            number;   // > 0; CHECK enforces positive; stock -= q on read
+  happenedAt?:         string;   // defaults to now
+  issuedToEmployeeId?: string;   // optional — who received the items
+  reasonNote?:         string;   // optional (only adjustment requires it)
+};
+
 // ─────────────────────────────────────────────────────────────
 // ROW SHAPES (DB)
 // ─────────────────────────────────────────────────────────────
@@ -409,6 +417,46 @@ export async function createPurchaseMovement(input: NewPurchaseMovement): Promis
   // Assignment sync for durables purchased directly to a room.
   if (item.type === "durable" && input.toRoomId) {
     await upsertAssignment(input.itemId, input.toRoomId, "in_service", input.quantity);
+  }
+
+  return mapMovement(data as MovementRow);
+}
+
+export async function createIssueMovement(input: NewIssueMovement): Promise<InventoryMovement> {
+  if (!input.itemId) throw new Error("[createIssueMovement] itemId is required.");
+  if (!(input.quantity > 0)) throw new Error("[createIssueMovement] quantity must be positive.");
+
+  const item = await getInventoryItemById(input.itemId);
+  if (!item) throw new Error(`[createIssueMovement] item ${input.itemId} not found.`);
+  if (item.type !== "consumable") {
+    throw new Error("[createIssueMovement] issue movements are for consumable items only.");
+  }
+
+  const { data: authData } = await supabase.auth.getUser();
+  const recordedBy = authData?.user?.id ?? null;
+
+  const { data, error } = await supabase
+    .from("inventory_movements")
+    .insert({
+      item_id:                       input.itemId,
+      type:                          "issue",
+      quantity:                      input.quantity,   // stored positive; stock -= q on read
+      unit_price:                    null,             // CHECK: NULL required for issue
+      happened_at:                   input.happenedAt ?? new Date().toISOString(),
+      recorded_by:                   recordedBy,
+      source_account_transaction_id: null,
+      issued_to_employee_id:         input.issuedToEmployeeId ?? null,
+      from_room_id:                  null,             // CHECK: NULL required for issue
+      to_room_id:                    null,             // CHECK: NULL required for issue
+      reason_note:                   input.reasonNote?.trim() || null,
+    })
+    .select("id, item_id, type, quantity, unit_price, happened_at, recorded_by, source_account_transaction_id, issued_to_employee_id, from_room_id, to_room_id, reason_note, created_at")
+    .single();
+
+  if (error || !data) {
+    console.error("──────────── [createIssueMovement] FAILED ────────────");
+    console.error("  message:", error?.message, "| code:", error?.code, "| details:", error?.details);
+    throw new Error(`[createIssueMovement] ${error?.message ?? "no row returned"}`);
   }
 
   return mapMovement(data as MovementRow);
