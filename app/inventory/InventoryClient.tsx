@@ -18,6 +18,7 @@
 // ─────────────────────────────────────────────────────────────
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 
 import {
   getInventoryCategories,
@@ -679,6 +680,7 @@ export default function InventoryClient() {
                 <th className="text-left px-5 py-3 font-semibold">Type</th>
                 <th className="text-right px-5 py-3 font-semibold">Stock</th>
                 <th className="text-left px-5 py-3 font-semibold">Unit</th>
+                <th className="px-5 py-3" />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -687,11 +689,9 @@ export default function InventoryClient() {
                 const cat = it.categoryId ? categoryById.get(it.categoryId) : null;
                 return (
                   <tr key={it.id}
-                      onClick={() => openEditModal(it)}
-                      className={`cursor-pointer hover:bg-indigo-50/40 transition-colors ${it.isActive ? "" : "opacity-50"}`}
-                      title="Click to edit">
+                      className={`hover:bg-slate-50 transition-colors ${it.isActive ? "" : "opacity-50"}`}>
                     <td className="px-5 py-3.5">
-                      <div className="font-medium text-slate-800">{it.name}</div>
+                      <Link href={`/inventory/${it.id}`} className="font-medium text-indigo-700 hover:underline">{it.name}</Link>
                       {it.notes && <div className="text-[11.5px] text-slate-400 mt-0.5">{it.notes}</div>}
                     </td>
                     <td className="px-5 py-3.5 text-slate-600">{cat?.name ?? "—"}</td>
@@ -704,6 +704,15 @@ export default function InventoryClient() {
                     </td>
                     <td className="px-5 py-3.5 text-right font-semibold text-slate-800">{formatNumber(stock)}</td>
                     <td className="px-5 py-3.5 text-slate-500">{it.unit}</td>
+                    <td className="px-5 py-3.5 text-right">
+                      <button type="button" onClick={() => openEditModal(it)}
+                        className="text-slate-400 hover:text-indigo-700 transition-colors" title="Edit item">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                        </svg>
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
