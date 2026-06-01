@@ -104,6 +104,14 @@ export type NewIssueMovement = {
   reasonNote?:         string;   // optional (only adjustment requires it)
 };
 
+export type NewDamageMovement = {
+  itemId:       string;
+  quantity:     number;   // > 0; CHECK enforces positive; stock -= q on read
+  happenedAt?:  string;   // defaults to now
+  fromRoomId?:  string;   // optional — room where item was damaged (durables only)
+  reasonNote?:  string;   // optional
+};
+
 // ─────────────────────────────────────────────────────────────
 // ROW SHAPES (DB)
 // ─────────────────────────────────────────────────────────────
@@ -457,6 +465,49 @@ export async function createIssueMovement(input: NewIssueMovement): Promise<Inve
     console.error("──────────── [createIssueMovement] FAILED ────────────");
     console.error("  message:", error?.message, "| code:", error?.code, "| details:", error?.details);
     throw new Error(`[createIssueMovement] ${error?.message ?? "no row returned"}`);
+  }
+
+  return mapMovement(data as MovementRow);
+}
+
+export async function createDamageMovement(input: NewDamageMovement): Promise<InventoryMovement> {
+  if (!input.itemId) throw new Error("[createDamageMovement] itemId is required.");
+  if (!(input.quantity > 0)) throw new Error("[createDamageMovement] quantity must be positive.");
+
+  const item = await getInventoryItemById(input.itemId);
+  if (!item) throw new Error(`[createDamageMovement] item ${input.itemId} not found.`);
+
+  // from_room_id only meaningful for durables; warn if set on consumable but allow it —
+  // the CHECK constraint itself doesn't restrict it.
+  if (input.fromRoomId && item.type !== "durable") {
+    throw new Error("[createDamageMovement] fromRoomId is only valid for durable items.");
+  }
+
+  const { data: authData } = await supabase.auth.getUser();
+  const recordedBy = authData?.user?.id ?? null;
+
+  const { data, error } = await supabase
+    .from("inventory_movements")
+    .insert({
+      item_id:                       input.itemId,
+      type:                          "damage",
+      quantity:                      input.quantity,   // stored positive; stock -= q on read
+      unit_price:                    null,             // CHECK: NULL required for damage
+      happened_at:                   input.happenedAt ?? new Date().toISOString(),
+      recorded_by:                   recordedBy,
+      source_account_transaction_id: null,
+      issued_to_employee_id:         null,             // CHECK: NULL required for damage
+      from_room_id:                  input.fromRoomId ?? null,
+      to_room_id:                    null,             // CHECK: NULL required for damage
+      reason_note:                   input.reasonNote?.trim() || null,
+    })
+    .select("id, item_id, type, quantity, unit_price, happened_at, recorded_by, source_account_transaction_id, issued_to_employee_id, from_room_id, to_room_id, reason_note, created_at")
+    .single();
+
+  if (error || !data) {
+    console.error("──────────── [createDamageMovement] FAILED ────────────");
+    console.error("  message:", error?.message, "| code:", error?.code, "| details:", error?.details);
+    throw new Error(`[createDamageMovement] ${error?.message ?? "no row returned"}`);
   }
 
   return mapMovement(data as MovementRow);

@@ -35,6 +35,7 @@ import {
   getMovementCountForItem,
   createPurchaseMovement,
   createIssueMovement,
+  createDamageMovement,
   getStockForAllItems,
   type InventoryItem,
   type InventoryItemType,
@@ -47,6 +48,9 @@ import {
   getAllEmployees,
   type Employee,
 } from "@/services/employeesService";
+
+import { getAllRooms } from "@/services/roomsService";
+import type { MockRoom } from "@/lib/mockData";
 
 const ITEM_TYPES: { value: InventoryItemType; label: string }[] = [
   { value: "consumable", label: "Consumable (water bottles, soap, etc.)" },
@@ -124,6 +128,9 @@ export default function InventoryClient() {
   // ── Employees (for issue recipient dropdown) ──────────────
   const [employees, setEmployees] = useState<Employee[]>([]);
 
+  // ── Rooms (for damage from_room picker) ───────────────────
+  const [rooms, setRooms] = useState<MockRoom[]>([]);
+
   // ── Add Stock (manual purchase) modal ──────────────────────
   const [stockModalOpen, setStockModalOpen] = useState(false);
   const [stockItemId,    setStockItemId]    = useState("");
@@ -135,6 +142,19 @@ export default function InventoryClient() {
   const [createStockError, setCreateStockError] = useState<string | null>(null);
   const [createStockFieldErrors, setCreateStockFieldErrors] = useState<{
     itemId?: string; date?: string; quantity?: string; unitPrice?: string; reason?: string;
+  }>({});
+
+  // ── Damage movement modal ─────────────────────────────────
+  const [damageModalOpen,         setDamageModalOpen]         = useState(false);
+  const [damageItemId,            setDamageItemId]            = useState("");
+  const [damageDate,              setDamageDate]              = useState<string>(todayISO());
+  const [damageQuantity,          setDamageQuantity]          = useState("");
+  const [damageFromRoomId,        setDamageFromRoomId]        = useState("");
+  const [damageNote,              setDamageNote]              = useState("");
+  const [creatingDamage,          setCreatingDamage]          = useState(false);
+  const [createDamageError,       setCreateDamageError]       = useState<string | null>(null);
+  const [createDamageFieldErrors, setCreateDamageFieldErrors] = useState<{
+    itemId?: string; date?: string; quantity?: string;
   }>({});
 
   // ── Issue movement modal ───────────────────────────────────
@@ -172,17 +192,19 @@ export default function InventoryClient() {
     let cancelled = false;
     async function load() {
       try {
-        const [it, cats, stk, emps] = await Promise.all([
+        const [it, cats, stk, emps, rms] = await Promise.all([
           getInventoryItems({}),
           getInventoryCategories(),
           getStockForAllItems(),
           getAllEmployees(),
+          getAllRooms(),
         ]);
         if (cancelled) return;
         setItems(it);
         setCategories(cats);
         setStockMap(stk);
         setEmployees(emps);
+        setRooms(rms);
       } catch (err) {
         if (!cancelled) setFetchError(err instanceof Error ? err.message : "Failed to load.");
       } finally {
@@ -208,12 +230,13 @@ export default function InventoryClient() {
       else if (itemModalOpen && !creatingItem) closeItemModal();
       else if (stockModalOpen && !creatingStock) closeStockModal();
       else if (issueModalOpen && !creatingIssue) closeIssueModal();
+      else if (damageModalOpen && !creatingDamage) closeDamageModal();
       else if (editModalOpen && !savingEdit) closeEditModal();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoryModalOpen, itemModalOpen, stockModalOpen, issueModalOpen, editModalOpen, savingCatEdit, creatingCat, togglingCatId, creatingItem, creatingStock, creatingIssue, savingEdit]);
+  }, [categoryModalOpen, itemModalOpen, stockModalOpen, issueModalOpen, damageModalOpen, editModalOpen, savingCatEdit, creatingCat, togglingCatId, creatingItem, creatingStock, creatingIssue, creatingDamage, savingEdit]);
 
   // ── Lookup maps ────────────────────────────────────────────
   const categoryById = new Map(categories.map(c => [c.id, c]));
@@ -343,6 +366,39 @@ export default function InventoryClient() {
     setCreateIssueError(null); setCreateIssueFieldErrors({});
   }
   function closeIssueModal() { if (creatingIssue) return; setIssueModalOpen(false); }
+
+  // ── Damage modal helpers ───────────────────────────────────
+  function openDamageModal() {
+    setDamageModalOpen(true);
+    setDamageItemId(""); setDamageDate(todayISO()); setDamageQuantity("");
+    setDamageFromRoomId(""); setDamageNote("");
+    setCreateDamageError(null); setCreateDamageFieldErrors({});
+  }
+  function closeDamageModal() { if (creatingDamage) return; setDamageModalOpen(false); }
+  async function handleCreateDamage() {
+    const fieldErrors: { itemId?: string; date?: string; quantity?: string } = {};
+    if (!damageItemId) fieldErrors.itemId = "Item is required.";
+    if (!damageDate)   fieldErrors.date   = "Date is required.";
+    const qty = parseFloat(damageQuantity);
+    if (!damageQuantity.trim() || isNaN(qty) || qty <= 0) fieldErrors.quantity = "Quantity must be > 0.";
+    if (Object.keys(fieldErrors).length) { setCreateDamageFieldErrors(fieldErrors); return; }
+    setCreateDamageFieldErrors({}); setCreateDamageError(null); setCreatingDamage(true);
+    try {
+      const happenedAt = new Date(damageDate + "T12:00:00").toISOString();
+      await createDamageMovement({
+        itemId:      damageItemId,
+        quantity:    qty,
+        happenedAt,
+        fromRoomId:  damageFromRoomId || undefined,
+        reasonNote:  damageNote.trim() || undefined,
+      });
+      setSuccessMsg("Damage recorded.");
+      closeDamageModal();
+      await reloadAll();
+    } catch (err) {
+      setCreateDamageError(err instanceof Error ? err.message : "Create failed.");
+    } finally { setCreatingDamage(false); }
+  }
   async function handleCreateIssue() {
     const fieldErrors: { itemId?: string; date?: string; quantity?: string } = {};
     if (!issueItemId) fieldErrors.itemId = "Item is required.";
@@ -493,6 +549,13 @@ export default function InventoryClient() {
               <path d="M22 2L11 13" /><path d="M22 2L15 22l-4-9-9-4 20-7z" />
             </svg>
             Issue
+          </button>
+          <button type="button" onClick={openDamageModal}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white border border-indigo-200 text-indigo-700 text-[13px] font-semibold hover:bg-indigo-50 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+            </svg>
+            Damage
           </button>
           <button type="button" onClick={openItemModal}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors">
@@ -881,6 +944,101 @@ export default function InventoryClient() {
               <button type="button" onClick={handleCreateIssue} disabled={creatingIssue}
                 className="px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                 {creatingIssue ? "Saving…" : "Record Issue"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── DAMAGE MOVEMENT MODAL ───────────────────────── */}
+      {damageModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeDamageModal}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+              <h2 className="text-[15px] font-semibold text-slate-800">Record Damage</h2>
+              <button type="button" onClick={closeDamageModal} disabled={creatingDamage} className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed" aria-label="Close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+
+              {/* Date */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Date</label>
+                <input type="date" value={damageDate} max={todayISO()}
+                  onChange={(e) => setDamageDate(e.target.value)} disabled={creatingDamage}
+                  className={inputCls(!!createDamageFieldErrors.date)} />
+                {createDamageFieldErrors.date && <p className="text-[11.5px] text-rose-600">{createDamageFieldErrors.date}</p>}
+              </div>
+
+              {/* Item — both types */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Item</label>
+                <select value={damageItemId} onChange={(e) => { setDamageItemId(e.target.value); setDamageFromRoomId(""); }}
+                  disabled={creatingDamage} className={inputCls(!!createDamageFieldErrors.itemId)}>
+                  <option value="">Select an item…</option>
+                  {items.filter(i => i.isActive).map((i) => {
+                    const stock = stockMap.get(i.id) ?? 0;
+                    return <option key={i.id} value={i.id}>{i.name} ({i.type}, {i.unit}) — stock: {stock}</option>;
+                  })}
+                </select>
+                {createDamageFieldErrors.itemId && <p className="text-[11.5px] text-rose-600">{createDamageFieldErrors.itemId}</p>}
+              </div>
+
+              {/* Quantity */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Quantity</label>
+                <input type="number" inputMode="decimal" step="0.01" min="0.01" value={damageQuantity}
+                  onChange={(e) => setDamageQuantity(e.target.value)} placeholder="0" disabled={creatingDamage}
+                  className={inputCls(!!createDamageFieldErrors.quantity)} />
+                {createDamageFieldErrors.quantity && <p className="text-[11.5px] text-rose-600">{createDamageFieldErrors.quantity}</p>}
+                {/* Soft over-stock warning */}
+                {damageItemId && damageQuantity && (() => {
+                  const qty = parseFloat(damageQuantity);
+                  const stock = stockMap.get(damageItemId) ?? 0;
+                  if (qty > 0 && qty > stock) {
+                    return (
+                      <p className="text-[11.5px] text-amber-700">
+                        Quantity ({qty}) exceeds current stock ({stock}). This will result in negative stock. Proceed only if intentional.
+                      </p>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+
+              {/* From room — only for durables */}
+              {damageItemId && items.find(i => i.id === damageItemId)?.type === "durable" && (
+                <div className="space-y-1">
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Room where damaged (optional)</label>
+                  <select value={damageFromRoomId} onChange={(e) => setDamageFromRoomId(e.target.value)}
+                    disabled={creatingDamage} className={inputCls(false)}>
+                    <option value="">— unknown / not assigned to a room —</option>
+                    {rooms.map((r) => (
+                      <option key={r.id} value={r.id}>Room {r.roomNumber}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Note (optional) */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Note (optional)</label>
+                <input type="text" value={damageNote} onChange={(e) => setDamageNote(e.target.value)}
+                  placeholder="e.g. Broken screen, torn linen, spilled chemicals" disabled={creatingDamage}
+                  className={inputCls(false)} />
+              </div>
+
+              {createDamageError && (
+                <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-[12px] text-rose-700">{createDamageError}</div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200">
+              <button type="button" onClick={closeDamageModal} disabled={creatingDamage}
+                className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">Cancel</button>
+              <button type="button" onClick={handleCreateDamage} disabled={creatingDamage}
+                className="px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                {creatingDamage ? "Saving…" : "Record Damage"}
               </button>
             </div>
           </div>
