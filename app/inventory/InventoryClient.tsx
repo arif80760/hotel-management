@@ -36,6 +36,7 @@ import {
   createPurchaseMovement,
   createIssueMovement,
   createDamageMovement,
+  createAdjustmentMovement,
   getStockForAllItems,
   type InventoryItem,
   type InventoryItemType,
@@ -157,6 +158,18 @@ export default function InventoryClient() {
     itemId?: string; date?: string; quantity?: string;
   }>({});
 
+  // ── Adjustment movement modal ─────────────────────────────
+  const [adjustModalOpen,         setAdjustModalOpen]         = useState(false);
+  const [adjustItemId,            setAdjustItemId]            = useState("");
+  const [adjustDate,              setAdjustDate]              = useState<string>(todayISO());
+  const [adjustQuantity,          setAdjustQuantity]          = useState("");
+  const [adjustReasonNote,        setAdjustReasonNote]        = useState("");
+  const [creatingAdjust,          setCreatingAdjust]          = useState(false);
+  const [createAdjustError,       setCreateAdjustError]       = useState<string | null>(null);
+  const [createAdjustFieldErrors, setCreateAdjustFieldErrors] = useState<{
+    itemId?: string; date?: string; quantity?: string; reasonNote?: string;
+  }>({});
+
   // ── Issue movement modal ───────────────────────────────────
   const [issueModalOpen,         setIssueModalOpen]         = useState(false);
   const [issueItemId,            setIssueItemId]            = useState("");
@@ -231,12 +244,13 @@ export default function InventoryClient() {
       else if (stockModalOpen && !creatingStock) closeStockModal();
       else if (issueModalOpen && !creatingIssue) closeIssueModal();
       else if (damageModalOpen && !creatingDamage) closeDamageModal();
+      else if (adjustModalOpen && !creatingAdjust) closeAdjustModal();
       else if (editModalOpen && !savingEdit) closeEditModal();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoryModalOpen, itemModalOpen, stockModalOpen, issueModalOpen, damageModalOpen, editModalOpen, savingCatEdit, creatingCat, togglingCatId, creatingItem, creatingStock, creatingIssue, creatingDamage, savingEdit]);
+  }, [categoryModalOpen, itemModalOpen, stockModalOpen, issueModalOpen, damageModalOpen, adjustModalOpen, editModalOpen, savingCatEdit, creatingCat, togglingCatId, creatingItem, creatingStock, creatingIssue, creatingDamage, creatingAdjust, savingEdit]);
 
   // ── Lookup maps ────────────────────────────────────────────
   const categoryById = new Map(categories.map(c => [c.id, c]));
@@ -375,6 +389,40 @@ export default function InventoryClient() {
     setCreateDamageError(null); setCreateDamageFieldErrors({});
   }
   function closeDamageModal() { if (creatingDamage) return; setDamageModalOpen(false); }
+
+  // ── Adjustment modal helpers ───────────────────────────────
+  function openAdjustModal() {
+    setAdjustModalOpen(true);
+    setAdjustItemId(""); setAdjustDate(todayISO()); setAdjustQuantity("");
+    setAdjustReasonNote("");
+    setCreateAdjustError(null); setCreateAdjustFieldErrors({});
+  }
+  function closeAdjustModal() { if (creatingAdjust) return; setAdjustModalOpen(false); }
+  async function handleCreateAdjust() {
+    const fieldErrors: { itemId?: string; date?: string; quantity?: string; reasonNote?: string } = {};
+    if (!adjustItemId)              fieldErrors.itemId     = "Item is required.";
+    if (!adjustDate)                fieldErrors.date       = "Date is required.";
+    const qty = parseFloat(adjustQuantity);
+    if (!adjustQuantity.trim() || isNaN(qty) || qty === 0) fieldErrors.quantity   = "Quantity must be a non-zero number (positive to add, negative to remove).";
+    if (!adjustReasonNote.trim())   fieldErrors.reasonNote = "Reason note is required.";
+    if (Object.keys(fieldErrors).length) { setCreateAdjustFieldErrors(fieldErrors); return; }
+    setCreateAdjustFieldErrors({}); setCreateAdjustError(null); setCreatingAdjust(true);
+    try {
+      const happenedAt = new Date(adjustDate + "T12:00:00").toISOString();
+      await createAdjustmentMovement({
+        itemId:     adjustItemId,
+        quantity:   qty,
+        happenedAt,
+        reasonNote: adjustReasonNote.trim(),
+      });
+      setSuccessMsg("Adjustment recorded.");
+      closeAdjustModal();
+      await reloadAll();
+    } catch (err) {
+      setCreateAdjustError(err instanceof Error ? err.message : "Create failed.");
+    } finally { setCreatingAdjust(false); }
+  }
+
   async function handleCreateDamage() {
     const fieldErrors: { itemId?: string; date?: string; quantity?: string } = {};
     if (!damageItemId) fieldErrors.itemId = "Item is required.";
@@ -556,6 +604,13 @@ export default function InventoryClient() {
               <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
             </svg>
             Damage
+          </button>
+          <button type="button" onClick={openAdjustModal}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white border border-indigo-200 text-indigo-700 text-[13px] font-semibold hover:bg-indigo-50 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />
+            </svg>
+            Adjust
           </button>
           <button type="button" onClick={openItemModal}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors">
@@ -1039,6 +1094,89 @@ export default function InventoryClient() {
               <button type="button" onClick={handleCreateDamage} disabled={creatingDamage}
                 className="px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                 {creatingDamage ? "Saving…" : "Record Damage"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── ADJUSTMENT MODAL ────────────────────────────── */}
+      {adjustModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeAdjustModal}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+              <h2 className="text-[15px] font-semibold text-slate-800">Record Adjustment</h2>
+              <button type="button" onClick={closeAdjustModal} disabled={creatingAdjust} className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed" aria-label="Close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+
+              {/* Date */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Date</label>
+                <input type="date" value={adjustDate} max={todayISO()}
+                  onChange={(e) => setAdjustDate(e.target.value)} disabled={creatingAdjust}
+                  className={inputCls(!!createAdjustFieldErrors.date)} />
+                {createAdjustFieldErrors.date && <p className="text-[11.5px] text-rose-600">{createAdjustFieldErrors.date}</p>}
+              </div>
+
+              {/* Item */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Item</label>
+                <select value={adjustItemId} onChange={(e) => setAdjustItemId(e.target.value)}
+                  disabled={creatingAdjust} className={inputCls(!!createAdjustFieldErrors.itemId)}>
+                  <option value="">Select an item…</option>
+                  {items.filter(i => i.isActive).map((i) => {
+                    const stock = stockMap.get(i.id) ?? 0;
+                    return <option key={i.id} value={i.id}>{i.name} ({i.type}, {i.unit}) — stock: {stock}</option>;
+                  })}
+                </select>
+                {createAdjustFieldErrors.itemId && <p className="text-[11.5px] text-rose-600">{createAdjustFieldErrors.itemId}</p>}
+              </div>
+
+              {/* Quantity (signed) */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Quantity (+ to add, − to remove)</label>
+                <input type="number" inputMode="decimal" step="0.01" value={adjustQuantity}
+                  onChange={(e) => setAdjustQuantity(e.target.value)} placeholder="e.g. 5 or -3" disabled={creatingAdjust}
+                  className={inputCls(!!createAdjustFieldErrors.quantity)} />
+                {createAdjustFieldErrors.quantity && <p className="text-[11.5px] text-rose-600">{createAdjustFieldErrors.quantity}</p>}
+                {/* Stock preview */}
+                {adjustItemId && adjustQuantity && (() => {
+                  const qty = parseFloat(adjustQuantity);
+                  const stock = stockMap.get(adjustItemId) ?? 0;
+                  if (!isNaN(qty) && qty !== 0) {
+                    const result = stock + qty;
+                    return (
+                      <p className={`text-[11.5px] ${result < 0 ? "text-amber-700" : "text-slate-500"}`}>
+                        Stock: {stock} → {result}{result < 0 ? " — this will result in negative stock. Proceed only if intentional." : ""}
+                      </p>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+
+              {/* Reason note (required) */}
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Reason note <span className="text-rose-400">*</span></label>
+                <input type="text" value={adjustReasonNote} onChange={(e) => setAdjustReasonNote(e.target.value)}
+                  placeholder="e.g. Recount after stocktake, correction, write-off" disabled={creatingAdjust}
+                  className={inputCls(!!createAdjustFieldErrors.reasonNote)} />
+                {createAdjustFieldErrors.reasonNote && <p className="text-[11.5px] text-rose-600">{createAdjustFieldErrors.reasonNote}</p>}
+              </div>
+
+              {createAdjustError && (
+                <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-[12px] text-rose-700">{createAdjustError}</div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200">
+              <button type="button" onClick={closeAdjustModal} disabled={creatingAdjust}
+                className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">Cancel</button>
+              <button type="button" onClick={handleCreateAdjust} disabled={creatingAdjust}
+                className="px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                {creatingAdjust ? "Saving…" : "Record Adjustment"}
               </button>
             </div>
           </div>
