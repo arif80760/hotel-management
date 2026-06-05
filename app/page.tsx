@@ -326,7 +326,7 @@ export default function DashboardPage() {
                         {b.status}
                       </span>
                     </td>
-                    <td className="px-6 py-3.5 font-bold text-slate-800 whitespace-nowrap">${b.totalAmount.toLocaleString()}</td>
+                    <td className="px-6 py-3.5 font-bold text-slate-800 whitespace-nowrap">৳{b.totalAmount.toLocaleString()}</td>
                   </tr>
                 ))
               )}

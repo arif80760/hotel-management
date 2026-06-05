@@ -8,7 +8,7 @@
 body {
   background-color: #f8fafc;   /* slate-50 — light page background */
   color: #0f172a;              /* slate-900 — default text */
-  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  font-family: var(--font-geist-sans), var(--font-noto-bengali), system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 

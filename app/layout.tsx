@@ -19,7 +19,7 @@
 //   the user is authenticated and not on /login.
 
 import type { Metadata } from "next";
-import { Geist } from "next/font/google";
+import { Geist, Noto_Sans_Bengali } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "@/contexts/AuthContext";
 import AppShell from "@/components/AppShell";
@@ -27,6 +27,13 @@ import AppShell from "@/components/AppShell";
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
+});
+
+const notoSansBengali = Noto_Sans_Bengali({
+  variable: "--font-noto-bengali",
+  subsets: ["bengali"],
+  weight: ["400", "600"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -40,7 +47,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${geistSans.variable} h-full`}>
+    <html lang="en" className={`${geistSans.variable} ${notoSansBengali.variable} h-full`}>
       <body className="h-full flex antialiased">
 
         {/* AuthProvider — session + profile available to every component */}
