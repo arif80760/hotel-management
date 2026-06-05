@@ -710,3 +710,56 @@ export async function getStockForAllItems(): Promise<Map<string, number>> {
   }
   return map;
 }
+
+// ─────────────────────────────────────────────────────────────
+// TRANSFER MOVEMENT (durables only — move between rooms)
+// ─────────────────────────────────────────────────────────────
+export type NewTransferMovement = {
+  itemId:      string;
+  quantity:    number;   // > 0
+  fromRoomId:  string;   // required, NOT NULL (CHECK)
+  toRoomId:    string;   // required, NOT NULL, must differ from fromRoomId (CHECK)
+  happenedAt?: string;
+  reasonNote?: string;   // optional — transfer has no reason_note constraint
+};
+
+export async function createTransferMovement(input: NewTransferMovement): Promise<InventoryMovement> {
+  if (!input.itemId) throw new Error("[createTransferMovement] itemId is required.");
+  if (!(input.quantity > 0)) throw new Error("[createTransferMovement] quantity must be positive.");
+  if (!input.fromRoomId) throw new Error("[createTransferMovement] fromRoomId is required.");
+  if (!input.toRoomId) throw new Error("[createTransferMovement] toRoomId is required.");
+  if (input.fromRoomId === input.toRoomId) throw new Error("[createTransferMovement] from and to rooms must differ.");
+
+  const item = await getInventoryItemById(input.itemId);
+  if (!item) throw new Error(`[createTransferMovement] item ${input.itemId} not found.`);
+  if (item.type !== "durable") throw new Error("[createTransferMovement] transfers apply to durable items only.");
+
+  const { data: authData } = await supabase.auth.getUser();
+  const recordedBy = authData?.user?.id ?? null;
+
+  const { data, error } = await supabase
+    .from("inventory_movements")
+    .insert({
+      item_id:                       input.itemId,
+      type:                          "transfer",
+      quantity:                      input.quantity,
+      unit_price:                    null,             // CHECK: NULL
+      happened_at:                   input.happenedAt ?? new Date().toISOString(),
+      recorded_by:                   recordedBy,
+      source_account_transaction_id: null,             // CHECK: NULL
+      issued_to_employee_id:         null,             // CHECK: NULL
+      from_room_id:                  input.fromRoomId, // CHECK: NOT NULL
+      to_room_id:                    input.toRoomId,   // CHECK: NOT NULL, <> from_room_id
+      reason_note:                   input.reasonNote?.trim() || null,
+    })
+    .select("id, item_id, type, quantity, unit_price, happened_at, recorded_by, source_account_transaction_id, issued_to_employee_id, from_room_id, to_room_id, reason_note, created_at")
+    .single();
+
+  if (error || !data) {
+    console.error("──────────── [createTransferMovement] FAILED ────────────");
+    console.error("  message:", error?.message, "| code:", error?.code, "| details:", error?.details);
+    throw new Error(`[createTransferMovement] ${error?.message ?? "no row returned"}`);
+  }
+
+  return mapMovement(data as MovementRow);
+}

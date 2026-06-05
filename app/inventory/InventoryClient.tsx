@@ -38,6 +38,7 @@ import {
   createIssueMovement,
   createDamageMovement,
   createAdjustmentMovement,
+  createTransferMovement,
   getStockForAllItems,
   type InventoryItem,
   type InventoryItemType,
@@ -171,6 +172,20 @@ export default function InventoryClient() {
     itemId?: string; date?: string; quantity?: string; reasonNote?: string;
   }>({});
 
+  // -- Transfer movement modal --
+  const [transferModalOpen,         setTransferModalOpen]         = useState(false);
+  const [transferItemId,            setTransferItemId]            = useState("");
+  const [transferDate,              setTransferDate]              = useState<string>(todayISO());
+  const [transferQuantity,          setTransferQuantity]          = useState("");
+  const [transferFromRoomId,        setTransferFromRoomId]        = useState("");
+  const [transferToRoomId,          setTransferToRoomId]          = useState("");
+  const [transferNote,              setTransferNote]              = useState("");
+  const [creatingTransfer,          setCreatingTransfer]          = useState(false);
+  const [createTransferError,       setCreateTransferError]       = useState<string | null>(null);
+  const [createTransferFieldErrors, setCreateTransferFieldErrors] = useState<{
+    itemId?: string; date?: string; quantity?: string; fromRoom?: string; toRoom?: string;
+  }>({});
+
   // ── Issue movement modal ───────────────────────────────────
   const [issueModalOpen,         setIssueModalOpen]         = useState(false);
   const [issueItemId,            setIssueItemId]            = useState("");
@@ -246,12 +261,13 @@ export default function InventoryClient() {
       else if (issueModalOpen && !creatingIssue) closeIssueModal();
       else if (damageModalOpen && !creatingDamage) closeDamageModal();
       else if (adjustModalOpen && !creatingAdjust) closeAdjustModal();
+      else if (transferModalOpen && !creatingTransfer) closeTransferModal();
       else if (editModalOpen && !savingEdit) closeEditModal();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoryModalOpen, itemModalOpen, stockModalOpen, issueModalOpen, damageModalOpen, adjustModalOpen, editModalOpen, savingCatEdit, creatingCat, togglingCatId, creatingItem, creatingStock, creatingIssue, creatingDamage, creatingAdjust, savingEdit]);
+  }, [categoryModalOpen, itemModalOpen, stockModalOpen, issueModalOpen, damageModalOpen, adjustModalOpen, transferModalOpen, editModalOpen, savingCatEdit, creatingCat, togglingCatId, creatingItem, creatingStock, creatingIssue, creatingDamage, creatingAdjust, creatingTransfer, savingEdit]);
 
   // ── Lookup maps ────────────────────────────────────────────
   const categoryById = new Map(categories.map(c => [c.id, c]));
@@ -422,6 +438,43 @@ export default function InventoryClient() {
     } catch (err) {
       setCreateAdjustError(err instanceof Error ? err.message : "Create failed.");
     } finally { setCreatingAdjust(false); }
+  }
+
+  function openTransferModal() {
+    setTransferModalOpen(true);
+    setTransferItemId(""); setTransferDate(todayISO()); setTransferQuantity("");
+    setTransferFromRoomId(""); setTransferToRoomId(""); setTransferNote("");
+    setCreateTransferError(null); setCreateTransferFieldErrors({});
+  }
+  function closeTransferModal() { if (creatingTransfer) return; setTransferModalOpen(false); }
+  async function handleCreateTransfer() {
+    const fieldErrors: { itemId?: string; date?: string; quantity?: string; fromRoom?: string; toRoom?: string } = {};
+    if (!transferItemId) fieldErrors.itemId = "Item is required.";
+    if (!transferDate)   fieldErrors.date   = "Date is required.";
+    const qty = parseFloat(transferQuantity);
+    if (!transferQuantity.trim() || isNaN(qty) || qty <= 0) fieldErrors.quantity = "Quantity must be > 0.";
+    if (!transferFromRoomId) fieldErrors.fromRoom = "From room is required.";
+    if (!transferToRoomId) fieldErrors.toRoom = "To room is required.";
+    if (transferFromRoomId && transferToRoomId && transferFromRoomId === transferToRoomId)
+      fieldErrors.toRoom = "Must differ from the From room.";
+    if (Object.keys(fieldErrors).length) { setCreateTransferFieldErrors(fieldErrors); return; }
+    setCreateTransferFieldErrors({}); setCreateTransferError(null); setCreatingTransfer(true);
+    try {
+      const happenedAt = new Date(transferDate + "T12:00:00").toISOString();
+      await createTransferMovement({
+        itemId:     transferItemId,
+        quantity:   qty,
+        fromRoomId: transferFromRoomId,
+        toRoomId:   transferToRoomId,
+        happenedAt,
+        reasonNote: transferNote.trim() || undefined,
+      });
+      setSuccessMsg("Transfer recorded.");
+      closeTransferModal();
+      await reloadAll();
+    } catch (err) {
+      setCreateTransferError(err instanceof Error ? err.message : "Create failed.");
+    } finally { setCreatingTransfer(false); }
   }
 
   async function handleCreateDamage() {
@@ -612,6 +665,13 @@ export default function InventoryClient() {
               <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />
             </svg>
             Adjust
+          </button>
+          <button type="button" onClick={openTransferModal}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white border border-indigo-200 text-indigo-700 text-[13px] font-semibold hover:bg-indigo-50 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <path d="M16 3l4 4-4 4M20 7H8M8 21l-4-4 4-4M4 17h12" />
+            </svg>
+            Transfer
           </button>
           <button type="button" onClick={openItemModal}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors">
@@ -1186,6 +1246,91 @@ export default function InventoryClient() {
               <button type="button" onClick={handleCreateAdjust} disabled={creatingAdjust}
                 className="px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                 {creatingAdjust ? "Saving…" : "Record Adjustment"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TRANSFER MOVEMENT MODAL */}
+      {transferModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeTransferModal}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+              <h2 className="text-[15px] font-semibold text-slate-800">Transfer Between Rooms</h2>
+              <button type="button" onClick={closeTransferModal} disabled={creatingTransfer} className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed" aria-label="Close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Date</label>
+                <input type="date" value={transferDate} max={todayISO()}
+                  onChange={(e) => setTransferDate(e.target.value)} disabled={creatingTransfer}
+                  className={inputCls(!!createTransferFieldErrors.date)} />
+                {createTransferFieldErrors.date && <p className="text-[11.5px] text-rose-600">{createTransferFieldErrors.date}</p>}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Item (durables only)</label>
+                <select value={transferItemId} onChange={(e) => setTransferItemId(e.target.value)}
+                  disabled={creatingTransfer} className={inputCls(!!createTransferFieldErrors.itemId)}>
+                  <option value="">Select a durable item...</option>
+                  {items.filter(i => i.isActive && i.type === "durable").map((i) => {
+                    const stock = stockMap.get(i.id) ?? 0;
+                    return <option key={i.id} value={i.id}>{i.name} ({i.unit}) - stock: {stock}</option>;
+                  })}
+                </select>
+                {createTransferFieldErrors.itemId && <p className="text-[11.5px] text-rose-600">{createTransferFieldErrors.itemId}</p>}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Quantity</label>
+                <input type="number" inputMode="decimal" step="0.01" min="0.01" value={transferQuantity}
+                  onChange={(e) => setTransferQuantity(e.target.value)} placeholder="0" disabled={creatingTransfer}
+                  className={inputCls(!!createTransferFieldErrors.quantity)} />
+                {createTransferFieldErrors.quantity && <p className="text-[11.5px] text-rose-600">{createTransferFieldErrors.quantity}</p>}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">From room</label>
+                  <select value={transferFromRoomId} onChange={(e) => setTransferFromRoomId(e.target.value)}
+                    disabled={creatingTransfer} className={inputCls(!!createTransferFieldErrors.fromRoom)}>
+                    <option value="">Select...</option>
+                    {rooms.map((r) => <option key={r.id} value={r.id}>Room {r.roomNumber}</option>)}
+                  </select>
+                  {createTransferFieldErrors.fromRoom && <p className="text-[11.5px] text-rose-600">{createTransferFieldErrors.fromRoom}</p>}
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">To room</label>
+                  <select value={transferToRoomId} onChange={(e) => setTransferToRoomId(e.target.value)}
+                    disabled={creatingTransfer} className={inputCls(!!createTransferFieldErrors.toRoom)}>
+                    <option value="">Select...</option>
+                    {rooms.map((r) => <option key={r.id} value={r.id}>Room {r.roomNumber}</option>)}
+                  </select>
+                  {createTransferFieldErrors.toRoom && <p className="text-[11.5px] text-rose-600">{createTransferFieldErrors.toRoom}</p>}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Note (optional)</label>
+                <input type="text" value={transferNote} onChange={(e) => setTransferNote(e.target.value)}
+                  placeholder="e.g. Moved AC from 201 to 305" disabled={creatingTransfer}
+                  className={inputCls(false)} />
+              </div>
+
+              {createTransferError && (
+                <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-[12px] text-rose-700">{createTransferError}</div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200">
+              <button type="button" onClick={closeTransferModal} disabled={creatingTransfer}
+                className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">Cancel</button>
+              <button type="button" onClick={handleCreateTransfer} disabled={creatingTransfer}
+                className="px-4 py-2 rounded-lg bg-indigo-700 text-white text-[13px] font-semibold hover:bg-indigo-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                {creatingTransfer ? "Saving..." : "Record Transfer"}
               </button>
             </div>
           </div>
