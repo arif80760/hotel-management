@@ -122,8 +122,9 @@ export default function InventoryClient() {
   const [itName,        setItName]        = useState("");
   const [itCategoryId,  setItCategoryId]  = useState("");
   const [itType,        setItType]        = useState<InventoryItemType>("consumable");
-  const [itUnit,        setItUnit]        = useState<InventoryItemUnit>("piece");
-  const [itNotes,       setItNotes]       = useState("");
+  const [itUnit,               setItUnit]               = useState<InventoryItemUnit>("piece");
+  const [itNotes,              setItNotes]              = useState("");
+  const [itLowStockThreshold,  setItLowStockThreshold]  = useState("");
   const [creatingItem, setCreatingItem] = useState(false);
   const [createItemError, setCreateItemError] = useState<string | null>(null);
   const [createItemFieldErrors, setCreateItemFieldErrors] = useState<{ name?: string }>({});
@@ -207,8 +208,9 @@ export default function InventoryClient() {
   const [edCategoryId, setEdCategoryId] = useState("");
   const [edType,       setEdType]       = useState<InventoryItemType>("consumable");
   const [edUnit,       setEdUnit]       = useState<InventoryItemUnit>("piece");
-  const [edNotes,      setEdNotes]      = useState("");
-  const [edIsActive,   setEdIsActive]   = useState(true);
+  const [edNotes,               setEdNotes]               = useState("");
+  const [edIsActive,            setEdIsActive]            = useState(true);
+  const [edLowStockThreshold,   setEdLowStockThreshold]   = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const [editFieldErrors, setEditFieldErrors] = useState<{ name?: string }>({});
@@ -353,7 +355,7 @@ export default function InventoryClient() {
   function openItemModal() {
     setItemModalOpen(true);
     setItName(""); setItCategoryId(""); setItType("consumable");
-    setItUnit("piece"); setItNotes("");
+    setItUnit("piece"); setItNotes(""); setItLowStockThreshold("");
     setCreateItemError(null); setCreateItemFieldErrors({});
   }
   function closeItemModal() { if (creatingItem) return; setItemModalOpen(false); }
@@ -363,12 +365,15 @@ export default function InventoryClient() {
     if (Object.keys(fieldErrors).length) { setCreateItemFieldErrors(fieldErrors); return; }
     setCreateItemFieldErrors({}); setCreateItemError(null); setCreatingItem(true);
     try {
+      const parsedThreshold = parseFloat(itLowStockThreshold);
       const input: NewInventoryItem = {
-        name:       itName.trim(),
-        categoryId: itCategoryId || undefined,
-        type:       itType,
-        unit:       itUnit,
-        notes:      itNotes.trim() || undefined,
+        name:               itName.trim(),
+        categoryId:         itCategoryId || undefined,
+        type:               itType,
+        unit:               itUnit,
+        notes:              itNotes.trim() || undefined,
+        lowStockThreshold:  itLowStockThreshold.trim() && !isNaN(parsedThreshold) && parsedThreshold >= 0
+                              ? parsedThreshold : null,
       };
       await createInventoryItem(input);
       setSuccessMsg(`Item "${itName.trim()}" added.`);
@@ -564,6 +569,7 @@ export default function InventoryClient() {
     setEdUnit(item.unit);
     setEdNotes(item.notes ?? "");
     setEdIsActive(item.isActive);
+    setEdLowStockThreshold(item.lowStockThreshold != null ? String(item.lowStockThreshold) : "");
     setEditError(null); setEditFieldErrors({});
     setEditMovementCount(0);
     setEditModalOpen(true);
@@ -584,11 +590,14 @@ export default function InventoryClient() {
     if (Object.keys(fieldErrors).length) { setEditFieldErrors(fieldErrors); return; }
     setEditFieldErrors({}); setEditError(null); setSavingEdit(true);
     try {
+      const parsedEditThreshold = parseFloat(edLowStockThreshold);
       const patch: UpdateInventoryItem = {
-        name:       edName.trim(),
-        categoryId: edCategoryId || null,
-        notes:      edNotes.trim() || null,
-        isActive:   edIsActive,
+        name:               edName.trim(),
+        categoryId:         edCategoryId || null,
+        notes:              edNotes.trim() || null,
+        isActive:           edIsActive,
+        lowStockThreshold:  edLowStockThreshold.trim() && !isNaN(parsedEditThreshold) && parsedEditThreshold >= 0
+                              ? parsedEditThreshold : null,
       };
       // Only include type/unit in the patch if movements are zero (lock guard).
       if (editMovementCount === 0) {
@@ -627,6 +636,12 @@ export default function InventoryClient() {
     <div className="p-8 space-y-5">
 
       {/* Header */}
+      {(() => {
+        const lowCount = items.filter(i => i.lowStockThreshold != null && (stockMap.get(i.id) ?? 0) <= i.lowStockThreshold).length;
+        return lowCount > 0 ? (
+          <span className="inline-block px-2.5 py-1 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-[12px] font-semibold">{lowCount} low on stock</span>
+        ) : null;
+      })()}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold text-slate-800">Inventory</h1>
         <div className="flex items-center gap-2">
@@ -752,6 +767,9 @@ export default function InventoryClient() {
                       className={`hover:bg-slate-50 transition-colors ${it.isActive ? "" : "opacity-50"}`}>
                     <td className="px-5 py-3.5">
                       <Link href={`/inventory/${it.id}`} className="font-medium text-indigo-700 hover:underline">{it.name}</Link>
+                      {it.lowStockThreshold != null && stock <= it.lowStockThreshold && (
+                        <span className="ml-2 inline-block px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-[11px] font-semibold">Low stock</span>
+                      )}
                       {it.notes && <div className="text-[11.5px] text-slate-400 mt-0.5">{it.notes}</div>}
                     </td>
                     <td className="px-5 py-3.5 text-slate-600">{cat?.name ?? "—"}</td>
@@ -896,6 +914,12 @@ export default function InventoryClient() {
                 <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Notes (optional)</label>
                 <input type="text" value={itNotes} onChange={(e) => setItNotes(e.target.value)}
                   placeholder="e.g. brand, supplier, model" disabled={creatingItem} className={inputCls(false)} />
+              </div>
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Low stock alert threshold (optional)</label>
+                <input type="number" inputMode="decimal" step="1" min="0" value={itLowStockThreshold}
+                  onChange={(e) => setItLowStockThreshold(e.target.value)}
+                  placeholder="e.g. 5 — alert when stock ≤ this" disabled={creatingItem} className={inputCls(false)} />
               </div>
               {createItemError && (
                 <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-[12px] text-rose-700">{createItemError}</div>
@@ -1396,6 +1420,13 @@ export default function InventoryClient() {
                 <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Notes</label>
                 <input type="text" value={edNotes} onChange={(e) => setEdNotes(e.target.value)}
                   disabled={savingEdit} className={inputCls(false)} />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Low stock alert threshold (optional)</label>
+                <input type="number" inputMode="decimal" step="1" min="0" value={edLowStockThreshold}
+                  onChange={(e) => setEdLowStockThreshold(e.target.value)}
+                  placeholder="e.g. 5 — alert when stock ≤ this" disabled={savingEdit} className={inputCls(false)} />
               </div>
 
               <label className="flex items-center gap-2 cursor-pointer">

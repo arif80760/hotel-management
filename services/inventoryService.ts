@@ -78,11 +78,12 @@ export type InventoryAssignment = {
 };
 
 export type NewInventoryItem = {
-  name:         string;
-  categoryId?:  string;
-  type:         InventoryItemType;
-  unit:         InventoryItemUnit;
-  notes?:       string;
+  name:                string;
+  categoryId?:         string;
+  type:                InventoryItemType;
+  unit:                InventoryItemUnit;
+  notes?:              string;
+  lowStockThreshold?:  number | null;  // null = no alert
 };
 
 // Purchase from expense (linked) or manual (unlinked)
@@ -262,12 +263,13 @@ export async function createInventoryItem(input: NewInventoryItem): Promise<Inve
   const { data, error } = await supabase
     .from("inventory_items")
     .insert({
-      name:        input.name.trim(),
-      category_id: input.categoryId ?? null,
-      type:        input.type,
-      unit:        input.unit,
-      notes:       input.notes?.trim() || null,
-      created_by:  createdBy,
+      name:                input.name.trim(),
+      category_id:         input.categoryId ?? null,
+      type:                input.type,
+      unit:                input.unit,
+      notes:               input.notes?.trim() || null,
+      low_stock_threshold: input.lowStockThreshold ?? null,
+      created_by:          createdBy,
     })
     .select("id, name, category_id, type, unit, notes, is_active, low_stock_threshold, created_at, created_by, updated_at")
     .single();
@@ -296,12 +298,13 @@ export async function setInventoryItemActive(id: string, isActive: boolean): Pro
 }
 
 export type UpdateInventoryItem = {
-  name?:        string;
-  categoryId?:  string | null;   // null clears category
-  type?:        InventoryItemType;
-  unit?:        InventoryItemUnit;
-  notes?:       string | null;   // null clears notes
-  isActive?:    boolean;
+  name?:               string;
+  categoryId?:         string | null;   // null clears category
+  type?:               InventoryItemType;
+  unit?:               InventoryItemUnit;
+  notes?:              string | null;   // null clears notes
+  isActive?:           boolean;
+  lowStockThreshold?:  number | null;   // null clears the alert threshold
 };
 
 /**
@@ -324,7 +327,8 @@ export async function updateInventoryItem(id: string, patch: UpdateInventoryItem
   if (patch.type       !== undefined) update.type        = patch.type;
   if (patch.unit       !== undefined) update.unit        = patch.unit;
   if (patch.notes      !== undefined) update.notes       = patch.notes?.trim() || null;
-  if (patch.isActive   !== undefined) update.is_active   = patch.isActive;
+  if (patch.isActive          !== undefined) update.is_active          = patch.isActive;
+  if (patch.lowStockThreshold !== undefined) update.low_stock_threshold = patch.lowStockThreshold;
 
   if (Object.keys(update).length === 0) {
     throw new Error("[updateInventoryItem] no fields to update.");
