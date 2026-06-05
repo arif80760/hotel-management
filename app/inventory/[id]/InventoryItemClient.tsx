@@ -10,10 +10,7 @@ import {
   type InventoryMovement,
   type InventoryMovementType,
 } from "@/services/inventoryService";
-import {
-  getInventoryCategories,
-  type InventoryCategory,
-} from "@/services/inventoryCategoriesService";
+import { getInventoryCategories, type InventoryCategory } from "@/services/inventoryCategoriesService";
 import { getAllRooms } from "@/services/roomsService";
 import type { MockRoom } from "@/lib/mockData";
 import { getAllEmployees, type Employee } from "@/services/employeesService";
@@ -29,7 +26,6 @@ const TYPE_BADGE: Record<InventoryMovementType, string> = {
   transfer:   "bg-violet-50 text-violet-700 border-violet-200",
 };
 
-// Mirrors getStockForAllItems: purchase +q, issue/damage -q, adjustment signed, transfer 0
 function stockDelta(m: InventoryMovement): number {
   switch (m.type) {
     case "purchase":   return +m.quantity;
@@ -92,6 +88,16 @@ export default function InventoryItemClient({ itemId }: { itemId: string }) {
 
   const lowStock = item.lowStockThreshold != null && stock <= item.lowStockThreshold;
 
+  // Running balance: walk oldest -> newest so each row shows resulting stock.
+  const chronological = [...movements].sort((a, b) => {
+    const t = new Date(a.happenedAt).getTime() - new Date(b.happenedAt).getTime();
+    if (t !== 0) return t;
+    return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+  });
+  const balanceAfter = new Map<string, number>();
+  let run = 0;
+  for (const m of chronological) { run += stockDelta(m); balanceAfter.set(m.id, run); }
+
   return (
     <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
       <Link href="/inventory" className="inline-flex items-center gap-1 text-[13px] text-indigo-700 hover:underline">← Back to inventory</Link>
@@ -102,6 +108,9 @@ export default function InventoryItemClient({ itemId }: { itemId: string }) {
             <h1 className="text-[20px] font-semibold text-slate-800">{item.name}</h1>
             <p className="text-[12.5px] text-slate-500 mt-0.5">
               {item.type === "durable" ? "Durable" : "Consumable"} · {item.unit} · {categoryName(item.categoryId)}
+            </p>
+            <p className="text-[11.5px] text-slate-400 mt-1">
+              Low-stock threshold: {item.lowStockThreshold ?? "—"} · Updated {fmtDate(item.updatedAt)}
             </p>
           </div>
           <div className="text-right">
@@ -125,13 +134,17 @@ export default function InventoryItemClient({ itemId }: { itemId: string }) {
             <table className="w-full text-[13px]">
               <thead>
                 <tr className="text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400 border-b border-slate-100">
-                  <th className="px-5 py-2.5">Date</th><th className="px-5 py-2.5">Type</th>
-                  <th className="px-5 py-2.5 text-right">Change</th><th className="px-5 py-2.5">Details</th>
+                  <th className="px-5 py-2.5">Date</th>
+                  <th className="px-5 py-2.5">Type</th>
+                  <th className="px-5 py-2.5 text-right">Change</th>
+                  <th className="px-5 py-2.5 text-right">Balance</th>
+                  <th className="px-5 py-2.5">Details</th>
                 </tr>
               </thead>
               <tbody>
                 {movements.map((m) => {
                   const delta = stockDelta(m);
+                  const bal = balanceAfter.get(m.id);
                   const from = roomName(m.fromRoomId);
                   const to = roomName(m.toRoomId);
                   const emp = employeeName(m.issuedToEmployeeId);
@@ -146,6 +159,7 @@ export default function InventoryItemClient({ itemId }: { itemId: string }) {
                       <td className="px-5 py-3 text-slate-600 whitespace-nowrap">{fmtDate(m.happenedAt)}</td>
                       <td className="px-5 py-3"><span className={`inline-block px-2 py-0.5 rounded-full border text-[11.5px] font-semibold ${TYPE_BADGE[m.type]}`}>{TYPE_LABEL[m.type]}</span></td>
                       <td className={`px-5 py-3 text-right font-semibold whitespace-nowrap ${delta > 0 ? "text-emerald-700" : delta < 0 ? "text-rose-600" : "text-slate-400"}`}>{delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : "0"}</td>
+                      <td className={`px-5 py-3 text-right whitespace-nowrap ${bal != null && bal < 0 ? "text-rose-600 font-semibold" : "text-slate-600"}`}>{bal ?? "—"}</td>
                       <td className="px-5 py-3 text-slate-500">{details.join(" · ") || "—"}</td>
                     </tr>
                   );
