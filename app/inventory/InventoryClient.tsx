@@ -143,6 +143,7 @@ export default function InventoryClient() {
   const [stockDate,      setStockDate]      = useState<string>(todayISO());
   const [stockQuantity,  setStockQuantity]  = useState("");
   const [stockUnitPrice, setStockUnitPrice] = useState("");
+  const [stockUnit,      setStockUnit]      = useState<"pack" | "base">("pack");
   const [stockReason,    setStockReason]    = useState("");
   const [creatingStock, setCreatingStock] = useState(false);
   const [createStockError, setCreateStockError] = useState<string | null>(null);
@@ -398,7 +399,7 @@ export default function InventoryClient() {
     setStockModalOpen(true);
     setStockItemId("");
     setStockDate(todayISO());
-    setStockQuantity(""); setStockUnitPrice(""); setStockReason("");
+    setStockQuantity(""); setStockUnitPrice(""); setStockReason(""); setStockUnit("pack");
     setCreateStockError(null); setCreateStockFieldErrors({});
   }
   function closeStockModal() { if (creatingStock) return; setStockModalOpen(false); }
@@ -554,9 +555,12 @@ export default function InventoryClient() {
       // Convert the date input (local YYYY-MM-DD) to a UTC ISO string.
       // Anchor to noon local to avoid timezone-driven date drift.
       const happenedAt = new Date(stockDate + "T12:00:00").toISOString();
+      const packItem = items.find((it) => it.id === stockItemId);
+      const upp = packItem?.unitsPerPack ?? null;
+      const baseQty = upp != null && stockUnit === "pack" ? qty * upp : qty;
       await createPurchaseMovement({
         itemId:     stockItemId,
-        quantity:   qty,
+        quantity:   baseQty,
         unitPrice:  price,
         happenedAt,
         reasonNote: stockReason.trim(),
@@ -994,14 +998,38 @@ export default function InventoryClient() {
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
-                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Quantity</label>
-                  <input type="number" inputMode="decimal" step="0.01" min="0.01" value={stockQuantity}
-                    onChange={(e) => setStockQuantity(e.target.value)} placeholder="0" disabled={creatingStock}
-                    className={inputCls(!!createStockFieldErrors.quantity)} />
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">
+                    Quantity{items.find((i) => i.id === stockItemId)?.unitsPerPack != null
+                      ? stockUnit === "pack"
+                        ? ` (in ${items.find((i) => i.id === stockItemId)?.packLabel ?? "pack"})`
+                        : ` (in ${items.find((i) => i.id === stockItemId)?.unit ?? "unit"})`
+                      : ""}
+                  </label>
+                  <div className="flex gap-2">
+                    <input type="number" inputMode="decimal" step="0.01" min="0.01" value={stockQuantity}
+                      onChange={(e) => setStockQuantity(e.target.value)} placeholder="0" disabled={creatingStock}
+                      className={`${inputCls(!!createStockFieldErrors.quantity)} flex-1`} />
+                    {items.find((i) => i.id === stockItemId)?.unitsPerPack != null && (
+                      <select value={stockUnit} onChange={(e) => setStockUnit(e.target.value as "pack" | "base")}
+                        disabled={creatingStock}
+                        className="rounded-lg border border-slate-300 bg-white px-2 text-[13px] text-slate-700">
+                        <option value="pack">{items.find((i) => i.id === stockItemId)?.packLabel ?? "pack"}</option>
+                        <option value="base">{items.find((i) => i.id === stockItemId)?.unit ?? "unit"}</option>
+                      </select>
+                    )}
+                  </div>
+                  {(() => {
+                    const s = items.find((i) => i.id === stockItemId);
+                    const upp = s?.unitsPerPack ?? null;
+                    const q = parseFloat(stockQuantity);
+                    if (upp != null && stockUnit === "pack" && !isNaN(q) && q > 0)
+                      return <p className="text-[11.5px] text-slate-500">= {(q * upp).toLocaleString()} {s?.unit ?? "units"}</p>;
+                    return null;
+                  })()}
                   {createStockFieldErrors.quantity && <p className="text-[11.5px] text-rose-600">{createStockFieldErrors.quantity}</p>}
                 </div>
                 <div className="space-y-1">
-                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Unit Price (৳)</label>
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">{items.find((i) => i.id === stockItemId)?.unitsPerPack != null ? `Price per ${items.find((i) => i.id === stockItemId)?.unit ?? "unit"} (৳)` : "Unit Price (৳)"}</label>
                   <input type="number" inputMode="decimal" step="0.01" min="0" value={stockUnitPrice}
                     onChange={(e) => setStockUnitPrice(e.target.value)} placeholder="0.00" disabled={creatingStock}
                     className={inputCls(!!createStockFieldErrors.unitPrice)} />
