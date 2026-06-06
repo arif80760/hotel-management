@@ -3,25 +3,19 @@
 // app/accounts/revenue-report/RevenueReportClient.tsx
 //
 // Revenue Report — read-only analytics over all revenue_in rows. No writes.
-//
-// Data sources:
-//   - getTransactions() filtered to type "revenue_in" → ALL revenue
-//     (room/booking + manual). Drives total, by-bucket, source split, trend.
-//     bookingPaymentId !== null  → room/booking;  === null → manual.
-//   - getRevenues() → the manual slice carrying revenueCategoryId + payee
-//     → per-category breakdown (Rent, etc.). Disjoint from the booking rows.
-//   - getAccounts()          → toAccountId -> bucket name.
-//   - getRevenueCategories() → revenueCategoryId -> category name.
+// Booking rows are enriched with their source booking detail via
+// getBookingPaymentMap (payment id -> booking ref + method) + getAllBookings.
 // ─────────────────────────────────────────────────────────────
 
 import { useState, useEffect, useMemo } from "react";
 import { getTransactions, getAccounts, type AccountTransaction } from "@/services/accountsService";
 import { getRevenues, type Revenue } from "@/services/revenueService";
 import { getRevenueCategories } from "@/services/revenueCategoriesService";
+import { getAllBookings, getBookingPaymentMap } from "@/services/bookingsService";
+import type { MockBooking } from "@/lib/mockData";
 
 const BOOKING_LABEL = "Room / Booking";
 
-// ── Date / money helpers ───────────────────────────────────
 function todayISO(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -53,6 +47,9 @@ function daysInclusive(fromISO: string, toISO: string): number {
   if (isNaN(a) || isNaN(b) || b < a) return 0;
   return Math.floor((b - a) / 86400000) + 1;
 }
+function formatMethod(m: string): string {
+  return m.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
 
 type Preset = "this_month" | "last_month" | "this_year" | "all" | "custom";
 
@@ -63,39 +60,48 @@ function rangeFilters(f: string, t: string): { fromDate?: string; toDate?: strin
   return out;
 }
 
+async function loadTxns(f: string, t: string) {
+  const filters = rangeFilters(f, t);
+  const [tx, rv] = await Promise.all([getTransactions(filters), getRevenues(filters)]);
+  const paymentIds = tx
+    .filter((x) => x.type === "revenue_in" && x.bookingPaymentId)
+    .map((x) => x.bookingPaymentId as string);
+  const pm = await getBookingPaymentMap(paymentIds);
+  return { tx, rv, pm };
+}
+
 export default function RevenueReportClient() {
-  // ── Filter state ───────────────────────────────────────────
   const [fromDate, setFromDate] = useState<string>(firstOfMonthISO());
   const [toDate, setToDate]     = useState<string>(todayISO());
   const [preset, setPreset]     = useState<Preset>("this_month");
 
-  // ── Data ───────────────────────────────────────────────────
   const [txns, setTxns]             = useState<AccountTransaction[]>([]);
   const [manual, setManual]         = useState<Revenue[]>([]);
   const [accounts, setAccounts]     = useState<{ id: string; name: string }[]>([]);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+  const [bookingsByRef, setBookingsByRef] = useState<Map<string, MockBooking>>(new Map());
+  const [paymentMap, setPaymentMap] = useState<Awaited<ReturnType<typeof getBookingPaymentMap>>>(new Map());
 
-  // ── Load state ─────────────────────────────────────────────
   const [fetching, setFetching]     = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  // ── Initial load ───────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
-        const filters = rangeFilters(fromDate, toDate);
-        const [tx, rv, accs, cats] = await Promise.all([
-          getTransactions(filters),
-          getRevenues(filters),
+        const [{ tx, rv, pm }, accs, cats, bks] = await Promise.all([
+          loadTxns(fromDate, toDate),
           getAccounts(),
           getRevenueCategories(),
+          getAllBookings(),
         ]);
         if (cancelled) return;
         setTxns(tx);
         setManual(rv);
+        setPaymentMap(pm);
         setAccounts(accs.map((a) => ({ id: a.id, name: a.name })));
         setCategories(cats.map((c) => ({ id: c.id, name: c.name })));
+        setBookingsByRef(new Map(bks.map((b) => [b.id, b])));
       } catch (err) {
         if (!cancelled) setFetchError(err instanceof Error ? err.message : "Failed to load.");
       } finally {
@@ -107,15 +113,13 @@ export default function RevenueReportClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Refetch on range change ────────────────────────────────
   useEffect(() => {
     if (fetching) return;
     let cancelled = false;
     (async () => {
       try {
-        const filters = rangeFilters(fromDate, toDate);
-        const [tx, rv] = await Promise.all([getTransactions(filters), getRevenues(filters)]);
-        if (!cancelled) { setTxns(tx); setManual(rv); }
+        const { tx, rv, pm } = await loadTxns(fromDate, toDate);
+        if (!cancelled) { setTxns(tx); setManual(rv); setPaymentMap(pm); }
       } catch (err) {
         console.error("[RevenueReportClient] refilter failed:", err);
       }
@@ -140,7 +144,6 @@ export default function RevenueReportClient() {
     }
   }
 
-  // ── Derived ────────────────────────────────────────────────
   const revenueTxns = useMemo(() => txns.filter((t) => t.type === "revenue_in"), [txns]);
 
   const accountName = useMemo(() => {
@@ -219,7 +222,6 @@ export default function RevenueReportClient() {
   const maxSource = bySource.reduce((m, x) => Math.max(m, x.amount), 0);
   const maxBucket = byBucket.reduce((m, x) => Math.max(m, x.amount), 0);
 
-  // ── Loading / error ────────────────────────────────────────
   if (fetching) {
     return (
       <div className="p-8">
@@ -238,12 +240,8 @@ export default function RevenueReportClient() {
   }
 
   const presetBtn = (p: Preset, label: string) => (
-    <button
-      key={p}
-      type="button"
-      onClick={() => applyPreset(p)}
-      className={`px-3 py-1.5 rounded-md text-[12.5px] font-semibold transition-colors ${preset === p ? "bg-emerald-100 text-emerald-800 border border-emerald-300" : "bg-slate-50 text-slate-600 border border-slate-200 hover:bg-slate-100"}`}
-    >
+    <button key={p} type="button" onClick={() => applyPreset(p)}
+      className={`px-3 py-1.5 rounded-md text-[12.5px] font-semibold transition-colors ${preset === p ? "bg-emerald-100 text-emerald-800 border border-emerald-300" : "bg-slate-50 text-slate-600 border border-slate-200 hover:bg-slate-100"}`}>
       {label}
     </button>
   );
@@ -256,7 +254,6 @@ export default function RevenueReportClient() {
 
   const pct = (a: number) => (total > 0 ? Math.round((a / total) * 100) : 0);
 
-  // ── Render ─────────────────────────────────────────────────
   return (
     <div className="p-8 space-y-5">
 
@@ -278,22 +275,9 @@ export default function RevenueReportClient() {
         </div>
         <div className="flex items-center gap-2 ml-auto">
           <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">From</span>
-          <input
-            type="date"
-            value={fromDate}
-            max={toDate || todayISO()}
-            onChange={(e) => { setFromDate(e.target.value); setPreset("custom"); }}
-            className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-400"
-          />
+          <input type="date" value={fromDate} max={toDate || todayISO()} onChange={(e) => { setFromDate(e.target.value); setPreset("custom"); }} className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-400" />
           <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">To</span>
-          <input
-            type="date"
-            value={toDate}
-            min={fromDate || undefined}
-            max={todayISO()}
-            onChange={(e) => { setToDate(e.target.value); setPreset("custom"); }}
-            className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-400"
-          />
+          <input type="date" value={toDate} min={fromDate || undefined} max={todayISO()} onChange={(e) => { setToDate(e.target.value); setPreset("custom"); }} className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-400" />
         </div>
       </div>
 
@@ -316,9 +300,7 @@ export default function RevenueReportClient() {
       {/* By source + by bucket */}
       <div className="grid grid-cols-2 gap-4">
         <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-          <div className="px-5 py-3 bg-slate-50 border-b border-slate-200">
-            <h3 className="text-[13.5px] font-semibold text-slate-700">By source</h3>
-          </div>
+          <div className="px-5 py-3 bg-slate-50 border-b border-slate-200"><h3 className="text-[13.5px] font-semibold text-slate-700">By source</h3></div>
           <div className="px-5 py-4 space-y-3">
             {bySource.length === 0 ? (
               <p className="text-[13px] text-slate-400 italic">No revenue in this range.</p>
@@ -335,9 +317,7 @@ export default function RevenueReportClient() {
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-          <div className="px-5 py-3 bg-slate-50 border-b border-slate-200">
-            <h3 className="text-[13.5px] font-semibold text-slate-700">By bucket</h3>
-          </div>
+          <div className="px-5 py-3 bg-slate-50 border-b border-slate-200"><h3 className="text-[13.5px] font-semibold text-slate-700">By bucket</h3></div>
           <div className="px-5 py-4 space-y-3">
             {byBucket.length === 0 ? (
               <p className="text-[13px] text-slate-400 italic">No revenue in this range.</p>
@@ -354,7 +334,7 @@ export default function RevenueReportClient() {
         </div>
       </div>
 
-      {/* Trend chart */}
+      {/* Trend */}
       <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
         <div className="flex items-center justify-between px-5 py-3 bg-slate-50 border-b border-slate-200">
           <h3 className="text-[13.5px] font-semibold text-slate-700">Trend</h3>
@@ -388,23 +368,51 @@ export default function RevenueReportClient() {
           <ul className="divide-y divide-slate-100">
             {revenueTxns.map((t) => {
               const isBooking = t.bookingPaymentId !== null;
-              const m = manualById.get(t.id);
-              const source = isBooking ? BOOKING_LABEL : (m?.category ?? "Revenue");
-              const who = isBooking ? (t.note ?? "") : (m?.payee ?? "");
-              return (
-                <li key={t.id} className="px-5 py-3 flex items-center gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-[14px] font-semibold text-slate-800 tabular-nums">৳{formatAmount(t.amount)}</span>
-                      <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider border ${isBooking ? "bg-emerald-50 text-emerald-700 border-emerald-100" : "bg-sky-50 text-sky-700 border-sky-100"}`}>
-                        {source}
-                      </span>
-                      {who && <span className="text-[12.5px] text-slate-500 truncate">{who}</span>}
+
+              if (!isBooking) {
+                const m = manualById.get(t.id);
+                const cat = m?.category ?? "Revenue";
+                const payee = m?.payee ?? "";
+                return (
+                  <li key={t.id} className="px-5 py-3.5 flex items-center gap-4">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2.5">
+                        <span className="text-[14px] font-semibold text-slate-800 tabular-nums">৳{formatAmount(t.amount)}</span>
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider border bg-sky-50 text-sky-700 border-sky-100">{cat}</span>
+                        {payee && <span className="text-[12.5px] text-slate-500 truncate">{payee}</span>}
+                      </div>
+                      <p className="mt-0.5 text-[12px] text-slate-400">{formatDateLabel(t.txnDate)} · {accountName(t.toAccountId)}</p>
                     </div>
-                    <p className="mt-0.5 text-[12px] text-slate-400">
-                      {formatDateLabel(t.txnDate)} · {accountName(t.toAccountId)}
-                    </p>
+                  </li>
+                );
+              }
+
+              const pmEntry = t.bookingPaymentId ? paymentMap.get(t.bookingPaymentId) : undefined;
+              const booking = pmEntry ? bookingsByRef.get(pmEntry.bookingRef) : undefined;
+              return (
+                <li key={t.id} className="px-5 py-3.5">
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    <span className="text-[14px] font-semibold text-slate-800 tabular-nums">৳{formatAmount(t.amount)}</span>
+                    <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider border bg-emerald-50 text-emerald-700 border-emerald-100">{BOOKING_LABEL}</span>
+                    {booking && <span className="text-[12.5px] font-medium text-slate-700">{booking.guestName}</span>}
+                    {pmEntry && (
+                      <a href={`/bookings/${pmEntry.bookingRef}/reservation`} className="text-[12px] font-semibold text-emerald-700 hover:text-emerald-800 hover:underline">{pmEntry.bookingRef} →</a>
+                    )}
                   </div>
+                  <p className="mt-0.5 text-[12px] text-slate-400">
+                    {formatDateLabel(t.txnDate)} · {accountName(t.toAccountId)}{pmEntry ? ` · ${formatMethod(pmEntry.method)}` : ""}
+                  </p>
+                  {booking ? (
+                    <div className="mt-1.5 rounded-lg bg-slate-50 border border-slate-100 px-3 py-2 space-y-0.5 text-[12px] text-slate-600">
+                      {booking.rooms.map((r) => (
+                        <div key={r.id}>Room {r.roomNumber} · {r.roomCategory} · {r.checkIn} → {r.checkOut} · {r.nights} night{r.nights === 1 ? "" : "s"}</div>
+                      ))}
+                      <div>Guest: {booking.guestName}{booking.phone ? ` · ${booking.phone}` : ""} · {booking.totalGuests} guest{booking.totalGuests === 1 ? "" : "s"}</div>
+                      <div>Booking: {booking.status} · {booking.payment} · total ৳{formatAmount(booking.totalAmount)} / paid ৳{formatAmount(booking.amountPaid)}</div>
+                    </div>
+                  ) : (
+                    <p className="mt-1 text-[12px] text-slate-300 italic">Booking detail unavailable for this payment.</p>
+                  )}
                 </li>
               );
             })}

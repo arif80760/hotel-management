@@ -2458,3 +2458,57 @@ export async function cancelBooking(
 
   return { refundId: (data as string | null) ?? null };
 }
+
+// ─────────────────────────────────────────────────────────────
+// PAYMENT → BOOKING LOOKUP  (revenue report enrichment)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Given a set of payments.id values, return a map paymentId →
+ * { bookingRef, method }. The revenue report uses this to enrich
+ * booking-derived revenue rows (which carry only the payment id)
+ * with their booking reference and payment method. One query, no N+1.
+ */
+export async function getBookingPaymentMap(
+  paymentIds: string[],
+): Promise<Map<string, { bookingRef: string; method: PaymentMethod }>> {
+  const result = new Map<string, { bookingRef: string; method: PaymentMethod }>();
+  if (paymentIds.length === 0) return result;
+
+  // Step 1 — payments → booking_id + method (flat select, no nested embed)
+  const { data: pays, error: payErr } = await supabase
+    .from("payments")
+    .select("id, method, booking_id")
+    .in("id", paymentIds);
+
+  if (payErr) {
+    console.error("[getBookingPaymentMap] payments fetch FAILED:", payErr.message, "| code:", payErr.code);
+    throw new Error(`[getBookingPaymentMap] ${payErr.message}`);
+  }
+
+  const rows = (pays ?? []) as Array<{ id: string; method: string; booking_id: string | null }>;
+
+  // Step 2 — booking_id → booking_ref
+  const bookingIds = Array.from(new Set(rows.map((r) => r.booking_id).filter((x): x is string => !!x)));
+  const refById = new Map<string, string>();
+  if (bookingIds.length > 0) {
+    const { data: bks, error: bkErr } = await supabase
+      .from("bookings")
+      .select("id, booking_ref")
+      .in("id", bookingIds);
+
+    if (bkErr) {
+      console.error("[getBookingPaymentMap] bookings fetch FAILED:", bkErr.message, "| code:", bkErr.code);
+      throw new Error(`[getBookingPaymentMap] ${bkErr.message}`);
+    }
+    for (const b of (bks ?? []) as Array<{ id: string; booking_ref: string }>) {
+      refById.set(b.id, b.booking_ref);
+    }
+  }
+
+  for (const r of rows) {
+    const ref = r.booking_id ? refById.get(r.booking_id) : undefined;
+    if (ref) result.set(r.id, { bookingRef: ref, method: r.method as PaymentMethod });
+  }
+  return result;
+}
