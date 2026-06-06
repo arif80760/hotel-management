@@ -149,6 +149,7 @@ const navItems: NavItem[] = [
       { label: "Expense",            href: "/accounts/expense" },
       { label: "Payroll",            href: "/accounts/payroll" },
       { label: "Revenue Management", href: "/accounts/revenue-management" },
+      { label: "Loans",              href: "/accounts/loans" },
     ],
   },
   { label: "My Profile", href: "/profile",     icon: Icons.profile    },
