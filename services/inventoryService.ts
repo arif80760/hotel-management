@@ -46,6 +46,8 @@ export type InventoryItem = {
   notes:              string | null;
   isActive:           boolean;
   lowStockThreshold:  number | null;
+  packLabel:          string | null;
+  unitsPerPack:       number | null;
   createdAt:          string;
   createdBy:          string | null;
   updatedAt:          string;
@@ -84,6 +86,8 @@ export type NewInventoryItem = {
   unit:                InventoryItemUnit;
   notes?:              string;
   lowStockThreshold?:  number | null;  // null = no alert
+  packLabel?:          string | null;  // null = no pack
+  unitsPerPack?:       number | null;  // null = no pack
 };
 
 // Purchase from expense (linked) or manual (unlinked)
@@ -133,6 +137,8 @@ type ItemRow = {
   notes: string | null;
   is_active: boolean;
   low_stock_threshold: string | number | null;
+  pack_label:          string | null;
+  units_per_pack:      string | number | null;
   created_at: string;
   created_by: string | null;
   updated_at: string;
@@ -179,6 +185,8 @@ function mapItem(r: ItemRow): InventoryItem {
     notes:              r.notes,
     isActive:           r.is_active,
     lowStockThreshold:  r.low_stock_threshold === null ? null : num(r.low_stock_threshold),
+    packLabel:          r.pack_label ?? null,
+    unitsPerPack:       r.units_per_pack === null ? null : num(r.units_per_pack),
     createdAt:          r.created_at,
     createdBy:          r.created_by,
     updatedAt:          r.updated_at,
@@ -223,7 +231,7 @@ function mapAssignment(r: AssignmentRow): InventoryAssignment {
 export async function getInventoryItems(opts: { activeOnly?: boolean } = {}): Promise<InventoryItem[]> {
   let query = supabase
     .from("inventory_items")
-    .select("id, name, category_id, type, unit, notes, is_active, low_stock_threshold, created_at, created_by, updated_at")
+    .select("id, name, category_id, type, unit, notes, is_active, low_stock_threshold, pack_label, units_per_pack, created_at, created_by, updated_at")
     .order("is_active", { ascending: false })
     .order("name", { ascending: true });
 
@@ -241,7 +249,7 @@ export async function getInventoryItems(opts: { activeOnly?: boolean } = {}): Pr
 export async function getInventoryItemById(id: string): Promise<InventoryItem | null> {
   const { data, error } = await supabase
     .from("inventory_items")
-    .select("id, name, category_id, type, unit, notes, is_active, low_stock_threshold, created_at, created_by, updated_at")
+    .select("id, name, category_id, type, unit, notes, is_active, low_stock_threshold, pack_label, units_per_pack, created_at, created_by, updated_at")
     .eq("id", id)
     .maybeSingle();
   if (error) {
@@ -269,9 +277,11 @@ export async function createInventoryItem(input: NewInventoryItem): Promise<Inve
       unit:                input.unit,
       notes:               input.notes?.trim() || null,
       low_stock_threshold: input.lowStockThreshold ?? null,
+      pack_label:          input.packLabel ?? null,
+      units_per_pack:      input.unitsPerPack ?? null,
       created_by:          createdBy,
     })
-    .select("id, name, category_id, type, unit, notes, is_active, low_stock_threshold, created_at, created_by, updated_at")
+    .select("id, name, category_id, type, unit, notes, is_active, low_stock_threshold, pack_label, units_per_pack, created_at, created_by, updated_at")
     .single();
 
   if (error || !data) {
@@ -287,7 +297,7 @@ export async function setInventoryItemActive(id: string, isActive: boolean): Pro
     .from("inventory_items")
     .update({ is_active: isActive })
     .eq("id", id)
-    .select("id, name, category_id, type, unit, notes, is_active, low_stock_threshold, created_at, created_by, updated_at")
+    .select("id, name, category_id, type, unit, notes, is_active, low_stock_threshold, pack_label, units_per_pack, created_at, created_by, updated_at")
     .single();
   if (error || !data) {
     console.error("──────────── [setInventoryItemActive] FAILED ────────────");
@@ -305,6 +315,8 @@ export type UpdateInventoryItem = {
   notes?:              string | null;   // null clears notes
   isActive?:           boolean;
   lowStockThreshold?:  number | null;   // null clears the alert threshold
+  packLabel?:          string | null;   // null clears the pack label
+  unitsPerPack?:       number | null;   // null clears the pack size
 };
 
 /**
@@ -329,6 +341,8 @@ export async function updateInventoryItem(id: string, patch: UpdateInventoryItem
   if (patch.notes      !== undefined) update.notes       = patch.notes?.trim() || null;
   if (patch.isActive          !== undefined) update.is_active          = patch.isActive;
   if (patch.lowStockThreshold !== undefined) update.low_stock_threshold = patch.lowStockThreshold;
+  if (patch.packLabel         !== undefined) update.pack_label          = patch.packLabel;
+  if (patch.unitsPerPack      !== undefined) update.units_per_pack      = patch.unitsPerPack;
 
   if (Object.keys(update).length === 0) {
     throw new Error("[updateInventoryItem] no fields to update.");
@@ -338,7 +352,7 @@ export async function updateInventoryItem(id: string, patch: UpdateInventoryItem
     .from("inventory_items")
     .update(update)
     .eq("id", id)
-    .select("id, name, category_id, type, unit, notes, is_active, low_stock_threshold, created_at, created_by, updated_at")
+    .select("id, name, category_id, type, unit, notes, is_active, low_stock_threshold, pack_label, units_per_pack, created_at, created_by, updated_at")
     .single();
 
   if (error || !data) {
