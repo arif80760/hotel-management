@@ -88,6 +88,7 @@ export type AccountTransaction = {
   editedBy:          string | null;   // auth.users(id) of most recent editor; null if never edited
   deletedAt:         string | null;   // ISO timestamp of soft delete; null if live (filtered out of reads)
   deletedBy:         string | null;   // auth.users(id) of soft-deleter; null if live
+  lenderName:        string | null;   // joined from loans.lender_name via loan_id FK; null when no linked loan
 };
 
 // Input for a manual daybook entry (transfer or injection only).
@@ -141,6 +142,9 @@ type AccountTransactionRow = {
   edited_by:          string | null;
   deleted_at:         string | null;
   deleted_by:         string | null;
+  // Embedded relation — present only in getTransactions (which selects loans(lender_name)).
+  // Supabase/PostgREST returns an array even for a to-one FK; take index [0].
+  loans:              { lender_name: string }[] | null;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -180,6 +184,7 @@ function mapTransaction(row: AccountTransactionRow): AccountTransaction {
     editedBy:          row.edited_by,
     deletedAt:         row.deleted_at,
     deletedBy:         row.deleted_by,
+    lenderName:        row.loans?.[0]?.lender_name ?? null,
   };
 }
 
@@ -231,7 +236,7 @@ export async function getTransactions(
 ): Promise<AccountTransaction[]> {
   let query = supabase
     .from("account_transactions")
-    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, created_by, created_at, edited_at, edited_by, deleted_at, deleted_by")
+    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, created_by, created_at, edited_at, edited_by, deleted_at, deleted_by, loans(lender_name)")
     .order("txn_date", { ascending: false })
     .order("created_at", { ascending: false });
 

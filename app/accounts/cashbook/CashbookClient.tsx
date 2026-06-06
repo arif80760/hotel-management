@@ -1300,6 +1300,9 @@ export default function CashbookClient() {
                               )}
                               <p className="text-[13px] font-medium text-slate-700">{flow}</p>
                             </div>
+                            {(t.type === "loan_received" || t.type === "loan_repayment") && t.lenderName && (
+                              <p className={`mt-1 text-[12.5px] text-slate-500 break-words ${isDeleted ? "line-through decoration-slate-400" : ""}`}>{t.lenderName}</p>
+                            )}
                             {t.note && (
                               <p className={`mt-1 text-[12.5px] text-slate-500 break-words ${isDeleted ? "line-through decoration-slate-400" : ""}`}>{t.note}</p>
                             )}
@@ -1433,6 +1436,9 @@ export default function CashbookClient() {
                     </p>
                   </div>
                   <p className="text-[11.5px] text-slate-500 mt-1.5">{formatDayHeader(t.txnDate)}</p>
+                  {(t.type === "loan_received" || t.type === "loan_repayment") && t.lenderName && (
+                    <p className="text-[12px] text-slate-600 mt-1.5 italic break-words">{t.lenderName}</p>
+                  )}
                   {t.note && (
                     <p className="text-[12px] text-slate-600 mt-1.5 italic break-words">{t.note}</p>
                   )}
