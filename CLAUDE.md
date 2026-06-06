@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-05-08 (rev 9)
+Last updated: 2026-06-06 (rev 10)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -9,7 +9,8 @@ Comprehensive reference for AI assistants and developers working on this codebas
 ## 1. Project Overview
 
 A full-stack hotel management web application for managing rooms, bookings, check-in/out,
-guests, employees, payments, and identity documents.
+guests, employees, payments, financial accounts (cashbook, expenses, payroll, revenue),
+inventory, and loans.
 
 | Item | Value |
 |---|---|
@@ -39,6 +40,19 @@ hotel-management/
 │   ├── guests/                  # Guest profiles
 │   ├── employees/               # Employee roster (admin only)
 │   ├── profile/                 # Logged-in user profile page
+│   ├── inventory/
+│   │   └── InventoryClient.tsx  # Full inventory CRUD — items, stock movements, pack/base unit toggle
+│   ├── accounts/
+│   │   ├── cashbook/
+│   │   │   └── CashbookClient.tsx   # Financial ledger — all account transactions, filters, modals
+│   │   ├── expense/
+│   │   │   └── ExpenseClient.tsx    # Expense recording + inventory purchase seam (pack/base toggle)
+│   │   ├── revenue/                 # Revenue management page
+│   │   ├── payroll/                 # Payroll page
+│   │   └── loans/
+│   │       ├── page.tsx             # Server wrapper (admin guard) → renders LoansClient
+│   │       ├── LoansClient.tsx      # Read-only loans register (7-column table, outstanding pill)
+│   │       └── LoanEntryActions.tsx # Cashbook toolbar widget — "+ Loan received" + "Loan repayment" buttons
 │   └── api/
 │       └── employees/
 │           └── provision/
@@ -53,36 +67,43 @@ hotel-management/
 │   ├── bookingsService.ts       # Supabase CRUD for bookings table (with joins)
 │   ├── guestsService.ts         # Supabase CRUD for guests table
 │   ├── employeesService.ts      # Supabase CRUD for employees table
-│   └── documentsService.ts      # Supabase Storage + booking_documents table
+│   ├── documentsService.ts      # Supabase Storage + booking_documents table
+│   ├── accountsService.ts       # Financial accounts — transactions, balances, types, lender name join
+│   ├── inventoryService.ts      # Inventory items + movements CRUD; pack label / units_per_pack fields
+│   └── loansService.ts          # Loans CRUD — create loan, list with status, record repayment
 │
 ├── lib/
 │   ├── mockData.ts              # Central type definitions + HOTEL_POLICY + MOCK_* seed data
 │   ├── supabase.ts              # Supabase browser client (HMR singleton on globalThis)
-│   └── supabaseAdmin.ts         # Supabase service-role admin client (server-only)
+│   ├── supabaseAdmin.ts         # Supabase service-role admin client (server-only)
+│   └── invoiceUtils.ts          # calcTrueDue() + formatInvoiceDate() — shared between invoice pages
+│
+├── components/
+│   ├── Sidebar.tsx              # App navigation sidebar (includes Accounts → Loans link)
+│   └── ...                      # Other shared UI components
 │
 ├── sql/                         # All SQL — schema snapshots + migration history
 │   ├── schema/                  # Authoritative current-state schema files (keep in sync with DB)
-│   │   ├── 01-types.sql         # Custom enum types
-│   │   ├── 02-tables.sql        # All CREATE TABLE definitions
-│   │   ├── 03-functions.sql     # RPC functions (booking_ref generator, etc.)
-│   │   ├── 04-indexes.sql       # Supplemental indexes (beyond PK/UNIQUE auto-indexes)
-│   │   ├── 05-triggers.sql      # Trigger functions + bindings
-│   │   └── 06-rls-policies.sql  # Row Level Security policies
-│   ├── migrations/              # Ordered migration history — apply once in Supabase SQL Editor
-│   │   ├── add_booking_rate_columns.sql
-│   │   ├── add_extra_charge_columns.sql
-│   │   ├── create_booking_documents_table.sql
-│   │   ├── add_early_checkout_and_discount_columns.sql
-│   │   ├── add_payment_method_extras.sql
-│   │   ├── 2026-05-08-multi-room-enum-prep.sql       # APPLY FIRST (separate session): adds checked_out_early to booking_status
-│   │   ├── 2026-05-08-multi-room-foundation.sql      # Creates booking_rooms, booking_extra_charges, refunds + backfill
-│   │   ├── 2026-05-08-multi-room-foundation-rollback.sql  # Rollback script for foundation migration
-│   │   ├── 2026-05-08-multi-room-rpc.sql             # RPC functions: create_booking_with_rooms, cancel_booking_room, etc.
-│   │   └── 2026-05-08-rpc-add-status-param.sql       # Adds p_status param to create_booking_with_rooms (Phase 5.2 fix)
-│   └── add_payment_method_extras.sql                 # (legacy location — superseded by sql/migrations/)
+│   │   ├── 01-types.sql
+│   │   ├── 02-tables.sql
+│   │   ├── 03-functions.sql
+│   │   ├── 04-indexes.sql
+│   │   ├── 05-triggers.sql
+│   │   └── 06-rls-policies.sql
+│   └── migrations/              # Ordered migration history — apply once in Supabase SQL Editor
+│       ├── add_booking_rate_columns.sql
+│       ├── add_extra_charge_columns.sql
+│       ├── create_booking_documents_table.sql
+│       ├── add_early_checkout_and_discount_columns.sql
+│       ├── add_payment_method_extras.sql
+│       ├── 2026-05-08-multi-room-enum-prep.sql
+│       ├── 2026-05-08-multi-room-foundation.sql
+│       ├── 2026-05-08-multi-room-foundation-rollback.sql
+│       ├── 2026-05-08-multi-room-rpc.sql
+│       ├── 2026-05-08-rpc-add-status-param.sql
+│       └── 2026-06-02-inventory-multi-unit.sql   # Adds pack_label + units_per_pack to inventory_items
 │
-├── public/                      # Static assets
-├── components/                  # (shared UI components, if any)
+├── public/
 ├── next.config.ts
 ├── tsconfig.json
 └── package.json
@@ -116,7 +137,7 @@ hotel-management/
 | nationality | TEXT | optional |
 | notes | TEXT | optional staff notes |
 | vip | BOOLEAN | default false |
-| created_at | TIMESTAMPTZ | default NOW() |
+| created_at | TIMESTAMPTZ | |
 
 ### `bookings`
 | Column | Type | Notes |
@@ -127,7 +148,7 @@ hotel-management/
 | primary_guest_id | UUID FK → guests.id | |
 | check_in_date | DATE | ISO format: "2026-04-22" |
 | check_out_date | DATE | ISO format: "2026-04-25" |
-| nights | INTEGER | **GENERATED column** — DB-computed from `check_in_date` and `check_out_date`; not directly writable |
+| nights | INTEGER | **GENERATED column** — DB-computed; not directly writable |
 | room_category_at_booking | TEXT | lowercase enum — snapshot at booking time |
 | total_guests | INTEGER | |
 | status | TEXT | lowercase enum: confirmed/checked_in/checked_out/cancelled |
@@ -135,27 +156,24 @@ hotel-management/
 | paid_amount | NUMERIC(10,2) | summed from payments table by trigger |
 | payment_status | TEXT | lowercase: unpaid/partial/paid — maintained by trigger |
 | fixed_rate | NUMERIC(10,2) | standard published rate per night (nullable) |
-| booking_rate | NUMERIC(10,2) | actual negotiated rate per night (nullable, may be discounted) |
+| booking_rate | NUMERIC(10,2) | actual negotiated rate per night (nullable) |
 | extra_charge_amount | NUMERIC(10,2) | additional charge at checkout (nullable) |
-| extra_charge_reason | TEXT | e.g. "Mini-bar - 3 soft drinks" (nullable) |
+| extra_charge_reason | TEXT | nullable |
 | override_checkout | BOOLEAN | true if admin bypassed payment gate |
 | override_reason | TEXT | admin's stated reason (nullable) |
 | override_by | UUID | auth.users UUID of admin who overrode (nullable) |
 | override_at | TIMESTAMPTZ | when override was performed (nullable) |
-| confirmed_at | TIMESTAMPTZ | stamped by trigger when status → confirmed |
-| checked_in_at | TIMESTAMPTZ | stamped by trigger when status → checked_in |
-| checked_out_at | TIMESTAMPTZ | stamped by trigger when status → checked_out |
-| cancelled_at | TIMESTAMPTZ | stamped by trigger when status → cancelled |
-| actual_checkout_date | DATE | calendar date guest actually vacated (may be before check_out_date) |
-| early_nights_deducted | INTEGER | max(0, check_out_date − actual_checkout_date) — 0 for on-time/late |
-| early_deduction_amount | NUMERIC(10,2) | early_nights_deducted × booking_rate — credited back to guest |
-| additional_discount_amount | NUMERIC(10,2) | ad-hoc discount applied at checkout (no role restriction) |
-| additional_discount_reason | TEXT | optional plain-text reason for the discount (nullable) |
-| additional_discount_by | UUID | auth.users UUID of who applied the discount (nullable) |
-| additional_discount_at | TIMESTAMPTZ | when the discount was applied (nullable) |
-| last_payment_method | payment_method | nullable — denormalized from most recent payments row; synced by fn_sync_last_payment_method trigger |
-| created_at | TIMESTAMPTZ | default NOW() |
-| updated_at | TIMESTAMPTZ | default NOW() |
+| confirmed_at / checked_in_at / checked_out_at / cancelled_at | TIMESTAMPTZ | stamped by trigger |
+| actual_checkout_date | DATE | calendar date guest actually vacated |
+| early_nights_deducted | INTEGER | max(0, check_out_date − actual_checkout_date) |
+| early_deduction_amount | NUMERIC(10,2) | early_nights_deducted × booking_rate |
+| additional_discount_amount | NUMERIC(10,2) | ad-hoc discount at checkout (nullable) |
+| additional_discount_reason | TEXT | optional reason (nullable) |
+| additional_discount_by | UUID | auth.users UUID who applied discount (nullable) |
+| additional_discount_at | TIMESTAMPTZ | when discount applied (nullable) |
+| last_payment_method | payment_method | nullable — denormalized from most recent payments row |
+| created_at | TIMESTAMPTZ | |
+| updated_at | TIMESTAMPTZ | |
 
 ### `booking_guests`
 | Column | Type | Notes |
@@ -172,10 +190,10 @@ hotel-management/
 | id | UUID PK | |
 | booking_id | UUID FK → bookings.id | |
 | amount | NUMERIC(10,2) | must be > 0 |
-| method | payment_method enum | NOT NULL — which of the 5 user-selectable methods was used |
-| recorded_by | UUID | nullable — auth.users UUID of staff who recorded the payment |
-| notes | TEXT | nullable — optional staff note |
-| created_at | TIMESTAMPTZ | default NOW() |
+| method | payment_method enum | NOT NULL |
+| recorded_by | UUID | nullable — auth.users UUID of staff |
+| notes | TEXT | nullable |
+| created_at | TIMESTAMPTZ | |
 
 DB triggers on INSERT automatically update `bookings.paid_amount`, re-derive `bookings.payment_status`, and sync `bookings.last_payment_method`.
 
@@ -191,7 +209,7 @@ DB triggers on INSERT automatically update `bookings.paid_amount`, re-derive `bo
 | Column | Type | Notes |
 |---|---|---|
 | id | UUID PK | |
-| auth_user_id | UUID FK → auth.users.id | nullable — links to login |
+| auth_user_id | UUID FK → auth.users.id | nullable |
 | full_name | TEXT | |
 | email | TEXT UNIQUE | |
 | role | TEXT | "admin" or "staff" |
@@ -205,80 +223,49 @@ DB triggers on INSERT automatically update `bookings.paid_amount`, re-derive `bo
 | Column | Type | Notes |
 |---|---|---|
 | id | UUID PK | |
-| booking_ref | TEXT NOT NULL | TEXT reference to bookings.booking_ref — loose-coupled, no UUID FK |
+| booking_ref | TEXT NOT NULL | TEXT reference — loose-coupled, no UUID FK |
 | document_type | TEXT | "Passport" / "National ID Card" / "Driving License" / "Wedding Certificate" / "Other" |
 | file_url | TEXT | public URL from Supabase Storage |
-| storage_path | TEXT UNIQUE | object key in guest-documents bucket — used for deletion |
+| storage_path | TEXT UNIQUE | object key in guest-documents bucket |
 | file_name | TEXT | original browser file name |
 | file_type | TEXT | MIME type |
-| note | TEXT | optional staff note |
+| note | TEXT | optional |
 | uploaded_by | UUID FK → auth.users.id | nullable — SET NULL on user delete |
-| created_at | TIMESTAMPTZ | default NOW() |
-
-### Storage Buckets
-| Bucket | Visibility | Used for |
-|---|---|---|
-| guest-documents | Public | Identity document uploads (passport, ID cards, etc.) |
-
-### DB Triggers
-| Trigger | Table | Effect |
-|---|---|---|
-| fn_stamp_booking_timestamps | bookings | Stamps confirmed_at / checked_in_at / checked_out_at / cancelled_at on status change |
-| ~~fn_sync_room_status~~ | ~~bookings~~ | **RETIRED 2026-05-08** — replaced by app-layer RPCs (checkout_booking_room, cancel_booking_room, create_booking_with_rooms). Multi-room support requires per-room room status control; a single booking.status → room mapping no longer works for bookings covering N rooms. |
-| fn_sync_paid_amount | payments | Adds payment.amount to bookings.paid_amount on INSERT |
-| fn_sync_payment_status | bookings | Re-derives payment_status from paid_amount vs total_amount |
-| fn_sync_last_payment_method | payments | On INSERT: copies payments.method to bookings.last_payment_method |
-
-### Enums
-
-#### `payment_method`
-7 values total: `cash`, `card`, `bank_transfer`, `bkash`, `nagad`, `online`, `other`
-
-- **5 user-selectable** (shown in all payment dropdowns): `cash`, `card`, `bank_transfer`, `bkash`, `nagad`
-- **2 legacy / system values**: `online`, `other` — may exist in older payments rows; never shown as options in the UI
-- Defined in `PAYMENT_METHODS` array and `PAYMENT_METHOD_LABELS` map in `lib/mockData.ts`
-- Use `formatPaymentMethod(value)` for safe display of any value including legacy ones
-
-### RLS Policies (general pattern)
-- All tables: `authenticated` role can SELECT, INSERT, UPDATE, DELETE.
-- `profiles`: users can only read/update their own row.
-- `booking_documents`: authenticated can SELECT/INSERT/DELETE.
-- Storage bucket `guest-documents`: authenticated can INSERT and DELETE; public read (bucket is public).
+| created_at | TIMESTAMPTZ | |
 
 ### `booking_rooms`
-Added: 2026-05-08 — multi-room junction table. Each row is one room's stay within a booking.
-| Column | Type | Notes |
-|---|---|---|
-| id | UUID PK | auto-generated |
-| booking_id | UUID FK → bookings.id | ON DELETE CASCADE |
-| room_id | UUID FK → rooms.id | ON DELETE RESTRICT |
-| check_in_date | DATE | NOT NULL |
-| check_out_date | DATE | NOT NULL, must be > check_in_date |
-| nights | SMALLINT | NOT NULL — stored (not generated); set by app/RPC |
-| room_category | room_category enum | NOT NULL — snapshot at booking time |
-| booking_rate | NUMERIC(10,2) | NOT NULL — negotiated rate per night for this room |
-| status | booking_status enum | NOT NULL DEFAULT 'confirmed'; never uses 'checked_out_early' — that is room-level only |
-| actual_checkout_date | DATE | nullable — set by checkout/cancel RPCs |
-| early_nights_deducted | INTEGER | NOT NULL DEFAULT 0 |
-| early_deduction_amount | NUMERIC(10,2) | NOT NULL DEFAULT 0 |
-| confirmed_at / checked_in_at / checked_out_at / cancelled_at | TIMESTAMPTZ | nullable lifecycle timestamps |
-| created_at / updated_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() |
-| UNIQUE (booking_id, room_id) | — | one row per room per booking |
-
-### `booking_extra_charges`
-Added: 2026-05-08 — per-booking (optionally per-room) extra charge line items.
+Added: 2026-05-08 — multi-room junction table.
 | Column | Type | Notes |
 |---|---|---|
 | id | UUID PK | |
 | booking_id | UUID FK → bookings.id | ON DELETE CASCADE |
-| booking_room_id | UUID FK → booking_rooms.id | nullable — links to specific room if charge is per-room |
+| room_id | UUID FK → rooms.id | ON DELETE RESTRICT |
+| check_in_date / check_out_date | DATE | NOT NULL |
+| nights | SMALLINT | NOT NULL — stored (not generated) |
+| room_category | room_category enum | NOT NULL — snapshot at booking time |
+| booking_rate | NUMERIC(10,2) | NOT NULL — negotiated rate per night |
+| status | booking_status enum | NOT NULL DEFAULT 'confirmed' |
+| actual_checkout_date | DATE | nullable |
+| early_nights_deducted | INTEGER | NOT NULL DEFAULT 0 |
+| early_deduction_amount | NUMERIC(10,2) | NOT NULL DEFAULT 0 |
+| confirmed_at / checked_in_at / checked_out_at / cancelled_at | TIMESTAMPTZ | nullable |
+| created_at / updated_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() |
+| UNIQUE (booking_id, room_id) | — | one row per room per booking |
+
+### `booking_extra_charges`
+Added: 2026-05-08
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | |
+| booking_id | UUID FK → bookings.id | ON DELETE CASCADE |
+| booking_room_id | UUID FK → booking_rooms.id | nullable — per-room charge |
 | amount | NUMERIC(10,2) | NOT NULL, > 0 |
 | reason | TEXT | NOT NULL |
-| recorded_by | UUID | nullable — auth.users UUID |
+| recorded_by | UUID | nullable |
 | created_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() |
 
 ### `refunds`
-Added: 2026-05-08 — refund requests raised on booking cancellation or early checkout.
+Added: 2026-05-08
 | Column | Type | Notes |
 |---|---|---|
 | id | UUID PK | |
@@ -286,26 +273,152 @@ Added: 2026-05-08 — refund requests raised on booking cancellation or early ch
 | amount | NUMERIC(10,2) | NOT NULL, > 0 |
 | reason | TEXT | NOT NULL |
 | status | TEXT | 'pending' or 'disbursed' DEFAULT 'pending' |
-| method | payment_method enum | nullable — method used for disbursement |
-| disbursed_by | UUID | nullable — auth.users UUID of admin who disbursed |
+| method | payment_method enum | nullable |
+| disbursed_by | UUID | nullable |
 | disbursed_at | TIMESTAMPTZ | nullable |
 | notes | TEXT | nullable |
-| created_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() |
-| updated_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() |
+| created_at / updated_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() |
+
+### `accounts`
+Financial account buckets (cash, bank, etc.)
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | |
+| name | TEXT | e.g. "Cash", "Bank" |
+| type | TEXT | e.g. "cash", "bank" |
+| created_at | TIMESTAMPTZ | |
+
+Account UUIDs are hardcoded in `ACCOUNT_IDS` constant (used by service + client files):
+```typescript
+export const ACCOUNT_IDS = {
+  cash: "...",   // UUID of the Cash account
+  bank: "...",   // UUID of the Bank account
+  // ... other buckets
+};
+```
+
+### `account_transactions`
+All financial movements — revenue, expenses, transfers, injections, loans.
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | |
+| type | account_txn_type enum | See AccountTxnType below |
+| from_account_id | UUID FK → accounts.id | nullable — source account |
+| to_account_id | UUID FK → accounts.id | nullable — destination account |
+| amount | NUMERIC(12,2) | NOT NULL, > 0 |
+| txn_date | DATE | NOT NULL |
+| note | TEXT | optional |
+| loan_id | UUID FK → loans.id | nullable — links repayment txns to their loan |
+| deleted_at | TIMESTAMPTZ | nullable — soft-delete pattern |
+| created_at | TIMESTAMPTZ | |
+
+#### `AccountTxnType` enum (6 values)
+| Value | `from` | `to` | Meaning |
+|---|---|---|---|
+| `revenue_in` | NULL | NOT NULL | Revenue received into an account |
+| `expense_out` | NOT NULL | NULL | Expense paid from an account |
+| `transfer` | NOT NULL | NOT NULL | Move funds between accounts |
+| `injection` | NULL | NOT NULL | Capital injection (owner puts money in) |
+| `loan_received` | NULL | NOT NULL | Loan cash received into account |
+| `loan_repayment` | NOT NULL | NULL | Loan repaid from account |
+
+### `loans`
+Principal-only loans. Status (outstanding/repaid) is **derived client-side** from repayment transactions — not stored.
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | |
+| lender_name | TEXT | NOT NULL |
+| principal | NUMERIC(12,2) | NOT NULL — original loan amount |
+| received_date | DATE | NOT NULL |
+| due_date | DATE | nullable |
+| note | TEXT | optional |
+| deleted_at | TIMESTAMPTZ | nullable — soft delete |
+| created_at | TIMESTAMPTZ | |
+
+RLS: `current_user_role() = 'admin'` — loans table is admin-only.
+
+Repayments are tracked via `account_transactions` rows with `type = 'loan_repayment'` and `loan_id` FK pointing to this table.
+
+**Status derivation** (done in `listLoans()`):
+```typescript
+repaid      = SUM(repayment txns for this loan_id)
+outstanding = MAX(0, principal − repaid)
+status      = repaid >= principal ? "repaid" : "outstanding"
+```
+
+**Atomicity note**: `createLoan` does two sequential Supabase writes (INSERT loans → INSERT account_transaction). No true DB transaction is available via the client SDK. A compensating DELETE on the loans row is issued if the account_transaction INSERT fails.
+
+### `inventory_items`
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | |
+| name | TEXT | NOT NULL |
+| unit | TEXT | base unit label (e.g. "piece", "kg", "litre") |
+| low_stock_threshold | NUMERIC(12,2) | nullable — alert threshold in base units |
+| pack_label | TEXT | nullable — display label for a pack (e.g. "box", "carton") |
+| units_per_pack | NUMERIC(12,2) | nullable — how many base units per pack; must be > 0 if set |
+| deleted_at | TIMESTAMPTZ | nullable — soft delete |
+| created_at / updated_at | TIMESTAMPTZ | |
+
+`pack_label` + `units_per_pack` are for items bought in packs (e.g. a box of 24 pieces).
+Stock is **always stored in base units**. The pack→base conversion happens client-side before any write.
+
+### `inventory_movements`
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | |
+| item_id | UUID FK → inventory_items.id | |
+| quantity | NUMERIC(12,2) | positive = stock in, negative = stock out |
+| movement_type | TEXT | e.g. "purchase", "consumption", "adjustment" |
+| reference | TEXT | optional — e.g. expense ID or note |
+| unit_price | NUMERIC(12,2) | nullable — price per base unit at time of purchase |
+| created_at | TIMESTAMPTZ | |
+
+### Storage Buckets
+| Bucket | Visibility | Used for |
+|---|---|---|
+| guest-documents | Public | Identity document uploads |
+
+### DB Triggers
+| Trigger | Table | Effect |
+|---|---|---|
+| fn_stamp_booking_timestamps | bookings | Stamps confirmed_at / checked_in_at / checked_out_at / cancelled_at on status change |
+| ~~fn_sync_room_status~~ | ~~bookings~~ | **RETIRED 2026-05-08** — replaced by app-layer RPCs |
+| fn_sync_paid_amount | payments | Adds payment.amount to bookings.paid_amount on INSERT |
+| fn_sync_payment_status | bookings | Re-derives payment_status from paid_amount vs total_amount |
+| fn_sync_last_payment_method | payments | On INSERT: copies payments.method to bookings.last_payment_method |
+
+### Enums
+
+#### `payment_method`
+7 values: `cash`, `card`, `bank_transfer`, `bkash`, `nagad`, `online`, `other`
+- **5 user-selectable**: `cash`, `card`, `bank_transfer`, `bkash`, `nagad`
+- **2 legacy / system**: `online`, `other` — may exist in older rows; never shown in UI
+- Use `formatPaymentMethod(value)` for safe display of any value including legacy ones
+
+### RLS Policies (general pattern)
+- All tables: `authenticated` role can SELECT, INSERT, UPDATE, DELETE.
+- `profiles`: users can only read/update their own row.
+- `loans`: admin only (`current_user_role() = 'admin'`).
+- `booking_documents`: authenticated can SELECT/INSERT/DELETE.
+- Storage bucket `guest-documents`: authenticated can INSERT and DELETE; public read.
 
 ### Key Relationships
 ```
 auth.users ──1:1──> profiles (id = auth.users.id)
 auth.users ──1:1──> employees (auth_user_id)
-bookings   ──N:1──> rooms  (room_id)            [legacy compat — see booking_rooms]
+bookings   ──N:1──> rooms  (room_id)
 bookings   ──N:1──> guests (primary_guest_id)
 bookings   ──1:N──> booking_guests (booking_id)
 bookings   ──1:N──> payments (booking_id)
-bookings   ──1:N──> booking_rooms (booking_id)  [multi-room junction — added 2026-05-08]
+bookings   ──1:N──> booking_rooms (booking_id)
 bookings   ──1:N──> booking_extra_charges (booking_id)
 bookings   ──1:N──> refunds (booking_id)
-booking_rooms ──1:N──> booking_extra_charges (booking_room_id)  [nullable — per-room charges]
+booking_rooms ──1:N──> booking_extra_charges (booking_room_id)
 booking_documents links to bookings via TEXT booking_ref (loose coupling — no FK)
+accounts   ──1:N──> account_transactions (from_account_id / to_account_id)
+loans      ──1:N──> account_transactions (loan_id) [repayment txns]
+inventory_items ──1:N──> inventory_movements (item_id)
 ```
 
 ---
@@ -325,11 +438,18 @@ booking_documents links to bookings via TEXT booking_ref (loose coupling — no 
 | Discount / rate logic | ✅ Complete | `fixedRate` / `bookingRate` fields on bookings |
 | Admin override checkout | ✅ Complete | `HotelContext.checkoutWithOverride()` |
 | Stay Timing Step 1 (display) | ✅ Complete | `BookingsClient.tsx`, `FrontDeskClient.tsx` |
-| Stay Timing Step 2 (billing) | ✅ Complete | `BookingsClient.tsx`, `FrontDeskClient.tsx`, `HotelContext.tsx`, `bookingsService.ts` |
-| Payment Method Tracking | ✅ Complete | `lib/mockData.ts`, `services/bookingsService.ts`, `HotelContext.tsx`, `BookingsClient.tsx`, `FrontDeskClient.tsx` |
-| Booking Edit (Feature B) | ✅ Complete | `app/bookings/BookingsClient.tsx`, `contexts/HotelContext.tsx`, `services/bookingsService.ts` |
+| Stay Timing Step 2 (billing) | ✅ Complete | early deduction + additional discount at checkout |
+| Payment Method Tracking | ✅ Complete | `lib/mockData.ts`, `services/bookingsService.ts` |
+| Booking Edit (Feature B) | ✅ Complete | `app/bookings/BookingsClient.tsx`, `contexts/HotelContext.tsx` |
 | Dynamic Room Board (Block 2) | ✅ Complete | `components/RoomBoard.tsx`, `contexts/HotelContext.tsx` |
-| Invoice + Reservation Details (Block 3) | ✅ Complete | `app/bookings/[id]/invoice/page.tsx`, `app/bookings/[id]/reservation/page.tsx`, `components/invoice/`, `lib/invoiceUtils.ts` |
+| Invoice + Reservation Details (Block 3) | ✅ Complete | `app/bookings/[id]/invoice/page.tsx`, `app/bookings/[id]/reservation/page.tsx` |
+| Cashbook (financial ledger) | ✅ Complete | `app/accounts/cashbook/CashbookClient.tsx`, `services/accountsService.ts` |
+| Expense recording | ✅ Complete | `app/accounts/expense/ExpenseClient.tsx` |
+| Revenue management | ✅ Complete | `app/accounts/revenue/` |
+| Payroll | ✅ Complete | `app/accounts/payroll/` |
+| Inventory (CRUD + movements) | ✅ Complete | `app/inventory/InventoryClient.tsx`, `services/inventoryService.ts` |
+| Inventory multi-unit pack support | ✅ Complete | pack_label/units_per_pack, pack↔base toggle in both purchase entry points |
+| Loans register + entry (Stage 6) | ✅ Complete | `app/accounts/loans/`, `services/loansService.ts`, `LoanEntryActions.tsx` |
 
 ---
 
@@ -345,23 +465,6 @@ export const HOTEL_POLICY = {
   graceMinutes:   30,   // grace period after scheduled checkout
 } as const;
 ```
-- **Scheduled check-in**: 12:00 PM on check-in date
-- **Scheduled checkout**: 11:59 AM on check-out date
-- **Grace period**: 30 minutes after scheduled checkout (until 12:29 PM)
-- **Timing classifications**:
-  - `early` — actual checkout before 11:59 AM
-  - `on_time` — between 11:59 AM and 12:29 PM (within grace)
-  - `late` — after 12:29 PM (past grace period)
-- **Step 1** ✅: Display only — shows timing classification in checkout modal; no billing effect
-- **Step 2** ✅: Early checkout deduction + additional discount at checkout (see rules below)
-
-### Booking Workflow
-```
-Confirmed → Checked In → Checked Out
-         ↓
-      Cancelled   (from Confirmed only)
-```
-- Room status is set by app-layer RPCs and HotelContext: Confirmed→Reserved, Checked In→Occupied, Checked Out→Cleaning, Cancelled→Available (the DB trigger `fn_sync_room_status` that previously handled this was retired 2026-05-08)
 
 ### Checkout Gate Formula
 ```
@@ -371,70 +474,27 @@ finalPayable = (totalAmount + extraChargeAmount)
              - amountPaid
 
 if finalPayable > 0:
-  → staff sees "Add Payment" button (cannot checkout)
+  → staff sees "Add Payment" button
   → admin sees "Override Checkout" button
 else:
   → all roles see normal "Checkout" button
 ```
 
 ### Early Checkout Deduction (Stay Timing Step 2)
-- `earlyNightsDeducted = max(0, plannedCheckoutDate − actualCheckoutDate)` — calendar days only
-- `earlyDeductionAmount = earlyNightsDeducted × bookingRate`  (rate fallback: `totalAmount / nights`)
-- Computed by `calcEarlyDeduction()` in both `BookingsClient.tsx` and `FrontDeskClient.tsx`
-- Auto-calculated and read-only — shown as a deduction line in the billing summary (emerald colour)
-- Written to DB at checkout: `actual_checkout_date`, `early_nights_deducted`, `early_deduction_amount`
+- `earlyNightsDeducted = max(0, plannedCheckoutDate − actualCheckoutDate)` — calendar days
+- `earlyDeductionAmount = earlyNightsDeducted × bookingRate`
+- Computed by `calcEarlyDeduction()` in `BookingsClient.tsx` and `FrontDeskClient.tsx`
+- Written at checkout: `actual_checkout_date`, `early_nights_deducted`, `early_deduction_amount`
 
-### Additional Discount at Checkout (Stay Timing Step 2)
-- Optional ad-hoc discount entered by staff or admin in the "More Discount" section of the checkout modal
-- No role restriction — any authenticated user can apply it
-- Validated: `amt ≤ (totalAmount + extraChargeAmount − earlyDeductionAmount − amountPaid)` — cannot create phantom refund
-- Has an optional free-text reason (stored in `additional_discount_reason`)
-- `additional_discount_by` is derived from `user?.id` in HotelContext — not passed from the UI
-- Written to DB at checkout: `additional_discount_amount`, `additional_discount_reason`, `additional_discount_by`, `additional_discount_at`
+### Additional Discount at Checkout
+- Optional ad-hoc discount entered in the "More Discount" section; no role restriction
+- Validated: `amt ≤ (totalAmount + extraChargeAmount − earlyDeductionAmount − amountPaid)`
+- Written at checkout: `additional_discount_amount`, `additional_discount_reason`, `additional_discount_by`, `additional_discount_at`
 
 ### Payment Methods
-- Every payment (booking creation + standalone + checkout) requires a `PaymentMethod` value
-- **5 user-selectable methods**: `cash`, `card`, `bank_transfer`, `bkash`, `nagad`
-- UI state defaults to `"cash"` — never an empty placeholder — so a method is always captured
-- Selector resets to `"cash"` on modal close / form cancel (6 explicit reset sites in `BookingsClient.tsx`, 4 in `FrontDeskClient.tsx`)
-- `PAYMENT_METHODS` — `readonly` tuple of the 5 selectable values; use to render `<option>` elements
-- `PAYMENT_METHOD_LABELS` — `Record<PaymentMethod, string>` display map; use **only** for `<option>` labels and user-facing select rendering
-- `formatPaymentMethod(value)` — safe display formatter for **any** `method` value including legacy `"online"` / `"other"`; returns `"—"` for null/undefined; **always use this** when reading `lastPaymentMethod` from a booking, never `PAYMENT_METHOD_LABELS` directly
-- `last_payment_method` on bookings — denormalized column updated by trigger on payments INSERT; avoids N+1 queries for the dues monitor; also set optimistically in context on every payment action
-
-### Three-Layer Payment Enforcement
-1. **Layer A (UI)** — "Add Payment" button is hidden if `booking.status !== "Checked In"` and role is not admin
-2. **Layer B (handler)** — `handleAddPayment()` re-checks before calling context
-3. **Layer C (context)** — `recordPayment()` hard-blocks with `return` if status check fails
-
-### Three-Layer Double-Booking Prevention
-1. **Layer A (UI)** — `useMemo` computes overlap on every keystroke, shows warning banner
-2. **Layer B (handler)** — `handleSubmit()` re-checks before calling `createBooking()`
-3. **Layer C (service)** — `bookingsService.createBooking()` queries DB for overlaps before INSERT
-
-### Role Permissions
-| Action | staff | admin |
-|---|---|---|
-| View all pages | ✅ | ✅ |
-| Create booking | ✅ | ✅ |
-| Check in / Cancel | ✅ | ✅ |
-| Add payment during stay | ✅ | ✅ |
-| Add payment before check-in | ❌ | ✅ |
-| Normal checkout (paid) | ✅ | ✅ |
-| Override checkout (unpaid) | ❌ | ✅ |
-| Manage employees | ❌ | ✅ |
-| Provision new user accounts | ❌ | ✅ |
-
-### Booking Discount Logic (set at booking creation time)
-- `fixedRate` = standard published room rate per night
-- `bookingRate` = actual negotiated rate per night (set at booking time)
-- When `bookingRate < fixedRate` → a discount was applied at booking
-- `totalAmount = bookingRate × nights`
-
-### Checkout Discount Logic (set at checkout time)
-- `earlyDeductionAmount` — auto-deducted for early checkout (see Early Checkout Deduction above)
-- `additionalDiscountAmount` — ad-hoc "More Discount" entered in checkout modal (see Additional Discount above)
-- Currency: all amounts are BDT (৳), displayed as `` `৳${amount.toLocaleString()}` `` — no helper function
+- **5 user-selectable**: `cash`, `card`, `bank_transfer`, `bkash`, `nagad`
+- UI state defaults to `"cash"` — never empty — so a method is always captured
+- `formatPaymentMethod(value)` — safe display formatter for **any** value including legacy
 
 ### `calcTrueDue()` — Canonical Due-Amount Formula
 ```typescript
@@ -452,11 +512,75 @@ function calcTrueDue(b: {
     - b.amountPaid;
 }
 ```
-**⚠️ CRITICAL GOTCHA:** Every payment cap, due-amount display, and dues-filter MUST use `calcTrueDue()`.
-Never use the naive `totalAmount − amountPaid` — it ignores extra charges, early-checkout deductions,
-and additional discounts, causing phantom dues and wrong payment caps.
-- Defined as a module-level pure function in both `BookingsClient.tsx` and `FrontDeskClient.tsx`
-- Used by: `handlePaySubmit` (payment cap), standalone pay modal (max attr + preview), all panel `due` vars, `dueBookings` filter, `totalOutstanding` reducer, booking-detail drawer payment summary
+**⚠️ CRITICAL:** Never use the naive `totalAmount − amountPaid`.
+
+### Financial Accounting Rules
+
+#### Account Transaction Types (`AccountTxnType`)
+| Type | `from` | `to` | Usage |
+|---|---|---|---|
+| `revenue_in` | NULL | account | Revenue received |
+| `expense_out` | account | NULL | Expense paid |
+| `transfer` | account | account | Move between accounts |
+| `injection` | NULL | account | Owner capital injection |
+| `loan_received` | NULL | account | Loan cash received |
+| `loan_repayment` | account | NULL | Loan repaid |
+
+#### Loan Status (derived, never stored)
+```
+repaid      = SUM of all loan_repayment txns with this loan_id
+outstanding = MAX(0, principal − repaid)
+status      = "repaid" if repaid >= principal, else "outstanding"
+```
+
+#### Inventory Purchase Seam (expense → inventory)
+When recording an expense of type "inventory purchase":
+- An `inventory_movement` is created alongside the `account_transaction`
+- Stock is **always in base units**; if item has `units_per_pack`, conversion is:
+  ```typescript
+  baseQty = exInvUnit === "pack" && upp != null ? packQty * upp : packQty
+  ```
+- Unit price fallback: `amount / baseQty` (price per base unit)
+- Both `InventoryClient` (Add Stock) and `ExpenseClient` (expense purchase) use this same pattern
+
+#### Pack / Base Unit Toggle
+Items that are purchased in packs (e.g. a box of 24 pieces) have:
+- `pack_label` — display name for the pack (e.g. "box")
+- `units_per_pack` — numeric conversion factor
+
+When entering stock or an expense purchase for such an item, a `<select>` toggle switches between:
+- **Pack mode** (default): user enters number of packs; hint shows `= N units`
+- **Base mode**: user enters base units directly
+
+State variable: `stockUnit` (InventoryClient) / `exInvUnit` (ExpenseClient), both `"pack" | "base"`, default `"pack"`, reset on modal close.
+
+Dynamic labels:
+- Quantity label: `Quantity (in box)` or `Quantity (in piece)` when pack configured
+- Unit price label: `Price per box (৳)` or `Price per piece (৳)` when pack configured
+
+### Three-Layer Payment Enforcement
+1. **Layer A (UI)** — "Add Payment" button hidden when conditions not met
+2. **Layer B (handler)** — `handleAddPayment()` re-checks before calling context
+3. **Layer C (context)** — `recordPayment()` hard-blocks if status check fails
+
+### Three-Layer Double-Booking Prevention
+1. **Layer A (UI)** — `useMemo` computes overlap on every keystroke
+2. **Layer B (handler)** — `handleSubmit()` re-checks before `createBooking()`
+3. **Layer C (service)** — `bookingsService.createBooking()` queries DB for overlaps
+
+### Role Permissions
+| Action | staff | admin |
+|---|---|---|
+| View all pages | ✅ | ✅ |
+| Create booking | ✅ | ✅ |
+| Check in / Cancel | ✅ | ✅ |
+| Add payment during stay | ✅ | ✅ |
+| Add payment before check-in | ❌ | ✅ |
+| Normal checkout (paid) | ✅ | ✅ |
+| Override checkout (unpaid) | ❌ | ✅ |
+| Manage employees | ❌ | ✅ |
+| Provision new user accounts | ❌ | ✅ |
+| View/manage loans | ❌ | ✅ |
 
 ### Guest Find-or-Create
 When creating a booking, the service looks up guests by phone number:
@@ -464,11 +588,7 @@ When creating a booking, the service looks up guests by phone number:
 2. If not found → create minimal profile (name + phone + placeholder email `{phone_digits}.noemail@hotel.local`)
 
 ### Employee Provisioning (server-only)
-`POST /api/employees/provision` uses the Supabase admin client (service-role key) to:
-1. Create an `auth.users` record
-2. Create an `employees` record
-3. Create a `profiles` record
-All three are done atomically with rollback on failure. This route must never run client-side.
+`POST /api/employees/provision` uses the Supabase admin client to atomically create auth.users + employees + profiles with rollback on failure.
 
 ---
 
@@ -481,10 +601,10 @@ All three are done atomically with rollback on failure. This route must never ru
 - All files: camelCase for variables, PascalCase for components/types
 
 ### TypeScript Patterns
-- All entity types defined in `lib/mockData.ts` (re-exported from `HotelContext.tsx` for convenience)
-- Services define a `*Row` type (DB shape) + `map*()` function (DB→frontend) + `to*Payload()` function (frontend→DB)
-- Enum fields: DB stores lowercase (`confirmed`), frontend uses Title Case (`"Confirmed"`) — mapped via `DB_TO_*` and `*_TO_DB` record constants
-- **`PaymentMethod`** type: `"cash" | "card" | "bank_transfer" | "bkash" | "nagad"` — the 5 user-selectable values. Defined in `lib/mockData.ts`. Use `formatPaymentMethod()` (not a cast) when displaying `lastPaymentMethod` from a booking, since the DB may contain legacy values (`"online"`, `"other"`) not in this union.
+- Services define a `*Row` type (DB shape) + `map*()` function (DB→frontend) + optional `to*Payload()` (frontend→DB)
+- Enum fields: DB stores lowercase; frontend may use typed string unions
+- For Supabase embedded relations (`.select("..., loans(lender_name)")`), the result is **always an array** (`{ lender_name: string }[]`), not a singular object — use `row.loans?.[0]?.lender_name ?? null` in mappers
+- **`PaymentMethod`** type: `"cash" | "card" | "bank_transfer" | "bkash" | "nagad"` — use `formatPaymentMethod()` for display
 
 ### DB ↔ Frontend Field Mapping
 | DB column | Frontend field |
@@ -492,30 +612,31 @@ All three are done atomically with rollback on failure. This route must never ru
 | booking_ref | id |
 | room_number | roomNumber |
 | price_per_night | price |
-| floor (integer) | floor ("Floor 1" string) |
-| check_in_date | checkIn (display: "Apr 22, 2026") |
+| check_in_date | checkIn |
 | paid_amount | amountPaid |
 | total_guests | totalGuests |
+| pack_label | packLabel |
+| units_per_pack | unitsPerPack |
+| lender_name | lenderName |
 
 ### Date Handling
 - DB stores ISO dates: `"2026-04-22"`
 - UI displays: `"Apr 22, 2026"`
-- Always append `T12:00:00` when parsing ISO dates: `new Date("2026-04-22T12:00:00")` — avoids UTC midnight timezone rollback in negative-offset timezones
+- Always append `T12:00:00` when parsing ISO dates — avoids UTC midnight timezone rollback
 
 ### Error Handling Pattern
-Every service function logs every field of a `PostgrestError` individually (`.message`, `.details`, `.hint`, `.code`) because the browser console collapses objects to `"{}"` if just passed to `console.error()`. Always throw a proper `Error` (not the raw PostgrestError object).
+Every service function logs every field of a `PostgrestError` individually (`.message`, `.details`, `.hint`, `.code`) because browser console collapses objects to `"{}"`. Always throw a proper `Error`, not the raw PostgrestError.
 
 ### Optimistic Update Pattern (HotelContext)
 ```
 1. Capture current state for rollback
 2. Apply optimistic update to React state immediately
-3. Call service function async in the background
+3. Call service function async in background
 4. On .catch(): roll back state + log error
 ```
 
 ### HMR Singleton (Supabase client)
 ```typescript
-// lib/supabase.ts — client is pinned to globalThis to survive webpack HMR
 const g = globalThis as typeof globalThis & { _supabase?: SupabaseClient };
 if (!g._supabase) g._supabase = createBrowserClient(...);
 export const supabase = g._supabase;
@@ -523,42 +644,26 @@ export const supabase = g._supabase;
 
 ### Component State Patterns
 - Modal open/close: separate `null | EntityType` state (null = closed, entity = open + pre-filled)
-- Checkout timing: `checkoutOpenedAt` is set to `new Date()` when the modal opens — never computed at render time
+- `checkoutOpenedAt` set when modal opens — never at render time
 - Form validation: inline error strings in state, cleared on input change
+- Unit toggle: `"pack" | "base"` state, default `"pack"`, reset to `"pack"` on modal close
 
 ### Number Input Styling
-Use `tabular-nums` class on all currency/number display elements for aligned decimal columns.
+Use `tabular-nums` class on all currency/number display elements.
 
 ### Modal z-index Hierarchy
-Fixed-position modals must use the correct z-index tier so stacking order is predictable:
-
 | Tier | Class | Used for |
 |---|---|---|
 | z-40 | `z-40` | Toasts, dropdowns, floating panels |
-| z-50 | `z-50` | Primary modals (Edit Booking, Timeline, Create Booking, etc.) |
-| z-60 | `z-[60]` | Confirmation dialogs that overlay a primary modal |
-| z-70 | `z-[70]` | Critical alerts (reserved for future use) |
-
-**Rule:** Any dialog that must appear *on top of* a primary modal must use `z-[60]` or higher.
-Stacking context is DOM-order within the same z-index — if two elements share `z-50`, the one
-rendered **later in the JSX** wins and paints on top. This was the root cause of the risky-edit
-confirmation modal being invisible (it rendered before the Edit Booking modal and was painted over).
+| z-50 | `z-50` | Primary modals |
+| z-60 | `z-[60]` | Confirmation dialogs over a primary modal |
+| z-70 | `z-[70]` | Critical alerts (reserved) |
 
 ### Standalone Document Routes
-Pages that must print cleanly (invoice, reservation details) are excluded from the
-Sidebar + TopBar shell via `isStandaloneDocument` in `AppShell.tsx`:
-
+Pages that must print cleanly are excluded from Sidebar + TopBar via `isStandaloneDocument` in `AppShell.tsx`:
 ```
 /^\/bookings\/[^/]+\/(invoice|reservation)$/
 ```
-
-These routes are: authenticated (routing guard still applies), HotelProvider-free (server
-components fetch their own data directly), wrapped in `<div className="w-full min-h-full">`
-to prevent flex-shrink under `<body className="h-full flex">`.
-
-To add a new printable route: extend the regex, create a server component page with
-`export const dynamic = "force-dynamic"`, inject `<style>{\`@page { margin: 12mm; }\`}</style>`,
-and use `<PrintButtons />` + `<LetterHead />` from `components/invoice/`.
 
 ---
 
@@ -572,117 +677,60 @@ and use `<PrintButtons />` + `<LetterHead />` from `components/invoice/`.
 ### Never Redesign UI Unnecessarily
 - Improve logic at the logic level, not by restructuring the component tree
 - Keep the existing color scheme, spacing, and card layout patterns
-- New UI sections must match the existing visual style (same border radius, padding, typography scale)
 
 ### Admin Client Is Server-Only
-- `lib/supabaseAdmin.ts` uses the service-role key — NEVER import it in client components or contexts
+- `lib/supabaseAdmin.ts` uses the service-role key — NEVER import it in client components
 - Only use it in `app/api/` route handlers
 
-### Supabase FK vs Text Reference
-- `booking_documents.booking_ref` is TEXT, not a UUID FK — this is intentional for loose coupling
-- Guests are found by phone number, not by UUID, during booking creation
+### Supabase Embedded Relation Is Always an Array
+- `.select("..., loans(lender_name)")` returns `loans: { lender_name: string }[] | null`
+- Always use `row.loans?.[0]?.fieldName ?? null` in mappers — never treat as singular object
 
-### ROOM_CATALOG Still From mockData
-- `ROOM_CATALOG` is still exported from `lib/mockData.ts` and used by the booking form for price hints
-- When Supabase rooms data is stable, replace with a derived map from live `rooms` state
+### Inventory Stock Is Always in Base Units
+- Pack quantities are converted to base units **client-side** before any service write
+- `toBaseQty` pattern: `upp != null && unit === "pack" ? packQty * upp : packQty`
+- Never store pack quantities in `inventory_movements.quantity`
 
 ### Resolved Issues
-- **[Resolved Day 2 Block 3] `recordPayment()` cap now uses true-due formula**: Mirrors `calcTrueDue()`. Previous naive formula (`total_amount − paid_amount`) silently dropped payments when `extra_charge_amount` existed, causing React optimistic state to permanently diverge from DB `paid_amount`. Fix: service now SELECTs all adjustment columns and computes `trueDue = total + extraCharge − earlyDeduction − additionalDiscount − paid`. Throws on positive-amount request with no balance so HotelContext `.catch()` rolls back the optimistic update.
+- **[Resolved Day 2 Block 3] `recordPayment()` cap now uses true-due formula**: Mirrors `calcTrueDue()`. Previous naive formula (`total_amount − paid_amount`) silently dropped payments when `extra_charge_amount` existed.
 
 ### Known Issues / Technical Debt
 
-### Synthetic optimistic IDs in checkout guards
-
+#### Synthetic optimistic IDs in checkout guards
 Location: `contexts/HotelContext.tsx` — `checkoutNormal` / `checkoutWithOverride`
 
-When `createBooking` is called, `BookingRoom` entries in the optimistic booking carry IDs of the form `"optimistic-BK-XXXX-room-i"` and `roomId: ""`. The checkout guard correctly bails when `bookingRoomId` is empty string (`roomId === ""`), so accidental checkout of an unresolved optimistic booking is already blocked.
+Optimistic `BookingRoom` entries carry IDs of the form `"optimistic-BK-XXXX-room-i"` and `roomId: ""`. The checkout guard correctly bails when `bookingRoomId` is empty string. However, the guard doesn't produce a friendly "booking is still being saved, please wait" message.
 
-However, the guard does not explicitly detect the `"optimistic-..."` ID pattern and would produce a generic error message rather than a friendly "booking is still being saved, please wait" prompt. The race window between optimistic display and `.then()` reconciliation is sub-second under normal network conditions, making this a low-priority UX polish item rather than a correctness issue.
+**Future improvement**: `isOptimisticBookingRoom(room: BookingRoom): boolean` predicate.
 
-**Future improvement**: Add an `isOptimisticBookingRoom(room: BookingRoom): boolean` predicate (`room.id.startsWith("optimistic-")`) and surface a friendlier toast in checkout guards.
+#### Known Bug — fn_sync_payment_status doesn't account for extras
+Location: `sql/schema/05-triggers.sql`
 
-### Known Bug — fn_sync_payment_status doesn't account for extras
-
-Location: Database trigger `fn_sync_payment_status` (authoritative body in `sql/schema/05-triggers.sql`)
-
-Problem: Trigger compares `paid_amount >= total_amount` to mark a booking as "paid". Does NOT include `extra_charge_amount`, `early_deduction_amount`, or `additional_discount_amount`.
-
-Same pattern as the `recordPayment` cap bug fixed in Block 3 (Day 2). The trigger sets `payment_status = 'paid'` when `paid_amount = total_amount`, but actual balance can still be outstanding when extra charges > deductions + discounts.
-
-Effect: `bookings.payment_status` field can be wrong, causing the Bookings list to display a "Paid" badge incorrectly. The invoice page shows the correct balance (it computes from payments via `calcTrueDue`), so guests see truth. But staff see a misleading "Paid" status in the list.
-
-Fix needed: Update trigger to use trueDue formula:
-```
+Trigger compares `paid_amount >= total_amount` but does NOT include `extra_charge_amount`, `early_deduction_amount`, or `additional_discount_amount`. Fix:
+```sql
 paid_amount >= (total_amount
                 + COALESCE(extra_charge_amount, 0)
                 - COALESCE(early_deduction_amount, 0)
                 - COALESCE(additional_discount_amount, 0))
 ```
+Priority: Medium.
 
-Priority: Medium. Does not block multi-room work but should be fixed soon. Affects any single-room booking with extra charges (e.g. extra bed feature). Also update `sql/schema/05-triggers.sql` when fixed in DB.
+#### Known Bug — fn_sync_paid_amount doesn't handle UPDATE/DELETE
+Location: `sql/schema/05-triggers.sql`
 
-### Known Bug — fn_sync_paid_amount doesn't handle UPDATE/DELETE
+Fires only on INSERT. Direct DB edits of `payments` table will break `bookings.paid_amount`. Currently safe because app code never UPDATEs/DELETEs payment rows.
 
-Location: Database trigger `fn_sync_paid_amount` (authoritative body in `sql/schema/05-triggers.sql`)
+#### `createLoan` atomicity gap
+Two sequential Supabase writes (INSERT loans → INSERT account_transaction). Compensating DELETE on loans row if txn insert fails. Same gap exists for `createBooking` (booking + payment) and expense + inventory purchase movement writes. True fix requires a Postgres RPC wrapping writes in a transaction.
 
-Problem: Trigger fires only on `INSERT` (incremental `+= NEW.amount` pattern). If a payment row is `UPDATE`d (e.g., admin corrects a typo) or `DELETE`d (e.g., admin removes an erroneous entry), `bookings.paid_amount` silently drifts and never re-syncs.
+#### Stale "Confirmed" booking handling (planned)
+When today > `check_in_date` and status is still `"Confirmed"`. Planned: add `no_show` status enum, `isStaleConfirmed()` helper, stale banner in edit modal, "Mark as No-Show" action.
 
-Effect:
-- **Currently safe**: app code never UPDATEs or DELETEs payment rows — only INSERTs new ones via `recordPayment()`.
-- **Risk**: any direct DB edit of the `payments` table (e.g., via Supabase Dashboard table editor) will break `bookings.paid_amount` with no error.
-- **Recovery**: requires a manual `UPDATE bookings SET paid_amount = (SELECT COALESCE(SUM(amount),0) FROM payments WHERE booking_id = ...)` to resync.
+#### Loans repayment history UI not surfaced
+`getLoanRepayments()` exists in `loansService.ts` but repayment history per loan is not yet shown in the Loans register page. Currently only the aggregate `repaid` amount is shown.
 
-Fix options (when prioritized):
-- **A)** Expand trigger to handle `UPDATE`/`DELETE` with full re-aggregate (`SELECT COALESCE(SUM(amount), 0) FROM payments WHERE booking_id = ...`)
-- **B)** Document app-layer-only INSERT policy formally and add a DB constraint or RLS policy to prevent payment edits
-- **C)** Add a Supabase Dashboard guard / admin UI that recomputes on demand
-
-Priority: Low. Does not manifest in current app behaviour. Revisit when admin payment-correction UI is needed.
-
----
-
-- **`createBooking` atomicity**: If the booking INSERT succeeds but the initial payment INSERT fails (e.g., 23514 `chk_paid_not_exceed_total` when paid > total), the booking row is left as a phantom with paid_amount=0. UI validation in the create form now prevents the most common cause (paid > total), but a true fix requires a Postgres RPC function wrapping booking + payment in a transaction. Tracked as future work.
-
-- **Stale "Confirmed" booking handling (planned)**: When today's date > booking's `check_in_date` AND status is still `"Confirmed"`, the booking is in a stale state. Two real-world causes: (1) guest stayed but staff forgot to click Check In, (2) guest never arrived (no-show).
-
-  Planned solution (deferred to future session):
-  - Add `no_show` to the booking status enum (DB migration required)
-  - Add `isStaleConfirmed(booking)` helper for detection
-  - Show stale-state banner in edit modal: "Past check-in date — use Backdated Check In or Mark No-Show"
-  - Restrict risky fields (room / dates / rate) on stale bookings, similar to Checked-In gating
-  - Add "Mark as No-Show" action button in row and timeline modal
-  - Update reporting / dues views to handle no-shows separately
-  - **DO NOT** use cancel-and-rebook to fix forgotten check-ins — destroys audit trail
-
-  Discovered during Feature B testing on 2026-05-06. The dynamic room block now surfaces stale bookings visually when staff navigates past dates (Room Board shows "Available" for stale Confirmed bookings).
-
-- **Cleaning status writer**: When staff checks out a guest, `HotelContext.checkoutNormal/checkoutWithOverride` sets `rooms.status` to `"Cleaning"` optimistically AND calls `roomsService.setRoomStatus()` to persist it. The retired `fn_sync_room_status` trigger previously did the same server-side but was dropped on 2026-05-08 (multi-room migration). App-layer RPCs (`checkout_booking_room`) now set `rooms.status` directly — `HotelContext` must stay in sync when any new RPC is wired up.
-
-- **Maintenance flag does not block bookings**: `room.status === "Maintenance"` is a display-only flag today. The booking overlap check queries by `room_number` and ignores room status — a Maintenance room can still be booked. Housekeeping UI is intentionally deferred (see Future Planned → Intentionally deferred).
-
-- **No "Mark Maintenance" button in UI**: Staff currently has no way to set a room to Maintenance from the Room Board. Only Cleaning → Available is exposed (`markRoomAvailable` in HotelContext). Housekeeping UI intentionally deferred.
-
-### Cleaning / Maintenance Lifecycle (as of Block 2)
-
-**Cleaning:**
-- Auto-set on checkout: `HotelContext.checkoutNormal/checkoutWithOverride` optimistically sets the room to `"Cleaning"` + persists via `roomsService.setRoomStatus()`. The DB trigger `fn_sync_room_status` that previously mirrored this was **retired 2026-05-08** — app layer is now the sole writer of `rooms.status`.
-- Manual clear: staff clicks "Mark Available" on a Cleaning card in today's Room Board view → calls `markRoomAvailable(roomNumber)` → optimistic flip + `roomsService.setRoomStatus()` persist.
-- Rationale for manual clear: time-based auto-clear risks delivering a dirty room to the next guest if housekeeping runs late. Manual confirmation is the safer default until a housekeeping queue is built.
-
-**Maintenance:**
-- Set manually today: no UI button — must be set directly in Supabase or via a future admin panel.
-- Cleared manually: same — no UI today.
-- Does NOT block bookings at the service layer (known issue above).
-- Full Maintenance workflow (set/clear buttons, booking block, reason field) intentionally deferred (see Future Planned → Intentionally deferred).
-
-**Operational priority hierarchy in Room Board derivation:**
-```
-Maintenance (room.status, today only)
-  > Cleaning (room.status, today only)
-    > Occupied / Reserved (derived from active bookings)
-      > Available (default)
-```
-On non-today dates, Cleaning and Maintenance never appear (they are point-in-time operational states, not bookable date ranges).
+#### Maintenance flag does not block bookings
+`room.status === "Maintenance"` is display-only. Booking overlap check ignores room status.
 
 ---
 
@@ -694,9 +742,9 @@ On non-today dates, Cleaning and Maintenance never appear (they are point-in-tim
 2. Always: ask Claude.ai to plan before Claude Code writes any code
 3. Always: review diffs before approving each step
 4. Always: test in browser before committing
-5. Always: split commits by concern, write professional messages, no "Co-Authored-By: Claude" trailer
+5. Always: split commits by concern, write professional messages
 6. After a feature ships: update CLAUDE.md, commit docs separately
-7. When the chat starts feeling slow or off-topic, start a fresh chat. Paste CLAUDE.md at the start of every new chat to preserve context.
+7. When the chat starts feeling slow or off-topic, start a fresh chat. Paste CLAUDE.md at the start of every new chat.
 
 ---
 
@@ -713,103 +761,46 @@ On non-today dates, Cleaning and Maintenance never appear (they are point-in-tim
 - Payments (3-layer enforcement, DB trigger sync)
 - Discount/rate system (fixedRate vs bookingRate)
 - Admin override checkout with audit fields
-- **Stay Timing Step 1**: Display-only timing analysis in checkout modal
-  - Scheduled checkout time shown (11:59 AM on checkout date)
-  - Grace period deadline shown (12:29 PM)
-  - Actual checkout time captured when modal opens (`checkoutOpenedAt`)
-  - Classification: Early / On Time (within grace) / Late
-  - Stay duration strip in booking form (e.g., "Thu Apr 22 → Sat Apr 25 = 3 nights · Check-in 12:00 PM · Check-out 11:59 AM")
-- **Stay Timing Step 2**: Billing adjustments at checkout
-  - **Early checkout auto-deduction**: `calcEarlyDeduction()` computes unused nights (calendar-date diff) × `bookingRate`; shown as emerald deduction row in billing summary; written to `actual_checkout_date`, `early_nights_deducted`, `early_deduction_amount` in DB
-  - **Additional discount**: "More Discount" section in checkout modal — optional amount + reason; violet colour; validated to not exceed `(total + extraCharge − earlyDeduction − amountPaid)`; no role restriction; written to `additional_discount_amount`, `additional_discount_reason`, `additional_discount_by`, `additional_discount_at` in DB
-  - **Updated finalPayable formula**: `(total + extra) − earlyDeduction − additionalDiscount − amountPaid`
-  - **Currency**: all `$` USD symbols replaced with `৳` BDT throughout the app — booking form, pay modal, panels, dues monitor, booking-detail drawer, rooms form, checkout modal
-- **Dynamic Room Board (Block 2)**: Date-navigable room grid on the Dashboard
-  - Date navigation: Prev/Next day buttons + native date picker for jumping to any date
-  - `localDateToISO()` helper avoids UTC midnight rollback in UTC+ timezones (e.g. Bangladesh UTC+6)
-  - Status derivation from bookings: today uses `room.status` (Cleaning/Maintenance preserved); future/past dates derived from active bookings
-  - `bookingActiveOnDate()` uses half-open interval `[checkIn, checkOut)` matching booking system overlap semantics
-  - Special case: `today === checkOut AND status === "Checked In"` → "Occupied" (guest physically present until staff confirms checkout)
-  - Stale Confirmed bookings on past dates → "Available" (no `no_show` status yet — see Known Issues)
-  - Guest first name display: non-today cards with active booking show guest name under status pill; honorific-aware (`"Md. Abdullah Hassan"` → `"Md. Abdullah"`)
-  - Summary stats bar: above floor grid, shows breakdown of all 5 statuses for selected date; recomputes via `useMemo` on date change
-  - Mark Available button: Cleaning cards on today's view show a subtle one-click action to flip room to Available (`markRoomAvailable` context action); intentionally narrow API — housekeeping UI deferred
-  - Floor list derived dynamically from `rooms` data with natural sort (no hardcoded floor count)
-  - Room form (Rooms page) expanded from Floors 1-4 to 1-10; subtitle derives distinct floor count from live `rooms` data
+- Stay Timing Step 1 + Step 2 (early deduction + additional discount)
+- Dynamic Room Board (Block 2) — date-navigable room grid
+- Invoice + Reservation Details (Block 3) — printable A4 documents
+- Booking Edit (Feature B) — in-place edit, risky-edit confirmation, optimistic update
+- **Accounts / Cashbook** — all transaction types, filters by date, soft-delete, balances sidebar, lender name on loan rows
+- **Expense recording** — expense modal with category + optional inventory purchase seam (pack/base toggle)
+- **Revenue management** — revenue entry page
+- **Payroll** — payroll entry page
+- **Inventory** — full CRUD for items (low-stock threshold, pack config), stock movements (purchase, consumption, adjustment), stock-level display
+- **Inventory multi-unit pack support** — `pack_label` + `units_per_pack` on items; box/piece toggle in Add Stock modal and expense purchase seam; base unit conversion before all writes
+- **Loans (Stage 6)** — loans register (read-only, 7-column table, outstanding pill), `LoanEntryActions` toolbar widget in cashbook (Loan received + Loan repayment modals), admin-only RLS, lender name surfaced in cashbook rows
 
-- **Invoice + Reservation Details (Block 3)**: Printable A4-style documents for bookings
-  - Invoice page: `app/bookings/[id]/invoice/page.tsx` — server component, `force-dynamic`, fetches booking + payments via `getBookingByRef` + `getPaymentsByBookingRef`
-  - Reservation Details page: `app/bookings/[id]/reservation/page.tsx` — server component, booking only (no payments); shows estimated total, planned checkout dates
-  - Both pages: professional letterhead (`components/invoice/LetterHead.tsx`), print button (`components/invoice/PrintButtons.tsx`), `@page { margin: 12mm; size: A4 portrait; }` injected via `<style>` tag
-  - AppShell strips sidebar/topbar for `/bookings/[id]/(invoice|reservation)` routes via `isStandaloneDocument` regex; wraps children in `<div className="w-full min-h-full">` to prevent flex-shrink layout bug
-  - Timeline modal footer has "Reservation" and "Invoice" buttons that `window.open(...)` the appropriate route in a new tab; visibility gated by booking status: Reservation for Confirmed/Checked In, Invoice for Checked In/Checked Out
-  - `calcTrueDue()` extracted from both client files into `lib/invoiceUtils.ts` (single source of truth)
-  - `formatInvoiceDate()` handles both date-only strings (`"2026-04-22"` → anchored to local noon) and full ISO timestamps
-  - Download PDF removed — html2canvas 1.4.1 cannot render Tailwind 4's `oklch()` colors; users use browser Print → Save as PDF instead
+### Pending / Next Steps
+- **git push** — all commits from this session have not been pushed to remote
+- **Transfer modal smoke test** — transfer movement implemented but not browser-tested
+- **Loans repayment history UI** — `getLoanRepayments()` exists but not surfaced in the Loans register
+- **CLAUDE.md reflects current state** — updated to rev 10 (this update)
 
-- **Booking Edit (Feature B)**: Full in-place edit of Confirmed and Checked-In bookings
-  - Fixed-overlay modal opened from: pencil icon in row action bar, "Edit Booking" button in timeline modal footer
-  - **Status-based field gating**: Confirmed → all fields editable; Checked In → contact/guest info only (amber banner, room/dates/rates disabled); Checked Out/Cancelled → edit button not shown
-  - **Risky-edit confirmation step**: room, dates, or rate changes show a rose-tinted diff modal (from→to table) before the save is dispatched
-  - **Optimistic update + rollback**: `HotelContext.updateBooking()` patches local state immediately; reverts `bookings` and `rooms` snapshots on service failure
-  - **Room status cascade**: when `roomNumber` changes, old room is freed (Available or Reserved if other active bookings remain) and new room gets Reserved/Occupied
-  - **booking_guests Step 7.5**: DELETE + re-INSERT `booking_guests` rows when `additionalGuests` changes
-  - **nights GENERATED fix**: `bookings.nights` is a PostgreSQL GENERATED column (error 23508 on write). The UI derives nights optimistically from date math; the service sends dates and lets the DB recompute. `UpdateBookingPayload` has no `nights` field.
-  - **Amount paid guard**: `validateEdit()` blocks submit when `amountPaid > totalAmount`. Service-side Step 4.5 throws `PHANTOM BOOKING WARNING` if `new totalAmount < current paid_amount`.
-  - **FrontDesk parity**: deferred; subsumed by Day 4 Front Desk dashboard widgets
-
-### Day 3 Priorities (most likely)
-- Stay Extension (same-room): Allow extending checkout date by N nights when room is
-  available for the new period. Recalculate total amount, update payment due. Build on
-  existing booking edit pattern.
-- No-show handling: Add `no_show` status, `isStaleConfirmed()` helper, stale banner in
-  edit modal, "Mark as No-Show" action. Spec already in Known Issues.
+### Day 3 (most likely)
+- Stay Extension (same-room): extend checkout date, recalculate total, update payment due
+- No-show handling: `no_show` status, `isStaleConfirmed()` helper, stale banner, "Mark as No-Show" action
 
 ### Day 4 (likely)
-- Front Desk dashboard widgets: today's check-ins/check-outs counts, currently in-house,
-  today's revenue collected, outstanding balances, available rooms by category, quick
-  actions (walk-in shortcut)
-- Walk-in booking flow: "Available now" view, quick check-in (skip Confirmed → straight
-  to Checked In), cash-first payment focus
+- Front Desk dashboard widgets: today's check-ins/check-outs counts, in-house count, today's revenue, outstanding balances, quick actions
+- Walk-in booking flow: "Available now" view, quick check-in, cash-first payment focus
 
 ### Day 5-6 (planned — visual room showcase block)
-- Room section visual upgrade: high-value walk-in-friendly feature for Cox's Bazar
-  tourist hotel. Staff opens Room section → guest browses visual room cards (photo +
-  description + amenities + price) → staff clicks "Book This Room" → guest details
-  captured → check-in.
-
-  Components needed:
-  - Room photos: multiple per room (thumbnail + gallery). DB schema: `room_images` table
-    or images array column. Storage: Supabase Storage bucket.
-  - Room descriptions: paragraph text per room/category. `description` text field on
-    `rooms` table.
-  - Amenities list: Wi-Fi, AC, TV, Sea View, Balcony, bathroom type, etc. Text array or
-    many-to-many amenities table.
-  - Room features: bed type, max occupancy, sq footage, view direction. Text fields on
-    `rooms` table.
-  - Pricing display: leverages existing `bookingRate` / `fixedRate`.
-  - "Book This Room" quick action → opens new booking modal pre-filled with room.
-
-  Scope: 2-3 blocks of work:
-    Block A: DB schema + room edit form for photos/descriptions/amenities
-    Block B: Visual room cards display in Rooms page
-    Block C: "Book this room" walk-in flow integration
+- Room photos, descriptions, amenities, bed type, sea view flag
+- Visual room cards in Rooms page
+- "Book This Room" walk-in flow integration
 
 ### Day 7+ (later polish)
-- Stay Extension with room-shift: end current booking + create new booking for new room
-  when extending requires a room change
-- Guest history view: per-guest booking history, total spend, repeat-guest indicators,
-  last visit
-- Settings module: DB-backed HOTEL_INFO (name, address, logo, footer text) instead of
-  hardcoded in `lib/hotelInfo.ts`
+- Stay Extension with room-shift
+- Guest history view (per-guest booking history, total spend)
+- Settings module: DB-backed HOTEL_INFO instead of hardcoded
 
-### Intentionally deferred (not for this app)
-- Housekeeping module: cleaning queue UI, Maintenance set/clear buttons. Not building
-  because mid-range hotel cleaning staff won't reliably operate the app. Auto-cleaning
-  lifecycle (Block 2) covers 95% of value without staff dependency. Reconsider if/when
-  this becomes a SaaS product.
-- Room analytics (revenue per room, occupancy heatmap): deferred. Visual showcase first,
-  analytics later if/when needed.
+### Intentionally deferred
+- Housekeeping module (cleaning queue, Maintenance set/clear buttons)
+- Room analytics (revenue per room, occupancy heatmap)
+- Samsung AC (real vs smoke decision pending)
 
 ---
 
@@ -829,6 +820,9 @@ npx tsc --noEmit     # Run TypeScript compiler checks only
 # Linting
 npm run lint         # Run ESLint
 
+# Always prefix shell commands with:
+cd /Users/arif80760/hotel-management &&
+
 # Environment variables required in .env.local:
 # NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
 # NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
@@ -836,7 +830,6 @@ npm run lint         # Run ESLint
 ```
 
 ### Database Migrations (manual)
-There is no automated migration runner. Apply schema changes manually:
 1. Open Supabase Dashboard → SQL Editor → New query
 2. Paste the SQL from `sql/migrations/*.sql`
 3. Click Run
@@ -849,12 +842,16 @@ There is no automated migration runner. Apply schema changes manually:
 | pre-2026-05-08 | `add_extra_charge_columns.sql` | Adds `extra_charge_amount`, `extra_charge_reason` to bookings | ✅ Applied |
 | pre-2026-05-08 | `create_booking_documents_table.sql` | Creates `booking_documents` table + storage bucket policies | ✅ Applied |
 | pre-2026-05-08 | `add_early_checkout_and_discount_columns.sql` | Adds early-deduction + additional-discount columns to bookings | ✅ Applied |
-| pre-2026-05-08 | `add_payment_method_extras.sql` | Adds `bkash`/`nagad` enum values + `last_payment_method` column + sync trigger | ✅ Applied |
+| pre-2026-05-08 | `add_payment_method_extras.sql` | Adds `bkash`/`nagad` enum values + `last_payment_method` + sync trigger | ✅ Applied |
 | 2026-05-08 | `2026-05-08-multi-room-enum-prep.sql` | Adds `checked_out_early` to `booking_status` enum — **run in separate session first** | ✅ Applied |
-| 2026-05-08 | `2026-05-08-multi-room-foundation.sql` | Creates `booking_rooms`, `booking_extra_charges`, `refunds`; backfills `booking_rooms` from `bookings`; drops `fn_sync_room_status` trigger | ✅ Applied |
-| 2026-05-08 | `2026-05-08-multi-room-rpc.sql` | Adds RPCs: `update_booking_total`, `create_booking_with_rooms`, `checkout_booking_room`, `checkin_booking_room`, `cancel_booking_room`, `extend_booking_room` | ✅ Applied |
+| 2026-05-08 | `2026-05-08-multi-room-foundation.sql` | Creates `booking_rooms`, `booking_extra_charges`, `refunds`; backfills; drops `fn_sync_room_status` | ✅ Applied |
+| 2026-05-08 | `2026-05-08-multi-room-rpc.sql` | Adds RPCs: `create_booking_with_rooms`, `checkout_booking_room`, `checkin_booking_room`, `cancel_booking_room`, `extend_booking_room`, `update_booking_total` | ✅ Applied |
+| 2026-05-08 | `2026-05-08-rpc-add-status-param.sql` | Adds `p_status` param to `create_booking_with_rooms` | ✅ Applied |
+| 2026-06-02 | `2026-06-02-inventory-multi-unit.sql` | Adds `pack_label` (text) + `units_per_pack` (numeric) to `inventory_items` | ⏳ Pending apply |
 
-**Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`. PostgreSQL 12+ auto-commits `ALTER TYPE ADD VALUE` but the new enum value cannot be used in the same session — applying both in the same window will throw ERROR 55P04.
+**⚠️ Note on `2026-06-02-inventory-multi-unit.sql`**: The TypeScript service and UI already reference these columns. Apply this migration in Supabase before testing inventory pack features.
+
+**Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
 ---
 
@@ -862,16 +859,26 @@ There is no automated migration runner. Apply schema changes manually:
 
 | Want to change… | Edit… |
 |---|---|
-| Booking form fields | `app/bookings/BookingsClient.tsx` — `form` state + form JSX |
-| Checkout modal logic | `BookingsClient.tsx` + `FrontDeskClient.tsx` — checkout section |
-| Room status after booking action | `contexts/HotelContext.tsx` + `services/bookingsService.ts` `bookingToRoomStatus()` |
+| Booking form fields | `app/bookings/BookingsClient.tsx` — form state + form JSX |
+| Checkout modal logic | `BookingsClient.tsx` + `FrontDeskClient.tsx` |
+| Room status after booking action | `contexts/HotelContext.tsx` + `services/bookingsService.ts` |
 | Payment enforcement rules | `contexts/HotelContext.tsx` `recordPayment()` |
-| Hotel timing policy | `lib/mockData.ts` `HOTEL_POLICY` constant |
+| Hotel timing policy | `lib/mockData.ts` `HOTEL_POLICY` |
 | Discount display | `BookingsClient.tsx` — billing summary section |
 | Employee provisioning | `app/api/employees/provision/route.ts` |
 | Document upload/delete | `services/documentsService.ts` |
 | Auth / role logic | `contexts/AuthContext.tsx` |
-| DB ↔ UI field mapping (rooms) | `services/roomsService.ts` `mapRoom()` + `toRoomPayload()` |
+| DB ↔ UI field mapping (rooms) | `services/roomsService.ts` `mapRoom()` |
 | DB ↔ UI field mapping (bookings) | `services/bookingsService.ts` `mapBooking()` |
+| Account transactions / balances | `services/accountsService.ts` |
+| Cashbook UI (ledger, filters) | `app/accounts/cashbook/CashbookClient.tsx` |
+| Expense recording + inventory seam | `app/accounts/expense/ExpenseClient.tsx` |
+| Revenue / payroll entry | `app/accounts/revenue/` or `app/accounts/payroll/` |
+| Loans register (view) | `app/accounts/loans/LoansClient.tsx` |
+| Loan entry actions (record received/repay) | `app/accounts/loans/LoanEntryActions.tsx` |
+| Inventory items + stock levels | `app/inventory/InventoryClient.tsx` |
+| Inventory service (types, CRUD) | `services/inventoryService.ts` |
+| Loans service (create, list, repay) | `services/loansService.ts` |
+| Pack/base conversion logic | `app/inventory/InventoryClient.tsx` (stockUnit) or `app/accounts/expense/ExpenseClient.tsx` (exInvUnit + toBaseQty) |
+| Sidebar navigation | `components/Sidebar.tsx` |
 | Supabase client setup | `lib/supabase.ts` (browser) / `lib/supabaseAdmin.ts` (server) |
-
