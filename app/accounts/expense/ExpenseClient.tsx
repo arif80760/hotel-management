@@ -150,6 +150,12 @@ export default function ExpenseClient() {
   const [exInvItemSearch, setExInvItemSearch] = useState<string>("");
   const [exInvQuantity,   setExInvQuantity]   = useState<string>("");
   const [exInvUnitPrice,  setExInvUnitPrice]  = useState<string>("");
+  const [exInvUnit,       setExInvUnit]       = useState<"pack" | "base">("pack");
+  const toBaseQty = (packQty: number): number => {
+    const it = inventoryItems.find((i) => i.id === exInvItemId);
+    const upp = it?.unitsPerPack ?? null;
+    return upp != null && exInvUnit === "pack" ? packQty * upp : packQty;
+  };
 
   // ── Inline item creation state (mini-form, shows when typed name doesn't match) ──
   const [inventoryCategories, setInventoryCategories] = useState<InventoryCategory[]>([]);
@@ -279,6 +285,7 @@ export default function ExpenseClient() {
     setExInvItemSearch("");
     setExInvQuantity("");
     setExInvUnitPrice("");
+    setExInvUnit("pack");
     setExInvCreateMode(false);
     setExInvNewType("consumable");
     setExInvNewUnit("piece");
@@ -458,12 +465,13 @@ export default function ExpenseClient() {
       // them via source_account_transaction_id.
       if (exIsInventory && exInvItemId) {
         const invQtyNum = parseFloat(exInvQuantity);
+        const invBaseQty = toBaseQty(invQtyNum);
         const invUpNum  = exInvUnitPrice.trim()
           ? parseFloat(exInvUnitPrice)
-          : amountNum / invQtyNum;
+          : amountNum / invBaseQty;
         await createPurchaseMovement({
           itemId:                      exInvItemId,
-          quantity:                    invQtyNum,
+          quantity:                    invBaseQty,
           unitPrice:                   isFinite(invUpNum) ? invUpNum : amountNum,
           happenedAt:                  new Date(exTxnDate + "T12:00:00").toISOString(),
           sourceAccountTransactionId:  newExpense.id,
@@ -972,9 +980,10 @@ export default function ExpenseClient() {
                         setExInvItemId(match ? match.id : "");
                         // auto-compute unit price when qty already entered
                         if (match && exInvQuantity) {
-                          const qty = parseFloat(exInvQuantity);
+                          const upp = match.unitsPerPack ?? null;
+                          const baseQty = upp != null && exInvUnit === "pack" ? parseFloat(exInvQuantity) * upp : parseFloat(exInvQuantity);
                           const amt = parseFloat(exAmount) || 0;
-                          if (qty > 0 && amt > 0) setExInvUnitPrice((amt / qty).toFixed(2));
+                          if (baseQty > 0 && amt > 0) setExInvUnitPrice((amt / baseQty).toFixed(2));
                         }
                       }}
                       placeholder="Type to search items…"
@@ -1105,29 +1114,61 @@ export default function ExpenseClient() {
                   {/* Quantity + Unit price */}
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
-                      <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Quantity</label>
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="0.01"
-                        min="0.01"
-                        value={exInvQuantity}
-                        onChange={(e) => {
-                          setExInvQuantity(e.target.value);
-                          const qty = parseFloat(e.target.value);
-                          const amt = parseFloat(exAmount) || 0;
-                          if (qty > 0 && amt > 0) setExInvUnitPrice((amt / qty).toFixed(2));
-                        }}
-                        placeholder="e.g. 50"
-                        disabled={creatingExpense}
-                        className={inputCls(!!(createExpenseFieldErrors as Record<string,string>).invQty)}
-                      />
+                      <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">
+                        Quantity{inventoryItems.find((i) => i.id === exInvItemId)?.unitsPerPack != null
+                          ? exInvUnit === "pack"
+                            ? ` (in ${inventoryItems.find((i) => i.id === exInvItemId)?.packLabel ?? "pack"})`
+                            : ` (in ${inventoryItems.find((i) => i.id === exInvItemId)?.unit ?? "unit"})`
+                          : ""}
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          type="number"
+                          inputMode="decimal"
+                          step="0.01"
+                          min="0.01"
+                          value={exInvQuantity}
+                          onChange={(e) => {
+                            setExInvQuantity(e.target.value);
+                            const qty = toBaseQty(parseFloat(e.target.value));
+                            const amt = parseFloat(exAmount) || 0;
+                            if (qty > 0 && amt > 0) setExInvUnitPrice((amt / qty).toFixed(2));
+                          }}
+                          placeholder="e.g. 50"
+                          disabled={creatingExpense}
+                          className={`${inputCls(!!(createExpenseFieldErrors as Record<string,string>).invQty)} flex-1`}
+                        />
+                        {inventoryItems.find((i) => i.id === exInvItemId)?.unitsPerPack != null && (
+                          <select value={exInvUnit} onChange={(e) => {
+                            const u = e.target.value as "pack" | "base";
+                            setExInvUnit(u);
+                            const it = inventoryItems.find((i) => i.id === exInvItemId);
+                            const upp = it?.unitsPerPack ?? null;
+                            const baseQty = upp != null && u === "pack" ? parseFloat(exInvQuantity) * upp : parseFloat(exInvQuantity);
+                            const amt = parseFloat(exAmount) || 0;
+                            if (baseQty > 0 && amt > 0) setExInvUnitPrice((amt / baseQty).toFixed(2));
+                          }}
+                            disabled={creatingExpense}
+                            className="rounded-lg border border-slate-300 bg-white px-2 text-[13px] text-slate-700">
+                            <option value="pack">{inventoryItems.find((i) => i.id === exInvItemId)?.packLabel ?? "pack"}</option>
+                            <option value="base">{inventoryItems.find((i) => i.id === exInvItemId)?.unit ?? "unit"}</option>
+                          </select>
+                        )}
+                      </div>
+                      {(() => {
+                        const s = inventoryItems.find((i) => i.id === exInvItemId);
+                        const upp = s?.unitsPerPack ?? null;
+                        const q = parseFloat(exInvQuantity);
+                        if (upp != null && exInvUnit === "pack" && !isNaN(q) && q > 0)
+                          return <p className="text-[11.5px] text-slate-500">= {(q * upp).toLocaleString()} {s?.unit ?? "units"}</p>;
+                        return null;
+                      })()}
                       {(createExpenseFieldErrors as Record<string,string>).invQty && (
                         <p className="text-[11.5px] text-rose-600">{(createExpenseFieldErrors as Record<string,string>).invQty}</p>
                       )}
                     </div>
                     <div className="space-y-1">
-                      <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Unit price (৳)</label>
+                      <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">{inventoryItems.find((i) => i.id === exInvItemId)?.unitsPerPack != null ? `Price per ${inventoryItems.find((i) => i.id === exInvItemId)?.unit ?? "unit"} (৳)` : "Unit price (৳)"}</label>
                       <input
                         type="number"
                         inputMode="decimal"
@@ -1144,7 +1185,7 @@ export default function ExpenseClient() {
 
                   {/* Mismatch warning */}
                   {(() => {
-                    const qty = parseFloat(exInvQuantity);
+                    const qty = toBaseQty(parseFloat(exInvQuantity));
                     const up  = parseFloat(exInvUnitPrice);
                     const amt = parseFloat(exAmount) || 0;
                     if (qty > 0 && up > 0 && Math.abs(qty * up - amt) > 0.01) {
