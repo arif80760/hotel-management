@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-06 (rev 10)
+Last updated: 2026-06-06 (rev 11)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -309,6 +309,12 @@ All financial movements — revenue, expenses, transfers, injections, loans.
 | txn_date | DATE | NOT NULL |
 | note | TEXT | optional |
 | loan_id | UUID FK → loans.id | nullable — links repayment txns to their loan |
+| voucher_number | TEXT | `EV-YYYY-NNNN` on user expenses — via `next_voucher_number()` RPC |
+| category_id | UUID FK → expense_categories.id | NOT NULL on user expenses (incl. payroll) |
+| payee | TEXT | free-text vendor — exclusive with `employee_id` |
+| employee_id | UUID FK → employees.id | set on Salary-category expenses (payroll); exclusive with `payee` |
+| booking_payment_id | UUID | set on booking-derived rows; NULL on user expenses |
+| created_by | UUID | auth.users id of recorder (nullable) |
 | deleted_at | TIMESTAMPTZ | nullable — soft-delete pattern |
 | created_at | TIMESTAMPTZ | |
 
@@ -446,7 +452,7 @@ inventory_items ──1:N──> inventory_movements (item_id)
 | Cashbook (financial ledger) | ✅ Complete | `app/accounts/cashbook/CashbookClient.tsx`, `services/accountsService.ts` |
 | Expense recording | ✅ Complete | `app/accounts/expense/ExpenseClient.tsx` |
 | Revenue management | ✅ Complete | `app/accounts/revenue/` |
-| Payroll | ✅ Complete | `app/accounts/payroll/` |
+| Payroll | ✅ Complete | per-employee salary / advance / bonus payments; each posts through `createExpense` as a Cash `expense_out` tagged "Salary" with a generated `EV-YYYY-NNNN` voucher. Monthly summary, per-type totals, and per-employee history. Payment type is stored as a leading label in the note; the "Salary" category is find-or-created. |
 | Inventory (CRUD + movements) | ✅ Complete | `app/inventory/InventoryClient.tsx`, `services/inventoryService.ts` |
 | Inventory multi-unit pack support | ✅ Complete | pack_label/units_per_pack, pack↔base toggle in both purchase entry points |
 | Loans register + entry (Stage 6) | ✅ Complete | `app/accounts/loans/`, `services/loansService.ts`, `LoanEntryActions.tsx` |
@@ -532,6 +538,12 @@ repaid      = SUM of all loan_repayment txns with this loan_id
 outstanding = MAX(0, principal − repaid)
 status      = "repaid" if repaid >= principal, else "outstanding"
 ```
+
+#### Payroll (salary / advance / bonus)
+Payroll is not a separate engine — it is expense machinery. Recording a salary, advance, or bonus payment routes through `createExpense` (`services/expensesService.ts`): an `account_transactions` row, `type = 'expense_out'`, funded from Cash in Hand, `category_id` = the "Salary" category, `payeeMode: "employee"` with `employee_id` = `Employee.id` (the UUID, **not** the `EMP-001` code), and an auto-generated `EV-YYYY-NNNN` voucher.
+- Payment type is stored as a leading label in `note` (e.g. `"Advance — June rent"`); `parseKind()` in `PayrollClient` reads it back. No schema change required.
+- The "Salary" `expense_categories` row is find-or-created on first payment (case-insensitive match).
+- Salary payments appear in the Cashbook like any other expense. File: `app/accounts/payroll/PayrollClient.tsx`.
 
 #### Inventory Purchase Seam (expense → inventory)
 When recording an expense of type "inventory purchase":
