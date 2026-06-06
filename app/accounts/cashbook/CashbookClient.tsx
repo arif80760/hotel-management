@@ -38,6 +38,8 @@ import {
   type PastDayActivity,
 } from "@/services/dayCloseService";
 
+import LoanEntryActions from "@/app/accounts/loans/LoanEntryActions";
+
 // ─────────────────────────────────────────────────────────────
 // COPIED FROM app/employees/EmployeesClient.tsx
 // This codebase has no shared UI primitives layer (no components/ui/);
@@ -635,6 +637,27 @@ export default function CashbookClient() {
     return () => { cancelled = true; };
   }, [filterFromDate, filterToDate, showDeleted]);
 
+  // ── Reload all — re-fetches transactions (with current filter) + balances ──
+  // Used as the onRecorded callback for LoanEntryActions so that loan_received
+  // and loan_repayment rows appear in the cashbook immediately after recording.
+  async function reloadAll() {
+    try {
+      const [txns, bal] = await Promise.all([
+        getTransactions({
+          fromDate:       filterFromDate || undefined,
+          toDate:         filterToDate   || undefined,
+          includeDeleted: showDeleted,
+        }),
+        getBalances(),
+      ]);
+      setTransactions(txns);
+      setBalances(bal);
+    } catch {
+      // Non-fatal: the transaction was already saved; the list will reconcile
+      // on the next filter change or page reload.
+    }
+  }
+
   // ── Open / close ───────────────────────────────────────────
   function openModal() {
     setForm(emptyForm());
@@ -853,6 +876,7 @@ export default function CashbookClient() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold text-slate-800">Accounts</h1>
         <div className="flex items-center gap-2">
+          <LoanEntryActions onRecorded={reloadAll} />
           <button
             type="button"
             onClick={handleExportCsv}
