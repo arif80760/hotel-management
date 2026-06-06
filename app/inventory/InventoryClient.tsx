@@ -125,6 +125,8 @@ export default function InventoryClient() {
   const [itUnit,               setItUnit]               = useState<InventoryItemUnit>("piece");
   const [itNotes,              setItNotes]              = useState("");
   const [itLowStockThreshold,  setItLowStockThreshold]  = useState("");
+  const [itPackLabel,          setItPackLabel]          = useState("");
+  const [itUnitsPerPack,       setItUnitsPerPack]       = useState("");
   const [creatingItem, setCreatingItem] = useState(false);
   const [createItemError, setCreateItemError] = useState<string | null>(null);
   const [createItemFieldErrors, setCreateItemFieldErrors] = useState<{ name?: string }>({});
@@ -211,6 +213,8 @@ export default function InventoryClient() {
   const [edNotes,               setEdNotes]               = useState("");
   const [edIsActive,            setEdIsActive]            = useState(true);
   const [edLowStockThreshold,   setEdLowStockThreshold]   = useState("");
+  const [edPackLabel,           setEdPackLabel]           = useState("");
+  const [edUnitsPerPack,        setEdUnitsPerPack]        = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const [editFieldErrors, setEditFieldErrors] = useState<{ name?: string }>({});
@@ -356,6 +360,7 @@ export default function InventoryClient() {
     setItemModalOpen(true);
     setItName(""); setItCategoryId(""); setItType("consumable");
     setItUnit("piece"); setItNotes(""); setItLowStockThreshold("");
+    setItPackLabel(""); setItUnitsPerPack("");
     setCreateItemError(null); setCreateItemFieldErrors({});
   }
   function closeItemModal() { if (creatingItem) return; setItemModalOpen(false); }
@@ -366,6 +371,7 @@ export default function InventoryClient() {
     setCreateItemFieldErrors({}); setCreateItemError(null); setCreatingItem(true);
     try {
       const parsedThreshold = parseFloat(itLowStockThreshold);
+      const parsedUnitsPerPack = parseFloat(itUnitsPerPack);
       const input: NewInventoryItem = {
         name:               itName.trim(),
         categoryId:         itCategoryId || undefined,
@@ -374,6 +380,9 @@ export default function InventoryClient() {
         notes:              itNotes.trim() || undefined,
         lowStockThreshold:  itLowStockThreshold.trim() && !isNaN(parsedThreshold) && parsedThreshold >= 0
                               ? parsedThreshold : null,
+        packLabel:          itPackLabel.trim() || null,
+        unitsPerPack:       itUnitsPerPack.trim() && !isNaN(parsedUnitsPerPack) && parsedUnitsPerPack > 0
+                              ? parsedUnitsPerPack : null,
       };
       await createInventoryItem(input);
       setSuccessMsg(`Item "${itName.trim()}" added.`);
@@ -570,6 +579,8 @@ export default function InventoryClient() {
     setEdNotes(item.notes ?? "");
     setEdIsActive(item.isActive);
     setEdLowStockThreshold(item.lowStockThreshold != null ? String(item.lowStockThreshold) : "");
+    setEdPackLabel(item.packLabel ?? "");
+    setEdUnitsPerPack(item.unitsPerPack != null ? String(item.unitsPerPack) : "");
     setEditError(null); setEditFieldErrors({});
     setEditMovementCount(0);
     setEditModalOpen(true);
@@ -591,6 +602,7 @@ export default function InventoryClient() {
     setEditFieldErrors({}); setEditError(null); setSavingEdit(true);
     try {
       const parsedEditThreshold = parseFloat(edLowStockThreshold);
+      const parsedEditUnitsPerPack = parseFloat(edUnitsPerPack);
       const patch: UpdateInventoryItem = {
         name:               edName.trim(),
         categoryId:         edCategoryId || null,
@@ -598,6 +610,9 @@ export default function InventoryClient() {
         isActive:           edIsActive,
         lowStockThreshold:  edLowStockThreshold.trim() && !isNaN(parsedEditThreshold) && parsedEditThreshold >= 0
                               ? parsedEditThreshold : null,
+        packLabel:          edPackLabel.trim() || null,
+        unitsPerPack:       edUnitsPerPack.trim() && !isNaN(parsedEditUnitsPerPack) && parsedEditUnitsPerPack > 0
+                              ? parsedEditUnitsPerPack : null,
       };
       // Only include type/unit in the patch if movements are zero (lock guard).
       if (editMovementCount === 0) {
@@ -920,6 +935,17 @@ export default function InventoryClient() {
                 <input type="number" inputMode="decimal" step="1" min="0" value={itLowStockThreshold}
                   onChange={(e) => setItLowStockThreshold(e.target.value)}
                   placeholder="e.g. 5 — alert when stock ≤ this" disabled={creatingItem} className={inputCls(false)} />
+              </div>
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Purchase pack (optional)</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <input type="text" value={itPackLabel} onChange={(e) => setItPackLabel(e.target.value)}
+                    placeholder="e.g. box" disabled={creatingItem} className={inputCls(false)} />
+                  <input type="number" inputMode="decimal" step="1" min="1" value={itUnitsPerPack}
+                    onChange={(e) => setItUnitsPerPack(e.target.value)}
+                    placeholder="e.g. 24" disabled={creatingItem} className={inputCls(false)} />
+                </div>
+                <p className="text-[11.5px] text-slate-400">Only for items you buy in packs (e.g. a box of 24).</p>
               </div>
               {createItemError && (
                 <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-[12px] text-rose-700">{createItemError}</div>
@@ -1427,6 +1453,18 @@ export default function InventoryClient() {
                 <input type="number" inputMode="decimal" step="1" min="0" value={edLowStockThreshold}
                   onChange={(e) => setEdLowStockThreshold(e.target.value)}
                   placeholder="e.g. 5 — alert when stock ≤ this" disabled={savingEdit} className={inputCls(false)} />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Purchase pack (optional)</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <input type="text" value={edPackLabel} onChange={(e) => setEdPackLabel(e.target.value)}
+                    placeholder="e.g. box" disabled={savingEdit} className={inputCls(false)} />
+                  <input type="number" inputMode="decimal" step="1" min="1" value={edUnitsPerPack}
+                    onChange={(e) => setEdUnitsPerPack(e.target.value)}
+                    placeholder="e.g. 24" disabled={savingEdit} className={inputCls(false)} />
+                </div>
+                <p className="text-[11.5px] text-slate-400">Only for items you buy in packs (e.g. a box of 24).</p>
               </div>
 
               <label className="flex items-center gap-2 cursor-pointer">
