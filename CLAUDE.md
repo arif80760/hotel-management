@@ -1,6 +1,8 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-07 (rev 18)
+Last updated: 2026-06-08 (rev 19)
+
+> **rev 19** — Removed the cleaning/maintenance lifecycle from the dashboard Room Board. Checkout now releases a room straight to Available (`checkoutNormal`/`checkoutWithOverride` set the physical room Available and optimistically mark `booking_rooms` Checked Out). `lib/roomStatus.deriveRoomStatusForDate` no longer special-cases Cleaning/Maintenance — the board shows only Available/Reserved/Occupied, derived from bookings; summary/legend trimmed to those three. **KNOWN FOLLOW-UP:** the `checkout_booking` DB RPC and the Rooms admin page may still reference cleaning/maintenance physical statuses — harmless to the board (which ignores physical status) but worth retiring if those statuses are fully dropped.
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
