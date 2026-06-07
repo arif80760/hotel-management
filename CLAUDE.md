@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-07 (rev 16)
+Last updated: 2026-06-07 (rev 17)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -789,8 +789,8 @@ Two sequential Supabase writes (INSERT loans → INSERT account_transaction). Co
 #### Stale "Confirmed" booking handling (planned)
 When today > `check_in_date` and status is still `"Confirmed"`. Planned: add `no_show` status enum, `isStaleConfirmed()` helper, stale banner in edit modal, "Mark as No-Show" action.
 
-#### Loans repayment history UI not surfaced
-`getLoanRepayments()` exists in `loansService.ts` but repayment history per loan is not yet shown in the Loans register page. Currently only the aggregate `repaid` amount is shown.
+#### ~~Loans repayment history UI not surfaced~~ ✅ Resolved
+`getLoanRepayments()` is now wired up in `LoansClient.tsx` — each loan row expands an inline `RepaymentTimeline` with per-repayment rows and a running balance.
 
 #### Maintenance flag does not block bookings
 `room.status === "Maintenance"` is display-only. Booking overlap check ignores room status.
@@ -835,7 +835,7 @@ When today > `check_in_date` and status is still `"Confirmed"`. Planned: add `no
 - **Payroll** — payroll entry page
 - **Inventory** — full CRUD for items (low-stock threshold, pack config), stock movements (purchase, consumption, adjustment), stock-level display
 - **Inventory multi-unit pack support** — `pack_label` + `units_per_pack` on items; box/piece toggle in Add Stock modal and expense purchase seam; base unit conversion before all writes
-- **Loans (Stage 6)** — loans register (read-only, 7-column table, outstanding pill), `LoanEntryActions` toolbar widget in cashbook (Loan received + Loan repayment modals), admin-only RLS, lender name surfaced in cashbook rows
+- **Loans (Stage 6)** — loans register (read-only, 7-column table, outstanding pill), `LoanEntryActions` toolbar widget in cashbook (Loan received + Loan repayment modals), admin-only RLS, lender name surfaced in cashbook rows. Each loan row is now clickable and expands an inline `RepaymentTimeline` panel showing every repayment with date, account paid from, amount (−৳), and running balance after; loaded lazily via `getLoanRepayments()` on first expand.
 - **Dynamic Room Categories** — `room_categories` managed lookup table; `roomCategoriesService.ts` (getRoomCategories, createRoomCategory, updateRoomCategoryName, setRoomCategoryActive); `RoomsClient` Manage Categories modal (add, rename, soft-deactivate); category dropdown in room form sourced from DB instead of hardcoded constant; `form.category` now stores slug; category name map used for display
 - **Room Analytics** — admin-only dashboard at `/rooms/analytics`; 7 KPI cards (occupancy %, revenue, RevPAR, ADR, avg stay, top room, occupied now); sortable per-room performance table; most/least booked lists; room-type performance table; CSS-bar revenue chart; SVG polyline occupancy trend with daily/monthly auto-granularity; maintenance rooms excluded from occupancy/RevPAR/ADR denominators; date-range presets (Today / Last 7 / Last 30 / This Month / This Year / Custom); powered by `room_analytics_by_room` + `room_occupancy_trend` RPCs via `roomAnalyticsService.ts`
 
