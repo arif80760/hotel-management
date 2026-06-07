@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-07 (rev 17)
+Last updated: 2026-06-07 (rev 18)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -85,7 +85,8 @@ hotel-management/
 │   ├── mockData.ts              # Central type definitions + HOTEL_POLICY + MOCK_* seed data
 │   ├── supabase.ts              # Supabase browser client (HMR singleton on globalThis)
 │   ├── supabaseAdmin.ts         # Supabase service-role admin client (server-only)
-│   └── invoiceUtils.ts          # calcTrueDue() + formatInvoiceDate() — shared between invoice pages
+│   ├── invoiceUtils.ts          # calcTrueDue() + formatInvoiceDate() — shared between invoice pages
+│   └── roomStatus.ts            # localDateToISO, TODAY_ISO, deriveRoomStatusForDate — shared by RoomBoard + Dashboard
 │
 ├── components/
 │   ├── Sidebar.tsx              # App navigation sidebar (includes Accounts → Loans link)
@@ -765,6 +766,9 @@ Location: `contexts/HotelContext.tsx` — `checkoutNormal` / `checkoutWithOverri
 Optimistic `BookingRoom` entries carry IDs of the form `"optimistic-BK-XXXX-room-i"` and `roomId: ""`. The checkout guard correctly bails when `bookingRoomId` is empty string. However, the guard doesn't produce a friendly "booking is still being saved, please wait" message.
 
 **Future improvement**: `isOptimisticBookingRoom(room: BookingRoom): boolean` predicate.
+
+#### ~~Dashboard occupancy showed 0 while Room Board showed correct counts~~ ✅ Resolved
+`DashboardStats` and `page.tsx` were reading `rooms.status` (physical DB column) for Occupied/Available counts. That column lags behind booking state, so the KPI cards and Occupancy-by-Floor showed 0% while the Room Board (which derives status from bookings via `deriveRoomStatusForDate`) showed the true counts. Both dashboard surfaces now call `deriveRoomStatusForDate` from `lib/roomStatus.ts`. The hardcoded `["Floor 1"…"Floor 4"]` floor list was also replaced with a live-derived, numerically-sorted list so all floors show up automatically.
 
 #### Known Bug — fn_sync_payment_status doesn't account for extras
 Location: `sql/schema/05-triggers.sql`
