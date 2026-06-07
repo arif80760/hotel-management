@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-07 (rev 14)
+Last updated: 2026-06-07 (rev 15)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -36,7 +36,11 @@ hotel-management/
 │   │   └── BookingsClient.tsx   # Full booking management UI — main workhorse (~2500+ lines)
 │   ├── front-desk/
 │   │   └── FrontDeskClient.tsx  # Simplified daily ops view — check-in/out focused
-│   ├── rooms/                   # Room inventory management
+│   ├── rooms/
+│   │   ├── analytics/
+│   │   │   ├── page.tsx             # Server wrapper (admin guard) → renders RoomAnalyticsClient
+│   │   │   └── RoomAnalyticsClient.tsx  # Room analytics dashboard — KPIs, trend, per-room table
+│   │   └── ...                  # Room inventory management
 │   ├── guests/                  # Guest profiles
 │   ├── employees/               # Employee roster (admin only)
 │   ├── profile/                 # Logged-in user profile page
@@ -65,6 +69,7 @@ hotel-management/
 ├── services/
 │   ├── roomsService.ts              # Supabase CRUD for rooms table
 │   ├── roomCategoriesService.ts     # CRUD for room_categories lookup table (dynamic categories)
+│   ├── roomAnalyticsService.ts      # Read-only RPCs — room_analytics_by_room + room_occupancy_trend
 │   ├── bookingsService.ts           # Supabase CRUD for bookings table (with joins)
 │   ├── guestsService.ts             # Supabase CRUD for guests table
 │   ├── employeesService.ts          # Supabase CRUD for employees table
@@ -426,6 +431,16 @@ Stock is **always stored in base units**. The pack→base conversion happens cli
 - **2 legacy / system**: `online`, `other` — may exist in older rows; never shown in UI
 - Use `formatPaymentMethod(value)` for safe display of any value including legacy ones
 
+### Analytics RPCs (`sql/schema/07-functions.sql`)
+Two read-only functions callable via `supabase.rpc()`, used exclusively by `/rooms/analytics`:
+
+| RPC | Signature | Returns |
+|---|---|---|
+| `room_analytics_by_room` | `(p_from date, p_to date)` | One row per room: room_id, room_number, floor, category, room_status, price_per_night, bookings, occupied_nights, available_nights, revenue, adr (null when no bookings), revpar, occupancy_pct |
+| `room_occupancy_trend` | `(p_from date, p_to date)` | One row per calendar day: day, occupied_rooms, available_rooms, occupancy_pct |
+
+Revenue basis: `booking_rate × nights` (room revenue only; excludes extra charges and checkout discounts — keeps ADR/RevPAR to standard hotel definitions). Both exclude `cancelled` booking_rooms. `room_occupancy_trend.available_rooms` is a snapshot of current `rooms` table (maintenance excluded); it does not time-travel.
+
 ### RLS Policies (general pattern)
 - All tables: `authenticated` role can SELECT, INSERT, UPDATE, DELETE.
 - `profiles`: users can only read/update their own row.
@@ -460,6 +475,7 @@ inventory_items ──1:N──> inventory_movements (item_id)
 | Auth (login/logout, role-based) | ✅ Complete | `contexts/AuthContext.tsx`, `app/login/` |
 | Rooms (CRUD, status management) | ✅ Complete | `app/rooms/`, `services/roomsService.ts` |
 | Room Categories (dynamic managed lookup) | ✅ Complete | `services/roomCategoriesService.ts`, `app/rooms/RoomsClient.tsx` (Manage Categories modal) |
+| Room Analytics (admin dashboard) | ✅ Complete | `app/rooms/analytics/` (admin-only), `services/roomAnalyticsService.ts` |
 | Bookings (full lifecycle) | ✅ Complete | `app/bookings/BookingsClient.tsx`, `services/bookingsService.ts` |
 | Front Desk (daily ops view) | ✅ Complete | `app/front-desk/FrontDeskClient.tsx` |
 | Guests (profiles, VIP, notes) | ✅ Complete | `app/guests/`, `services/guestsService.ts` |
@@ -818,6 +834,7 @@ When today > `check_in_date` and status is still `"Confirmed"`. Planned: add `no
 - **Inventory multi-unit pack support** — `pack_label` + `units_per_pack` on items; box/piece toggle in Add Stock modal and expense purchase seam; base unit conversion before all writes
 - **Loans (Stage 6)** — loans register (read-only, 7-column table, outstanding pill), `LoanEntryActions` toolbar widget in cashbook (Loan received + Loan repayment modals), admin-only RLS, lender name surfaced in cashbook rows
 - **Dynamic Room Categories** — `room_categories` managed lookup table; `roomCategoriesService.ts` (getRoomCategories, createRoomCategory, updateRoomCategoryName, setRoomCategoryActive); `RoomsClient` Manage Categories modal (add, rename, soft-deactivate); category dropdown in room form sourced from DB instead of hardcoded constant; `form.category` now stores slug; category name map used for display
+- **Room Analytics** — admin-only dashboard at `/rooms/analytics`; 7 KPI cards (occupancy %, revenue, RevPAR, ADR, avg stay, top room, occupied now); sortable per-room performance table; most/least booked lists; room-type performance table; CSS-bar revenue chart; SVG polyline occupancy trend with daily/monthly auto-granularity; maintenance rooms excluded from occupancy/RevPAR/ADR denominators; date-range presets (Today / Last 7 / Last 30 / This Month / This Year / Custom); powered by `room_analytics_by_room` + `room_occupancy_trend` RPCs via `roomAnalyticsService.ts`
 
 ### Pending / Next Steps
 - **Transfer modal smoke test** — transfer movement implemented but not browser-tested
@@ -843,7 +860,6 @@ When today > `check_in_date` and status is still `"Confirmed"`. Planned: add `no
 
 ### Intentionally deferred
 - Housekeeping module (cleaning queue, Maintenance set/clear buttons)
-- Room analytics (revenue per room, occupancy heatmap)
 - Samsung AC (real vs smoke decision pending)
 
 ---
@@ -916,6 +932,7 @@ cd /Users/arif80760/hotel-management &&
 | 2026-06-02 | `2026-06-02-loans.sql` | Creates `loans` table; adds `loan_id` to account_transactions; `loan_received`/`loan_repayment` enum values | ✅ Applied |
 | 2026-06-07 | `2026-06-07-room-categories-table.sql` | Creates `room_categories` lookup table; seeds with 5 initial values (single/double/deluxe/suite/family) | ✅ Applied |
 | 2026-06-07 | `2026-06-07-room-category-enum-to-text.sql` | Converts `rooms.category`, `bookings.room_category_at_booking`, `booking_rooms.room_category` from `room_category` enum → TEXT; adds FK `rooms.category → room_categories(slug)`; rewrites `create_booking_with_rooms` + `add_room_to_booking` to use TEXT param; drops `room_category` enum | ✅ Applied |
+| 2026-06-07 | `2026-06-07-room-analytics-rpcs.sql` | Adds `room_analytics_by_room(date, date)` and `room_occupancy_trend(date, date)` read-only RPCs powering `/rooms/analytics` dashboard | ✅ Applied |
 
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
@@ -936,6 +953,7 @@ cd /Users/arif80760/hotel-management &&
 | Auth / role logic | `contexts/AuthContext.tsx` |
 | DB ↔ UI field mapping (rooms) | `services/roomsService.ts` `mapRoom()` |
 | Room categories (add/rename/deactivate) | `services/roomCategoriesService.ts` + `app/rooms/RoomsClient.tsx` (Manage Categories modal) |
+| Room analytics KPIs / charts | `app/rooms/analytics/RoomAnalyticsClient.tsx` (RPCs via `services/roomAnalyticsService.ts`) |
 | DB ↔ UI field mapping (bookings) | `services/bookingsService.ts` `mapBooking()` |
 | Account transactions / balances | `services/accountsService.ts` |
 | Cashbook UI (ledger, filters) | `app/accounts/cashbook/CashbookClient.tsx` |
