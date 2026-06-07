@@ -860,11 +860,7 @@ export default function FrontDeskClient() {
                     <div className="flex flex-col gap-1.5 items-end flex-shrink-0">
                       <button
                         onClick={() => handleCheckOut(b)}
-                        className={`flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shadow-sm ${
-                          due > 0
-                            ? "text-amber-800 bg-amber-50 border border-amber-300 hover:bg-amber-100"
-                            : "text-white bg-slate-700 hover:bg-slate-800"
-                        }`}
+                        className="flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap text-slate-700 bg-slate-100 border border-slate-200 hover:bg-slate-200"
                       >
                         Check Out
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
@@ -966,11 +962,7 @@ export default function FrontDeskClient() {
                       {b.status === "Checked In" && (
                         <button
                           onClick={() => handleCheckOut(b)}
-                          className={`flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shadow-sm ${
-                            due > 0
-                              ? "text-amber-800 bg-amber-50 border border-amber-300 hover:bg-amber-100"
-                              : "text-white bg-slate-700 hover:bg-slate-800"
-                          }`}
+                          className="flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap text-slate-700 bg-slate-100 border border-slate-200 hover:bg-slate-200"
                         >
                           Check Out
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
