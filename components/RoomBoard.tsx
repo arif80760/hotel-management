@@ -10,6 +10,7 @@
 import { useState, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useHotel, type RoomStatus, type Room, type Booking, type BookingStatus } from "@/contexts/HotelContext";
+import { deriveRoomStatusForDate, localDateToISO, TODAY_ISO } from "@/lib/roomStatus";
 
 // ── Status colour config — single source of truth ────────────
 const STATUS: Record<RoomStatus, {
@@ -36,60 +37,9 @@ const GridIcon = (
   </svg>
 );
 
-// ── Date helpers ─────────────────────────────────────────────
-// Uses local date components (not toISOString) to avoid UTC-midnight
-// rollback in timezones east of UTC (e.g. UTC+6 Bangladesh).
-function localDateToISO(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-const TODAY_ISO = localDateToISO(new Date());
-
 // ── Status derivation helpers ─────────────────────────────────
-
-function deriveRoomStatusForDate(
-  room: Room, dateISO: string, todayISO: string, bookings: Booking[],
-): RoomStatus {
-  // 1. Operational states are point-in-time — only override on today
-  if (dateISO === todayISO) {
-    if (room.status === "Cleaning" || room.status === "Maintenance") {
-      return room.status;
-    }
-  }
-  // 2. SPECIAL CASE: today is checkout date and guest is still Checked In —
-  //    physically present until staff confirms. Half-open would say "released"
-  //    but guest hasn't left yet.
-  if (dateISO === todayISO) {
-    const stillCheckedIn = bookings.some(b =>
-      b.rooms.some(
-        r =>
-          r.roomNumber === room.roomNumber &&
-          r.status === "Checked In" &&
-          r.checkOutISO === todayISO,
-      )
-    );
-    if (stillCheckedIn) return "Occupied";
-  }
-  // 3. Standard active booking check (half-open — checkout day is released).
-  //    Iterates b.rooms[] so multi-room bookings match each room correctly.
-  for (const b of bookings) {
-    if (b.status === "Cancelled") continue;
-    const matched = b.rooms.find(
-      r =>
-        r.roomNumber === room.roomNumber &&
-        r.status !== "Cancelled" &&
-        r.checkInISO <= dateISO && dateISO < r.checkOutISO,
-    );
-    if (matched) {
-      const s = matched.status;
-      if (s === "Checked In")                                                        return "Occupied";
-      if ((s === "Checked Out" || s === "Checked Out Early") && dateISO < todayISO) return "Occupied";
-      if (s === "Confirmed" && dateISO >= todayISO)                                 return "Reserved";
-      break; // stale Confirmed on past dates → fall through to Available
-    }
-  }
-  // 4. Default
-  return "Available";
-}
+// localDateToISO / TODAY_ISO / deriveRoomStatusForDate now live in
+// lib/roomStatus.ts (imported above) — same logic, shared with the dashboard.
 
 function getBookingForRoomOnDate(
   room: Room, dateISO: string, todayISO: string, bookings: Booking[],
