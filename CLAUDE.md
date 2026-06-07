@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-07 (rev 15)
+Last updated: 2026-06-07 (rev 16)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -626,7 +626,10 @@ Dynamic labels:
 ### Three-Layer Double-Booking Prevention
 1. **Layer A (UI)** — `useMemo` computes overlap on every keystroke
 2. **Layer B (handler)** — `handleSubmit()` re-checks before `createBooking()`
-3. **Layer C (service)** — `bookingsService.createBooking()` queries DB for overlaps
+3. **Layer C (service)** — `bookingsService.createBooking()` queries DB for overlaps (Step 2.5 — one query per room, non-fatal on query error)
+4. **Layer D (RPC)** — `create_booking_with_rooms` and `add_room_to_booking` each run an in-transaction overlap check and `RAISE EXCEPTION` on conflict; both RPCs **fail closed** (added 2026-06-07 via `2026-06-07-booking-overlap-guard.sql`)
+
+> **GiST EXCLUDE constraint**: a `daterange` exclusion constraint would be the ideal DB-level backstop but is deferred to pre-launch test-data cleanup (existing rows with gaps/overlaps would block the constraint creation).
 
 ### Role Permissions
 | Action | staff | admin |
@@ -933,6 +936,7 @@ cd /Users/arif80760/hotel-management &&
 | 2026-06-07 | `2026-06-07-room-categories-table.sql` | Creates `room_categories` lookup table; seeds with 5 initial values (single/double/deluxe/suite/family) | ✅ Applied |
 | 2026-06-07 | `2026-06-07-room-category-enum-to-text.sql` | Converts `rooms.category`, `bookings.room_category_at_booking`, `booking_rooms.room_category` from `room_category` enum → TEXT; adds FK `rooms.category → room_categories(slug)`; rewrites `create_booking_with_rooms` + `add_room_to_booking` to use TEXT param; drops `room_category` enum | ✅ Applied |
 | 2026-06-07 | `2026-06-07-room-analytics-rpcs.sql` | Adds `room_analytics_by_room(date, date)` and `room_occupancy_trend(date, date)` read-only RPCs powering `/rooms/analytics` dashboard | ✅ Applied |
+| 2026-06-07 | `2026-06-07-booking-overlap-guard.sql` | Adds in-transaction room-overlap guard to `create_booking_with_rooms` and `add_room_to_booking`; both RPCs now fail closed on double-booking | ✅ Applied |
 
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
