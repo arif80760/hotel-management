@@ -5,22 +5,14 @@
 -- Exported: 2026-05-07  (reconstructed from observed schema)
 -- Updated:  2026-05-08  — booking_status extended with 'checked_out_early'
 --                         via migration 2026-05-08-multi-room-enum-prep.sql
+--           2026-06-07  — room_category enum DROPPED; rooms.category is now
+--                         TEXT FK → room_categories(slug). See migration
+--                         2026-06-07-room-category-enum-to-text.sql.
 --
 -- All types live in the public schema.
 -- Changes to enum values require ALTER TYPE … ADD VALUE — you
 -- cannot DROP a value from a live enum without recreating it.
 -- =============================================================
-
--- ── room_category ────────────────────────────────────────────
--- Lowercase values stored in DB; frontend capitalises for display.
--- Room categories as defined in the live room catalog.
-CREATE TYPE public.room_category AS ENUM (
-  'single',
-  'double',
-  'deluxe',
-  'suite',
-  'family'
-);
 
 -- ── room_status ──────────────────────────────────────────────
 -- Occupancy state of a physical room.

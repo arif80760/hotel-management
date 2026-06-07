@@ -6,31 +6,74 @@
 --           spec + existing sql/ migration files + TS types)
 -- Updated:  2026-05-08  — Added booking_rooms, booking_extra_charges,
 --           refunds from migration 2026-05-08-multi-room-foundation.sql
+--           2026-06-07  — Added room_categories; converted rooms.category,
+--           bookings.room_category_at_booking, booking_rooms.room_category
+--           from public.room_category enum to TEXT (migrations
+--           2026-06-07-room-categories-table.sql and
+--           2026-06-07-room-category-enum-to-text.sql).
 --
 -- Dependency order:
---   1. rooms                  (no FK deps)
---   2. guests                 (no FK deps)
---   3. profiles               (refs auth.users)
---   4. employees              (refs auth.users)
---   5. bookings               (refs rooms, guests, auth.users)
---   6. payments               (refs bookings, auth.users)
---   7. booking_guests         (refs bookings, guests)
---   8. booking_documents      (no table FK — uses booking_ref text)
---   9. booking_rooms          (refs bookings, rooms)
---  10. booking_extra_charges  (refs bookings, booking_rooms, auth.users)
---  11. refunds                (refs bookings, booking_rooms, auth.users)
+--   1. room_categories        (no FK deps — lookup table)
+--   2. rooms                  (FK → room_categories)
+--   3. guests                 (no FK deps)
+--   4. profiles               (refs auth.users)
+--   5. employees              (refs auth.users)
+--   6. bookings               (refs rooms, guests, auth.users)
+--   7. payments               (refs bookings, auth.users)
+--   8. booking_guests         (refs bookings, guests)
+--   9. booking_documents      (no table FK — uses booking_ref text)
+--  10. booking_rooms          (refs bookings, rooms)
+--  11. booking_extra_charges  (refs bookings, booking_rooms, auth.users)
+--  12. refunds                (refs bookings, booking_rooms, auth.users)
 -- =============================================================
 
 
 -- ──────────────────────────────────────────────────────────────
--- 1. rooms
+-- 1. room_categories
+-- Managed lookup table of room category labels.
+-- Replaces the former public.room_category enum (dropped 2026-06-07).
+-- slug is the stable FK key stored in rooms.category and in booking
+-- snapshots; name is the editable display label.
+-- Added: 2026-06-07 via migration 2026-06-07-room-categories-table.sql.
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.room_categories (
+  id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug        TEXT         NOT NULL UNIQUE,   -- stable key: 'single', 'double', …
+  name        TEXT         NOT NULL,          -- display label: 'Single', 'Double', …
+  sort_order  SMALLINT     NOT NULL DEFAULT 0,
+  is_active   BOOLEAN      NOT NULL DEFAULT TRUE,
+  created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.room_categories IS
+  'Managed list of room categories. Replaces the room_category enum. '
+  'slug is the stable key stored on rooms.category and in booking snapshots; '
+  'name is the editable display label. Retire a category with is_active=false '
+  '(never hard-delete one that rooms still reference).';
+
+INSERT INTO public.room_categories (slug, name, sort_order) VALUES
+  ('single', 'Single', 1),
+  ('double', 'Double', 2),
+  ('deluxe', 'Deluxe', 3),
+  ('suite',  'Suite',  4),
+  ('family', 'Family', 5)
+ON CONFLICT (slug) DO NOTHING;
+
+
+-- ──────────────────────────────────────────────────────────────
+-- 2. rooms
 -- Physical hotel rooms.  status is managed by fn_sync_room_status.
+-- category is a TEXT FK → room_categories(slug); ON UPDATE CASCADE
+-- means renaming a slug propagates automatically (rare but safe).
 -- ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.rooms (
   id              UUID              PRIMARY KEY DEFAULT gen_random_uuid(),
   room_number     VARCHAR(10)       NOT NULL UNIQUE,
   floor           SMALLINT          NOT NULL,
-  category        public.room_category NOT NULL,
+  category        TEXT              NOT NULL
+                    REFERENCES public.room_categories(slug)
+                    ON UPDATE CASCADE ON DELETE RESTRICT,
   status          public.room_status   NOT NULL DEFAULT 'available',
   price_per_night NUMERIC(10, 2)    NOT NULL,
   capacity        SMALLINT          NOT NULL DEFAULT 2,
@@ -40,6 +83,7 @@ CREATE TABLE IF NOT EXISTS public.rooms (
 );
 
 COMMENT ON TABLE  public.rooms IS 'Physical hotel rooms — one row per room unit';
+COMMENT ON COLUMN public.rooms.category IS 'Lowercase slug FK → room_categories.slug, e.g. ''deluxe''';
 COMMENT ON COLUMN public.rooms.status IS 'Current occupancy state; maintained by trigger fn_sync_room_status';
 COMMENT ON COLUMN public.rooms.amenities IS 'Array of amenity strings, e.g. {WiFi,TV,"Mini Bar"}';
 
@@ -136,7 +180,7 @@ CREATE TABLE IF NOT EXISTS public.bookings (
   check_in_date                DATE               NOT NULL,
   check_out_date               DATE               NOT NULL,
   nights                       SMALLINT           NOT NULL,
-  room_category_at_booking     public.room_category NOT NULL,
+  room_category_at_booking     TEXT               NOT NULL,  -- frozen slug snapshot; no FK (intentional)
   total_guests                 SMALLINT           NOT NULL DEFAULT 1,
 
   -- ── Status ──────────────────────────────────────────────────
@@ -305,7 +349,7 @@ CREATE TABLE IF NOT EXISTS public.booking_rooms (
   check_in_date          DATE                  NOT NULL,
   check_out_date         DATE                  NOT NULL,
   nights                 SMALLINT              NOT NULL,
-  room_category          public.room_category  NOT NULL,
+  room_category          TEXT                  NOT NULL,  -- frozen slug snapshot; no FK (intentional)
   booking_rate           NUMERIC(10, 2)         NOT NULL,
   status                 public.booking_status NOT NULL DEFAULT 'confirmed',
   actual_checkout_date   DATE,

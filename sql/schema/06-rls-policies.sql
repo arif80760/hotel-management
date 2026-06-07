@@ -89,6 +89,7 @@ ALTER TABLE public.booking_extra_charges  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.refunds                ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.accounts               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.account_transactions   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.room_categories        ENABLE ROW LEVEL SECURITY;
 
 
 -- =============================================================
@@ -282,3 +283,19 @@ CREATE POLICY "Account transactions update — admin only"
 CREATE POLICY "Account transactions delete — admin only"
   ON public.account_transactions FOR DELETE TO authenticated
   USING (current_user_role() = 'admin');
+
+
+-- =============================================================
+-- SECTION 3 — Room categories policies (3)
+-- Added: 2026-06-07  Migration: 2026-06-07-room-categories-rls.sql
+-- =============================================================
+CREATE POLICY "Room categories select — authenticated"
+  ON public.room_categories FOR SELECT TO authenticated
+  USING (true);
+CREATE POLICY "Room categories insert — admin only"
+  ON public.room_categories FOR INSERT TO authenticated
+  WITH CHECK (current_user_role() = 'admin');
+CREATE POLICY "Room categories update — admin only"
+  ON public.room_categories FOR UPDATE TO authenticated
+  USING (current_user_role() = 'admin')
+  WITH CHECK (current_user_role() = 'admin');
