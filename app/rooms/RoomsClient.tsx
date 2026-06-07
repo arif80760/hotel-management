@@ -19,11 +19,22 @@ import { useState, useMemo, useEffect, useCallback } from "react";
 import { useHotel } from "@/contexts/HotelContext";
 import { useAuth }  from "@/contexts/AuthContext";
 import type { MockRoom, RoomStatus } from "@/lib/mockData";
+import {
+  getRoomCategories,
+  createRoomCategory,
+  updateRoomCategoryName,
+  setRoomCategoryActive,
+  type RoomCategory,
+} from "@/services/roomCategoriesService";
 
 // ─────────────────────────────────────────────────────────────
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────
-const CATEGORIES  = ["Single", "Double", "Deluxe", "Suite", "Family"] as const;
+// CATEGORIES is no longer a hardcoded array — loaded dynamically from
+// the room_categories table. The constant below is kept only as a
+// fallback while the async load is in-flight.
+const FALLBACK_CATEGORIES = ["Single", "Double", "Deluxe", "Suite", "Family"];
+
 const FLOOR_OPTIONS = [
   "Floor 1", "Floor 2", "Floor 3", "Floor 4", "Floor 5",
   "Floor 6", "Floor 7", "Floor 8", "Floor 9", "Floor 10",
@@ -49,11 +60,12 @@ type RoomFormData = {
 
 type FormErrors = Partial<Record<keyof RoomFormData, string>>;
 
+// category stores the slug (e.g. "double"), matching what's written to rooms.category in the DB.
 const EMPTY_FORM: RoomFormData = {
   roomNumber: "",
   floor:      "Floor 1",
   capacity:   "2",
-  category:   "Double",
+  category:   "double",
   price:      "150",
   amenities:  "WiFi, TV",
 };
@@ -107,6 +119,78 @@ export default function RoomsClient() {
 
   const { role } = useAuth();
   const isAdmin = role === "admin";   // only admins may add / edit / delete rooms
+
+  // ── Room categories (dynamic from DB) ───────────────────────
+  const [categories,    setCategories]    = useState<RoomCategory[]>([]);
+  const [catsLoading,   setCatsLoading]   = useState(true);
+
+  useEffect(() => {
+    getRoomCategories()
+      .then(setCategories)
+      .catch(() => { /* fallback list stays in place */ })
+      .finally(() => setCatsLoading(false));
+  }, []);
+
+  // Active categories for the dropdown; falls back to hardcoded list while loading
+  const activeCategories = useMemo(
+    () => categories.filter(c => c.isActive),
+    [categories],
+  );
+
+  // slug → display name for the table
+  const categoryNameMap = useMemo(
+    () => new Map(categories.map(c => [c.slug, c.name])),
+    [categories],
+  );
+
+  // ── Manage Categories modal state ────────────────────────────
+  const [manageOpen,    setManageOpen]    = useState(false);
+  const [newCatName,    setNewCatName]    = useState("");
+  const [savingNewCat,  setSavingNewCat]  = useState(false);
+  const [renamingId,    setRenamingId]    = useState<string | null>(null);
+  const [renameValue,   setRenameValue]   = useState("");
+  const [togglingId,    setTogglingId]    = useState<string | null>(null);
+  const [catError,      setCatError]      = useState("");
+
+  async function handleAddCategory() {
+    if (!newCatName.trim()) return;
+    setSavingNewCat(true);
+    setCatError("");
+    try {
+      const created = await createRoomCategory(newCatName);
+      setCategories(prev => [...prev, created]);
+      setNewCatName("");
+    } catch (err) {
+      setCatError(err instanceof Error ? err.message : "Failed to create category.");
+    } finally {
+      setSavingNewCat(false);
+    }
+  }
+
+  async function handleRenameCategory(id: string) {
+    if (!renameValue.trim()) { setRenamingId(null); return; }
+    try {
+      const updated = await updateRoomCategoryName(id, renameValue);
+      setCategories(prev => prev.map(c => c.id === id ? updated : c));
+    } catch (err) {
+      setCatError(err instanceof Error ? err.message : "Rename failed.");
+    } finally {
+      setRenamingId(null);
+      setRenameValue("");
+    }
+  }
+
+  async function handleToggleActive(cat: RoomCategory) {
+    setTogglingId(cat.id);
+    try {
+      const updated = await setRoomCategoryActive(cat.id, !cat.isActive);
+      setCategories(prev => prev.map(c => c.id === cat.id ? updated : c));
+    } catch (err) {
+      setCatError(err instanceof Error ? err.message : "Toggle failed.");
+    } finally {
+      setTogglingId(null);
+    }
+  }
 
   // ── Filter state ────────────────────────────────────────────
   const [floorFilter,  setFloorFilter]  = useState<string>("All");
@@ -181,7 +265,7 @@ export default function RoomsClient() {
       roomNumber: room.roomNumber,
       floor:      room.floor,
       capacity:   String(room.capacity),
-      category:   room.category,
+      category:   room.category.toLowerCase(), // store slug, e.g. "deluxe"
       price:      String(room.price),
       amenities:  room.amenities.join(", "),
     });
@@ -308,15 +392,26 @@ export default function RoomsClient() {
           </p>
         </div>
         {isAdmin && (
-          <button
-            onClick={openAdd}
-            className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white text-[13px] font-medium px-4 py-2.5 rounded-lg transition-colors shadow-sm"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
-              <path d="M12 5v14M5 12h14"/>
-            </svg>
-            Add Room
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => { setCatError(""); setManageOpen(true); }}
+              className="flex items-center gap-2 bg-white hover:bg-slate-50 text-slate-700 text-[13px] font-medium px-4 py-2.5 rounded-lg border border-slate-200 hover:border-slate-300 transition-colors shadow-sm"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
+                <path d="M4 6h16M4 12h16M4 18h16"/>
+              </svg>
+              Manage Categories
+            </button>
+            <button
+              onClick={openAdd}
+              className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white text-[13px] font-medium px-4 py-2.5 rounded-lg transition-colors shadow-sm"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
+                <path d="M12 5v14M5 12h14"/>
+              </svg>
+              Add Room
+            </button>
+          </div>
         )}
       </div>
 
@@ -459,11 +554,16 @@ export default function RoomsClient() {
                       </span>
                     </td>
 
-                    {/* Category */}
+                    {/* Category — display name from map; falls back to cap(slug) */}
                     <td className="px-5 py-3.5">
-                      <span className={`px-2.5 py-1 rounded-md text-[12px] font-semibold ${categoryBadge(room.category)}`}>
-                        {room.category}
-                      </span>
+                      {(() => {
+                        const displayName = categoryNameMap.get(room.category.toLowerCase()) ?? room.category;
+                        return (
+                          <span className={`px-2.5 py-1 rounded-md text-[12px] font-semibold ${categoryBadge(room.category)}`}>
+                            {displayName}
+                          </span>
+                        );
+                      })()}
                     </td>
 
                     {/* Floor */}
@@ -582,6 +682,189 @@ export default function RoomsClient() {
       </div>
 
       {/* ══════════════════════════════════════════════════════
+          MANAGE CATEGORIES MODAL
+      ══════════════════════════════════════════════════════ */}
+      {manageOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+          onClick={e => { if (e.target === e.currentTarget) setManageOpen(false); }}
+        >
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
+              <div className="flex items-center gap-2.5">
+                <div className="w-7 h-7 rounded-lg bg-slate-800 flex items-center justify-center">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-white">
+                    <path d="M4 6h16M4 12h16M4 18h16"/>
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-[14px] font-semibold text-slate-800 leading-none">Manage Room Categories</h2>
+                  <p className="text-[11.5px] text-slate-400 mt-0.5">Add, rename, or deactivate categories</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setManageOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
+                  <path d="M18 6L6 18M6 6l12 12"/>
+                </svg>
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-6 space-y-5 max-h-[60vh] overflow-y-auto">
+
+              {/* Error */}
+              {catError && (
+                <div className="text-[12px] text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-4 py-3">
+                  {catError}
+                </div>
+              )}
+
+              {/* Add new */}
+              <div>
+                <label className="block text-[11.5px] font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                  New Category
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="e.g. Penthouse"
+                    value={newCatName}
+                    onChange={e => { setNewCatName(e.target.value); setCatError(""); }}
+                    onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); handleAddCategory(); } }}
+                    className="flex-1 px-3.5 py-2 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                      placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
+                  />
+                  <button
+                    onClick={handleAddCategory}
+                    disabled={!newCatName.trim() || savingNewCat}
+                    className="px-4 py-2 text-[12.5px] font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
+                  >
+                    {savingNewCat ? "Adding…" : "Add"}
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  A stable slug is derived automatically from the name.
+                </p>
+              </div>
+
+              {/* Category list */}
+              <div>
+                <label className="block text-[11.5px] font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                  All Categories
+                </label>
+                <div className="space-y-1.5">
+                  {categories.length === 0 && (
+                    <p className="text-[12.5px] text-slate-400 italic py-2">Loading…</p>
+                  )}
+                  {categories.map(cat => (
+                    <div
+                      key={cat.id}
+                      className={`flex items-center gap-3 px-4 py-2.5 rounded-xl border transition-colors ${
+                        cat.isActive ? "bg-white border-slate-200" : "bg-slate-50 border-slate-100 opacity-60"
+                      }`}
+                    >
+                      {/* Rename inline */}
+                      {renamingId === cat.id ? (
+                        <input
+                          autoFocus
+                          type="text"
+                          value={renameValue}
+                          onChange={e => setRenameValue(e.target.value)}
+                          onBlur={() => handleRenameCategory(cat.id)}
+                          onKeyDown={e => {
+                            if (e.key === "Enter") handleRenameCategory(cat.id);
+                            if (e.key === "Escape") { setRenamingId(null); setRenameValue(""); }
+                          }}
+                          className="flex-1 px-2.5 py-1 text-[13px] text-slate-800 border border-amber-400 rounded-lg
+                            focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent"
+                        />
+                      ) : (
+                        <span className="flex-1 text-[13px] font-medium text-slate-700">
+                          {cat.name}
+                          <span className="ml-2 text-[11px] font-normal text-slate-400 font-mono">{cat.slug}</span>
+                        </span>
+                      )}
+
+                      {/* Active badge */}
+                      <span className={`text-[10.5px] font-semibold px-2 py-0.5 rounded-full ${
+                        cat.isActive
+                          ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+                          : "bg-slate-100 text-slate-400 ring-1 ring-slate-200"
+                      }`}>
+                        {cat.isActive ? "Active" : "Inactive"}
+                      </span>
+
+                      {/* Rename button */}
+                      {renamingId !== cat.id && (
+                        <button
+                          onClick={() => { setRenamingId(cat.id); setRenameValue(cat.name); setCatError(""); }}
+                          title="Rename display label"
+                          className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5">
+                            <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+                            <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                          </svg>
+                        </button>
+                      )}
+
+                      {/* Toggle active */}
+                      <button
+                        disabled={togglingId === cat.id}
+                        onClick={() => handleToggleActive(cat)}
+                        title={cat.isActive ? "Deactivate" : "Reactivate"}
+                        className={`p-1.5 rounded-lg transition-colors ${
+                          cat.isActive
+                            ? "text-slate-400 hover:text-rose-500 hover:bg-rose-50"
+                            : "text-slate-400 hover:text-emerald-600 hover:bg-emerald-50"
+                        } disabled:opacity-40 disabled:cursor-not-allowed`}
+                      >
+                        {togglingId === cat.id ? (
+                          <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M21 12a9 9 0 11-6.219-8.56"/>
+                          </svg>
+                        ) : cat.isActive ? (
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5">
+                            <circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/>
+                          </svg>
+                        ) : (
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5">
+                            <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
+                          </svg>
+                        )}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Slug note */}
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                <span className="font-semibold text-slate-500">Note:</span> The slug (shown in grey) is a stable key used in the database.
+                It is set at creation and never changes, even if you rename the category.
+                Deactivating a category hides it from the room form but does not affect existing rooms.
+              </p>
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-slate-100 flex justify-end">
+              <button
+                onClick={() => setManageOpen(false)}
+                className="px-4 py-2 text-[13px] font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════
           ADD / EDIT MODAL
       ══════════════════════════════════════════════════════ */}
       {modalOpen && (
@@ -674,9 +957,14 @@ export default function RoomsClient() {
                       className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
                         focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition appearance-none cursor-pointer"
                     >
-                      {CATEGORIES.map(c => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
+                      {catsLoading
+                        ? FALLBACK_CATEGORIES.map(c => (
+                            <option key={c} value={c.toLowerCase()}>{c}</option>
+                          ))
+                        : activeCategories.map(c => (
+                            <option key={c.slug} value={c.slug}>{c.name}</option>
+                          ))
+                      }
                     </select>
                   </div>
 
