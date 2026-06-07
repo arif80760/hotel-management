@@ -170,7 +170,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
 
         {/* ── Arrivals & Departures (3/5) ─────────────────── */}
-        <div className="lg:col-span-3 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="lg:col-span-3 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
           <div className="flex border-b border-slate-200">
             {/* Arrivals tab — always active (departures tab is a count indicator) */}
             <div className="flex items-center gap-2 px-5 py-3.5 border-b-2 border-amber-500 cursor-default select-none">
@@ -189,7 +189,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <ul className="divide-y divide-slate-100">
+          <ul className="divide-y divide-slate-100 flex-1">
             {todaysArrivals.length === 0 ? (
               <li className="px-5 py-10 text-center">
                 <p className="text-[13px] text-slate-400">
