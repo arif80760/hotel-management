@@ -8,6 +8,7 @@
 
 import { useMemo } from "react";
 import { useHotel } from "@/contexts/HotelContext";
+import { deriveRoomStatusForDate, TODAY_ISO } from "@/lib/roomStatus";
 
 // ── Inline SVG icons (same as page.tsx) ─────────────────────
 const Icons = {
@@ -47,10 +48,17 @@ export default function DashboardStats() {
     year:  "numeric",
   });
 
-  // ── Live counts derived from shared room state ─────────────
-  const total        = rooms.length;
-  const occupied     = rooms.filter(r => r.status === "Occupied").length;
-  const available    = rooms.filter(r => r.status === "Available").length;
+  // ── Live counts — derived from bookings via lib/roomStatus so Occupied /
+  //    Available match the Room Board exactly (physical rooms.status is not a
+  //    reliable occupancy signal). ─────────────────────────────
+  const total      = rooms.length;
+  const floorCount = new Set(rooms.map(r => r.floor)).size;
+  const todayStatuses = useMemo(
+    () => rooms.map(r => deriveRoomStatusForDate(r, TODAY_ISO, TODAY_ISO, bookings)),
+    [rooms, bookings],
+  );
+  const occupied     = todayStatuses.filter(s => s === "Occupied").length;
+  const available    = todayStatuses.filter(s => s === "Available").length;
   const occupancyPct = total > 0 ? ((occupied / total) * 100).toFixed(1) : "0.0";
 
   // ── Today's arrivals / departures ──────────────────────────
@@ -69,7 +77,7 @@ export default function DashboardStats() {
     {
       label:  "Total Rooms",
       value:  String(total),
-      sub:    "Across 4 floors",
+      sub:    `Across ${floorCount} floor${floorCount === 1 ? "" : "s"}`,
       icon:   Icons.bed,
       accent: "bg-slate-800",
       border: "border-l-slate-700",

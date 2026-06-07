@@ -19,8 +19,8 @@
 
 import { useMemo } from "react";
 import Link from "next/link";
-import { useHotel }        from "@/contexts/HotelContext";
-import type { BookingStatus } from "@/contexts/HotelContext";
+import { useHotel, type RoomStatus, type Room, type Booking, type BookingStatus } from "@/contexts/HotelContext";
+import { deriveRoomStatusForDate, localDateToISO, TODAY_ISO } from "@/lib/roomStatus";
 import DashboardStats      from "@/components/DashboardStats";
 import RoomBoard           from "@/components/RoomBoard";
 
@@ -105,26 +105,32 @@ export default function DashboardPage() {
   const recentBookings = useMemo(() => bookings.slice(0, 5), [bookings]);
 
   // ── Derived: occupancy per floor ───────────────────────────
+  // Uses deriveRoomStatusForDate so counts match the Room Board exactly
+  // (physical rooms.status lags behind bookings in some edge cases).
   const floorStats = useMemo(() => {
-    const floorOrder = ["Floor 1", "Floor 2", "Floor 3", "Floor 4"];
+    const floorOrder = Array.from(new Set(rooms.map(r => r.floor))).sort((a, b) => {
+      const numA = parseInt(a.replace(/\D/g, ""), 10) || 0;
+      const numB = parseInt(b.replace(/\D/g, ""), 10) || 0;
+      return numA - numB;
+    });
     return floorOrder
       .map(label => {
         const fr = rooms.filter(r => r.floor === label);
         return {
           label,
-          occupied: fr.filter(r => r.status === "Occupied").length,
+          occupied: fr.filter(r => deriveRoomStatusForDate(r, TODAY_ISO, TODAY_ISO, bookings) === "Occupied").length,
           total:    fr.length,
         };
       })
       .filter(f => f.total > 0); // omit floors with no rooms in DB
-  }, [rooms]);
+  }, [rooms, bookings]);
 
   // ── Derived: overall occupancy % ───────────────────────────
   const overallOccupancy = useMemo(() => {
     if (rooms.length === 0) return null;
-    const occ = rooms.filter(r => r.status === "Occupied").length;
+    const occ = rooms.filter(r => deriveRoomStatusForDate(r, TODAY_ISO, TODAY_ISO, bookings) === "Occupied").length;
     return ((occ / rooms.length) * 100).toFixed(1);
-  }, [rooms]);
+  }, [rooms, bookings]);
 
   return (
     <div className="p-7 space-y-6 max-w-[1440px]">
