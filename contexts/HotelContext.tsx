@@ -450,6 +450,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
               ...b,
               status:       "Checked Out" as BookingStatus,
               checkedOutAt: now,
+              rooms: b.rooms.map(r => (r.status === "Checked In" || r.status === "Confirmed") ? { ...r, status: "Checked Out" as BookingRoomStatus } : r),
               extraChargeAmount:        extraChargeAmount > 0        ? extraChargeAmount        : undefined,
               extraChargeReason:        extraChargeReason            || undefined,
               actualCheckoutDate:       actualCheckoutDate           || undefined,
@@ -471,7 +472,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     );
     setRooms(prev =>
       prev.map(r =>
-        checkingOutRoomNumbers.has(r.roomNumber) ? { ...r, status: "Cleaning" as RoomStatus } : r
+        checkingOutRoomNumbers.has(r.roomNumber) ? { ...r, status: "Available" as RoomStatus } : r
       )
     );
     return bookingsService.checkoutNormal(
@@ -531,6 +532,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
               ...b,
               status:       "Checked Out" as BookingStatus,
               checkedOutAt: now,
+              rooms: b.rooms.map(r => (r.status === "Checked In" || r.status === "Confirmed") ? { ...r, status: "Checked Out" as BookingRoomStatus } : r),
               checkoutOverride: override,
               extraChargeAmount:        extraChargeAmount && extraChargeAmount > 0                             ? extraChargeAmount        : undefined,
               extraChargeReason:        extraChargeReason                                                      || undefined,
@@ -552,7 +554,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     );
     setRooms(prev =>
       prev.map(r =>
-        checkingOutRoomNumbers.has(r.roomNumber) ? { ...r, status: "Cleaning" as RoomStatus } : r
+        checkingOutRoomNumbers.has(r.roomNumber) ? { ...r, status: "Available" as RoomStatus } : r
       )
     );
     return bookingsService.checkoutWithOverride(

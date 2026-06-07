@@ -32,13 +32,7 @@ export const TODAY_ISO = localDateToISO(new Date());
 export function deriveRoomStatusForDate(
   room: Room, dateISO: string, todayISO: string, bookings: Booking[],
 ): RoomStatus {
-  // 1. Operational states are point-in-time — only override on today
-  if (dateISO === todayISO) {
-    if (room.status === "Cleaning" || room.status === "Maintenance") {
-      return room.status;
-    }
-  }
-  // 2. SPECIAL CASE: today is checkout date and guest is still Checked In —
+  // 1. SPECIAL CASE: today is checkout date and guest is still Checked In —
   //    physically present until staff confirms. Half-open would say "released"
   //    but guest hasn't left yet.
   if (dateISO === todayISO) {
