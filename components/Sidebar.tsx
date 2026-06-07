@@ -95,6 +95,14 @@ const Icons = {
       <line x1="12" y1="22.08" x2="12" y2="12" />
     </svg>
   ),
+  analytics: (
+    /* Bar chart — three vertical bars of increasing height */
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">
+      <path d="M18 20V10"/>
+      <path d="M12 20V4"/>
+      <path d="M6 20v-6"/>
+    </svg>
+  ),
 };
 
 // ── Nav items ─────────────────────────────────────────────────
@@ -135,8 +143,9 @@ function isGroup(item: NavItem): item is NavGroup {
 const navItems: NavItem[] = [
   { label: "Dashboard",  href: "/",            icon: Icons.dashboard  },
   { label: "Front Desk", href: "/front-desk",  icon: Icons.frontdesk  },
-  { label: "Rooms",      href: "/rooms",       icon: Icons.rooms      },
-  { label: "Guests",     href: "/guests",      icon: Icons.guests     },
+  { label: "Rooms",          href: "/rooms",            icon: Icons.rooms                        },
+  { label: "Room Analytics", href: "/rooms/analytics", icon: Icons.analytics, adminOnly: true },
+  { label: "Guests",         href: "/guests",          icon: Icons.guests                     },
   { label: "Bookings",   href: "/bookings",    icon: Icons.bookings   },
   { label: "Employees",  href: "/employees",   icon: Icons.employees, adminOnly: true },
   { label: "Inventory",  href: "/inventory",   icon: Icons.inventory, adminOnly: true },
@@ -281,8 +290,14 @@ export default function Sidebar() {
             }
 
             // ─── Leaf (everything else) ───────────────────────
-            const isActive =
-              item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+            // For /rooms specifically, only mark active on the exact path or
+            // immediate sub-paths that are NOT the analytics sub-route (which
+            // has its own sidebar entry).
+            const isActive = item.href === "/"
+              ? pathname === "/"
+              : item.href === "/rooms"
+                ? pathname === "/rooms" || (pathname.startsWith("/rooms/") && !pathname.startsWith("/rooms/analytics"))
+                : pathname.startsWith(item.href);
 
             return (
               <Link
