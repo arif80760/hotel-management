@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-06 (rev 13)
+Last updated: 2026-06-07 (rev 14)
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -63,14 +63,18 @@ hotel-management/
 │   └── HotelContext.tsx         # Shared rooms + bookings state; all action functions
 │
 ├── services/
-│   ├── roomsService.ts          # Supabase CRUD for rooms table
-│   ├── bookingsService.ts       # Supabase CRUD for bookings table (with joins)
-│   ├── guestsService.ts         # Supabase CRUD for guests table
-│   ├── employeesService.ts      # Supabase CRUD for employees table
-│   ├── documentsService.ts      # Supabase Storage + booking_documents table
-│   ├── accountsService.ts       # Financial accounts — transactions, balances, types, lender name join
-│   ├── inventoryService.ts      # Inventory items + movements CRUD; pack label / units_per_pack fields
-│   └── loansService.ts          # Loans CRUD — create loan, list with status, record repayment
+│   ├── roomsService.ts              # Supabase CRUD for rooms table
+│   ├── roomCategoriesService.ts     # CRUD for room_categories lookup table (dynamic categories)
+│   ├── bookingsService.ts           # Supabase CRUD for bookings table (with joins)
+│   ├── guestsService.ts             # Supabase CRUD for guests table
+│   ├── employeesService.ts          # Supabase CRUD for employees table
+│   ├── documentsService.ts          # Supabase Storage + booking_documents table
+│   ├── accountsService.ts           # Financial accounts — transactions, balances, types, lender name join
+│   ├── inventoryService.ts          # Inventory items + movements CRUD; pack label / units_per_pack fields
+│   ├── inventoryCategoriesService.ts# Inventory category lookup CRUD (same pattern)
+│   ├── expenseCategoriesService.ts  # Expense category lookup CRUD (find-or-create)
+│   ├── revenueCategoriesService.ts  # Revenue category lookup CRUD
+│   └── loansService.ts              # Loans CRUD — create loan, list with status, record repayment
 │
 ├── lib/
 │   ├── mockData.ts              # Central type definitions + HOTEL_POLICY + MOCK_* seed data
@@ -84,12 +88,14 @@ hotel-management/
 │
 ├── sql/                         # All SQL — schema snapshots + migration history
 │   ├── schema/                  # Authoritative current-state schema files (keep in sync with DB)
+│   │   ├── 00-extensions.sql
 │   │   ├── 01-types.sql
 │   │   ├── 02-tables.sql
-│   │   ├── 03-functions.sql
-│   │   ├── 04-indexes.sql
-│   │   ├── 05-triggers.sql
-│   │   └── 06-rls-policies.sql
+│   │   ├── 03-views.sql
+│   │   ├── 04-functions.sql
+│   │   ├── 05-indexes.sql
+│   │   ├── 06-triggers.sql
+│   │   └── 07-rls-policies.sql
 │   └── migrations/              # Ordered migration history — apply once in Supabase SQL Editor
 │       ├── add_booking_rate_columns.sql
 │       ├── add_extra_charge_columns.sql
@@ -119,13 +125,30 @@ hotel-management/
 | id | UUID PK | auto-generated |
 | room_number | TEXT UNIQUE | e.g. "101" |
 | floor | INTEGER | 1–4 |
-| category | TEXT | lowercase enum: single/double/deluxe/suite/family |
+| category | TEXT FK → room_categories.slug | lowercase slug; ON UPDATE CASCADE, ON DELETE RESTRICT |
 | status | TEXT | lowercase enum: available/reserved/occupied/cleaning/maintenance |
 | price_per_night | NUMERIC(10,2) | nightly rate |
 | capacity | INTEGER | max guests |
 | amenities | TEXT[] | e.g. ["WiFi","TV","Mini Bar"] |
 | created_at | TIMESTAMPTZ | default NOW() |
 | updated_at | TIMESTAMPTZ | default NOW() |
+
+### `room_categories`
+Managed lookup table — replaces the former `room_category` enum (migrated 2026-06-07).
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto-generated |
+| slug | TEXT UNIQUE NOT NULL | stable FK key: "single", "deluxe", "junior-suite" — never changes |
+| name | TEXT NOT NULL | editable display label: "Single", "Deluxe", "Junior Suite" |
+| sort_order | SMALLINT NOT NULL | display order; auto-assigned (max+1) on creation |
+| is_active | BOOLEAN NOT NULL DEFAULT TRUE | inactive = hidden from room form dropdown; rooms keep their FK intact |
+| created_at / updated_at | TIMESTAMPTZ | |
+
+Slug derives from name at creation time via `slugifyCategory()` in `roomCategoriesService.ts`:
+`"Junior Suite" → "junior-suite"`. Seeded with 5 values: single/double/deluxe/suite/family.
+
+**Key rule**: `rooms.category` stores the **slug** (lowercase). `roomsService.mapRoom()` capitalises with `cap(slug)` for display. `RoomsClient` form stores slug in `form.category`; `toRoomPayload()` still calls `.toLowerCase()` on it (harmless no-op since slugs are already lowercase).
+**Snapshot columns** (`bookings.room_category_at_booking`, `booking_rooms.room_category`) are TEXT with **no FK** — frozen at booking time so history stays truthful even if a category is later renamed or retired.
 
 ### `guests`
 | Column | Type | Notes |
@@ -242,7 +265,7 @@ Added: 2026-05-08 — multi-room junction table.
 | room_id | UUID FK → rooms.id | ON DELETE RESTRICT |
 | check_in_date / check_out_date | DATE | NOT NULL |
 | nights | SMALLINT | NOT NULL — stored (not generated) |
-| room_category | room_category enum | NOT NULL — snapshot at booking time |
+| room_category | TEXT | NOT NULL — frozen slug snapshot at booking time (no FK) |
 | booking_rate | NUMERIC(10,2) | NOT NULL — negotiated rate per night |
 | status | booking_status enum | NOT NULL DEFAULT 'confirmed' |
 | actual_checkout_date | DATE | nullable |
@@ -436,6 +459,7 @@ inventory_items ──1:N──> inventory_movements (item_id)
 |---|---|---|
 | Auth (login/logout, role-based) | ✅ Complete | `contexts/AuthContext.tsx`, `app/login/` |
 | Rooms (CRUD, status management) | ✅ Complete | `app/rooms/`, `services/roomsService.ts` |
+| Room Categories (dynamic managed lookup) | ✅ Complete | `services/roomCategoriesService.ts`, `app/rooms/RoomsClient.tsx` (Manage Categories modal) |
 | Bookings (full lifecycle) | ✅ Complete | `app/bookings/BookingsClient.tsx`, `services/bookingsService.ts` |
 | Front Desk (daily ops view) | ✅ Complete | `app/front-desk/FrontDeskClient.tsx` |
 | Guests (profiles, VIP, notes) | ✅ Complete | `app/guests/`, `services/guestsService.ts` |
@@ -793,12 +817,11 @@ When today > `check_in_date` and status is still `"Confirmed"`. Planned: add `no
 - **Inventory** — full CRUD for items (low-stock threshold, pack config), stock movements (purchase, consumption, adjustment), stock-level display
 - **Inventory multi-unit pack support** — `pack_label` + `units_per_pack` on items; box/piece toggle in Add Stock modal and expense purchase seam; base unit conversion before all writes
 - **Loans (Stage 6)** — loans register (read-only, 7-column table, outstanding pill), `LoanEntryActions` toolbar widget in cashbook (Loan received + Loan repayment modals), admin-only RLS, lender name surfaced in cashbook rows
+- **Dynamic Room Categories** — `room_categories` managed lookup table; `roomCategoriesService.ts` (getRoomCategories, createRoomCategory, updateRoomCategoryName, setRoomCategoryActive); `RoomsClient` Manage Categories modal (add, rename, soft-deactivate); category dropdown in room form sourced from DB instead of hardcoded constant; `form.category` now stores slug; category name map used for display
 
 ### Pending / Next Steps
-- **git push** — all commits from this session have not been pushed to remote
 - **Transfer modal smoke test** — transfer movement implemented but not browser-tested
 - **Loans repayment history UI** — `getLoanRepayments()` exists but not surfaced in the Loans register
-- **CLAUDE.md reflects current state** — updated to rev 10 (this update)
 
 ### Day 3 (most likely)
 - Stay Extension (same-room): extend checkout date, recalculate total, update payment due
@@ -868,9 +891,31 @@ cd /Users/arif80760/hotel-management &&
 | 2026-05-08 | `2026-05-08-multi-room-foundation.sql` | Creates `booking_rooms`, `booking_extra_charges`, `refunds`; backfills; drops `fn_sync_room_status` | ✅ Applied |
 | 2026-05-08 | `2026-05-08-multi-room-rpc.sql` | Adds RPCs: `create_booking_with_rooms`, `checkout_booking_room`, `checkin_booking_room`, `cancel_booking_room`, `extend_booking_room`, `update_booking_total` | ✅ Applied |
 | 2026-05-08 | `2026-05-08-rpc-add-status-param.sql` | Adds `p_status` param to `create_booking_with_rooms` | ✅ Applied |
-| 2026-06-02 | `2026-06-02-inventory-multi-unit.sql` | Adds `pack_label` (text) + `units_per_pack` (numeric) to `inventory_items` | ⏳ Pending apply |
-
-**⚠️ Note on `2026-06-02-inventory-multi-unit.sql`**: The TypeScript service and UI already reference these columns. Apply this migration in Supabase before testing inventory pack features.
+| 2026-05-08 | `2026-05-08-backfill-stale-checkin-rooms.sql` | Backfills stale check-in room statuses | ✅ Applied |
+| 2026-05-08 | `2026-05-08-checkin-cascade-rpc.sql` | Check-in cascade RPC | ✅ Applied |
+| 2026-05-08 | `2026-05-08-create-booking-total-cross-check.sql` | Adds total-amount cross-check to `create_booking_with_rooms` | ✅ Applied |
+| 2026-05-09 | `2026-05-09-checkin-booking-room-rpc.sql` | Adds/updates `checkin_booking_room` RPC | ✅ Applied |
+| 2026-05-09 | `2026-05-09-phase7-rpc-updates.sql` | Phase 7 RPC updates | ✅ Applied |
+| 2026-05-17 | `2026-05-17-phase-b1b-rls-lockdown.sql` | Phase B1b: RLS lockdown | ✅ Applied |
+| 2026-05-17 | `2026-05-17-phase-d4-drop-anon-select.sql` | Drops anon SELECT policies | ✅ Applied |
+| 2026-05-18 | `2026-05-18-accounts-core-stage1.sql` | Creates `accounts` + `account_transactions` tables; `AccountTxnType` enum; `next_voucher_number()` RPC | ✅ Applied |
+| 2026-05-18 | `2026-05-18-phase-e1-role-aware-rls.sql` | Role-aware RLS policies | ✅ Applied |
+| 2026-05-19 | `2026-05-19-accounts-core-stage2-balances-view.sql` | Adds balances view | ✅ Applied |
+| 2026-05-23 | `2026-05-23-booking-payment-integration-backfill.sql` | Backfills `booking_payment_id` on existing account_transactions | ✅ Applied |
+| 2026-05-23 | `2026-05-23-booking-payment-integration-trigger.sql` | Adds `fn_sync_account_transactions` trigger — auto-creates `revenue_in` row on payment INSERT | ✅ Applied |
+| 2026-05-23 | `2026-05-23-voucher-number-sequence.sql` | Adds voucher number sequence + RPC | ✅ Applied |
+| 2026-05-24 | `2026-05-24-account-transactions-soft-delete.sql` | Adds `deleted_at` to `account_transactions` | ✅ Applied |
+| 2026-05-24 | `2026-05-24-booking-payment-integration-update-branch-fix.sql` | Fixes UPDATE branch in payment integration trigger | ✅ Applied |
+| 2026-05-24 | `2026-05-24-day-close.sql` | Day-close procedure | ✅ Applied |
+| 2026-05-29 | `2026-05-29-account-transactions-audit-trail.sql` | Adds audit trail columns to account_transactions | ✅ Applied |
+| 2026-05-30 | `2026-05-30-expense-categories-and-integrity.sql` | Creates `expense_categories` table; adds `category_id`, `payee`, `employee_id`, `booking_payment_id`, `created_by` to account_transactions | ✅ Applied |
+| 2026-05-30 | `2026-05-30-voucher-rpc-security-definer.sql` | Marks `next_voucher_number()` as SECURITY DEFINER | ✅ Applied |
+| 2026-05-31 | `2026-05-31-inventory-schema.sql` | Creates `inventory_categories`, `inventory_items`, `inventory_movements` tables | ✅ Applied |
+| 2026-05-31 | `2026-05-31-revenue-categories-and-integrity.sql` | Creates `revenue_categories` table; adds `revenue_category_id` to account_transactions | ✅ Applied |
+| 2026-06-02 | `2026-06-02-inventory-multi-unit.sql` | Adds `pack_label` (text) + `units_per_pack` (numeric) to `inventory_items` | ✅ Applied |
+| 2026-06-02 | `2026-06-02-loans.sql` | Creates `loans` table; adds `loan_id` to account_transactions; `loan_received`/`loan_repayment` enum values | ✅ Applied |
+| 2026-06-07 | `2026-06-07-room-categories-table.sql` | Creates `room_categories` lookup table; seeds with 5 initial values (single/double/deluxe/suite/family) | ✅ Applied |
+| 2026-06-07 | `2026-06-07-room-category-enum-to-text.sql` | Converts `rooms.category`, `bookings.room_category_at_booking`, `booking_rooms.room_category` from `room_category` enum → TEXT; adds FK `rooms.category → room_categories(slug)`; rewrites `create_booking_with_rooms` + `add_room_to_booking` to use TEXT param; drops `room_category` enum | ✅ Applied |
 
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
@@ -890,6 +935,7 @@ cd /Users/arif80760/hotel-management &&
 | Document upload/delete | `services/documentsService.ts` |
 | Auth / role logic | `contexts/AuthContext.tsx` |
 | DB ↔ UI field mapping (rooms) | `services/roomsService.ts` `mapRoom()` |
+| Room categories (add/rename/deactivate) | `services/roomCategoriesService.ts` + `app/rooms/RoomsClient.tsx` (Manage Categories modal) |
 | DB ↔ UI field mapping (bookings) | `services/bookingsService.ts` `mapBooking()` |
 | Account transactions / balances | `services/accountsService.ts` |
 | Cashbook UI (ledger, filters) | `app/accounts/cashbook/CashbookClient.tsx` |
