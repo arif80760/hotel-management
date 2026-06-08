@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-08 (rev 20)
+Last updated: 2026-06-08 (rev 21)
 
 > **rev 19** — Removed the cleaning/maintenance lifecycle from the dashboard Room Board. Checkout now releases a room straight to Available (`checkoutNormal`/`checkoutWithOverride` set the physical room Available and optimistically mark `booking_rooms` Checked Out). `lib/roomStatus.deriveRoomStatusForDate` no longer special-cases Cleaning/Maintenance — the board shows only Available/Reserved/Occupied, derived from bookings; summary/legend trimmed to those three. **KNOWN FOLLOW-UP:** the `checkout_booking` DB RPC and the Rooms admin page may still reference cleaning/maintenance physical statuses — harmless to the board (which ignores physical status) but worth retiring if those statuses are fully dropped.
 
@@ -944,6 +944,7 @@ cd /Users/arif80760/hotel-management &&
 | 2026-06-07 | `2026-06-07-room-analytics-rpcs.sql` | Adds `room_analytics_by_room(date, date)` and `room_occupancy_trend(date, date)` read-only RPCs powering `/rooms/analytics` dashboard | ✅ Applied |
 | 2026-06-07 | `2026-06-07-booking-overlap-guard.sql` | Adds in-transaction room-overlap guard to `create_booking_with_rooms` and `add_room_to_booking`; both RPCs now fail closed on double-booking | ✅ Applied |
 | 2026-06-08 | `2026-06-08-update-booking-total-rooms-only.sql` | Fixes `update_booking_total` to sum `booking_rooms` only (excludes `booking_extra_charges`), preventing a latent double-count where re-running the RPC would have folded the scalar `extra_charge_amount` into `total_amount` and flipped `payment_status` | ✅ Applied |
+| 2026-06-08 | `2026-06-08-checkout-early-status-propagation.sql` | `checkout_booking`, `checkout_booking_room`, and `cancel_booking_room` now promote `bookings.status` to `checked_out_early` when any room departed early; `fn_stamp_booking_timestamps` stamps `checked_out_at` on both `checked_out` and `checked_out_early`; frontend `DB_TO_BOOKING_STATUS` maps `checked_out_early → "Checked Out"` | ✅ Applied |
 
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
