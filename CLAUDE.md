@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-08 (rev 19)
+Last updated: 2026-06-08 (rev 20)
 
 > **rev 19** — Removed the cleaning/maintenance lifecycle from the dashboard Room Board. Checkout now releases a room straight to Available (`checkoutNormal`/`checkoutWithOverride` set the physical room Available and optimistically mark `booking_rooms` Checked Out). `lib/roomStatus.deriveRoomStatusForDate` no longer special-cases Cleaning/Maintenance — the board shows only Available/Reserved/Occupied, derived from bookings; summary/legend trimmed to those three. **KNOWN FOLLOW-UP:** the `checkout_booking` DB RPC and the Rooms admin page may still reference cleaning/maintenance physical statuses — harmless to the board (which ignores physical status) but worth retiring if those statuses are fully dropped.
 
@@ -943,6 +943,7 @@ cd /Users/arif80760/hotel-management &&
 | 2026-06-07 | `2026-06-07-room-category-enum-to-text.sql` | Converts `rooms.category`, `bookings.room_category_at_booking`, `booking_rooms.room_category` from `room_category` enum → TEXT; adds FK `rooms.category → room_categories(slug)`; rewrites `create_booking_with_rooms` + `add_room_to_booking` to use TEXT param; drops `room_category` enum | ✅ Applied |
 | 2026-06-07 | `2026-06-07-room-analytics-rpcs.sql` | Adds `room_analytics_by_room(date, date)` and `room_occupancy_trend(date, date)` read-only RPCs powering `/rooms/analytics` dashboard | ✅ Applied |
 | 2026-06-07 | `2026-06-07-booking-overlap-guard.sql` | Adds in-transaction room-overlap guard to `create_booking_with_rooms` and `add_room_to_booking`; both RPCs now fail closed on double-booking | ✅ Applied |
+| 2026-06-08 | `2026-06-08-update-booking-total-rooms-only.sql` | Fixes `update_booking_total` to sum `booking_rooms` only (excludes `booking_extra_charges`), preventing a latent double-count where re-running the RPC would have folded the scalar `extra_charge_amount` into `total_amount` and flipped `payment_status` | ✅ Applied |
 
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
