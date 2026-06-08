@@ -125,10 +125,11 @@ type BookingRow = {
 // ─────────────────────────────────────────────────────────────
 
 const DB_TO_BOOKING_STATUS: Record<string, BookingStatus> = {
-  confirmed:    "Confirmed",
-  checked_in:   "Checked In",
-  checked_out:  "Checked Out",
-  cancelled:    "Cancelled",
+  confirmed:          "Confirmed",
+  checked_in:         "Checked In",
+  checked_out:        "Checked Out",
+  checked_out_early:  "Checked Out",   // early checkout collapses to "Checked Out" in the UI
+  cancelled:          "Cancelled",
 };
 
 const BOOKING_STATUS_TO_DB: Record<BookingStatus, string> = {
