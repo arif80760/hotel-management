@@ -1,10 +1,14 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-09 (rev 22)
+Last updated: 2026-06-09 (rev 24)
 
 > **rev 19** — Removed the cleaning/maintenance lifecycle from the dashboard Room Board. Checkout now releases a room straight to Available (`checkoutNormal`/`checkoutWithOverride` set the physical room Available and optimistically mark `booking_rooms` Checked Out). `lib/roomStatus.deriveRoomStatusForDate` no longer special-cases Cleaning/Maintenance — the board shows only Available/Reserved/Occupied, derived from bookings; summary/legend trimmed to those three.
 >
 > **rev 22** — Completed the Cleaning/Maintenance removal end-to-end. `RoomStatus` union narrowed to `Available | Occupied | Reserved`. Removed Cleaning/Maintenance from `RoomsClient` filters/badges/dots, `RoomBoard` STATUS config and `statusCounts` initialiser, `canDeleteRoom` guard, and all three seed rooms. `bookingToRoomStatus["Checked Out"]` changed to `"Available"` (was `"Cleaning"` — the last live write path). DB RPC `2026-06-08-drop-cleaning-checkout-frees-room.sql` backfills and rewires all three checkout RPCs. The KNOWN FOLLOW-UP from rev 19 is now resolved.
+>
+> **rev 23** — Added server-side enforcement of admin-only checkout override. `trg_enforce_override_is_admin` (SECURITY DEFINER) on `bookings` rejects `override_checkout = true` flips from non-admin callers and stamps `override_by`/`override_at` server-side. Exempt when `auth.uid() IS NULL` (service-role migrations). Migration: `sql/migrations/2026-06-08-enforce-override-admin.sql`.
+>
+> **rev 24** — Added "No Show" booking lifecycle end-to-end. `BookingStatus` union extended to include `"No Show"`. `deriveRoomStatusForDate` skips no-show bookings (rooms become Available). `derivePaymentStatus` returns `"Cancelled"` for no-show (deposit kept, balance waived). `bookingsService` maps `no_show ↔ "No Show"` and exports `markBookingNoShow()` RPC wrapper. `HotelContext` adds `markBookingNoShow` with optimistic update + rollback. `BookingsClient` gains filter tab, badge, count, and confirm-modal button. All exhaustive `Record<BookingStatus, string>` maps updated. DB: `2026-06-09-no-show-feature.sql` (enum + RPC) and `2026-06-09-no-show-exclude-from-analytics.sql` (analytics exclusion).
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
