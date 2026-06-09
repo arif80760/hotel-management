@@ -1,8 +1,10 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-08 (rev 21)
+Last updated: 2026-06-09 (rev 22)
 
-> **rev 19** — Removed the cleaning/maintenance lifecycle from the dashboard Room Board. Checkout now releases a room straight to Available (`checkoutNormal`/`checkoutWithOverride` set the physical room Available and optimistically mark `booking_rooms` Checked Out). `lib/roomStatus.deriveRoomStatusForDate` no longer special-cases Cleaning/Maintenance — the board shows only Available/Reserved/Occupied, derived from bookings; summary/legend trimmed to those three. **KNOWN FOLLOW-UP:** the `checkout_booking` DB RPC and the Rooms admin page may still reference cleaning/maintenance physical statuses — harmless to the board (which ignores physical status) but worth retiring if those statuses are fully dropped.
+> **rev 19** — Removed the cleaning/maintenance lifecycle from the dashboard Room Board. Checkout now releases a room straight to Available (`checkoutNormal`/`checkoutWithOverride` set the physical room Available and optimistically mark `booking_rooms` Checked Out). `lib/roomStatus.deriveRoomStatusForDate` no longer special-cases Cleaning/Maintenance — the board shows only Available/Reserved/Occupied, derived from bookings; summary/legend trimmed to those three.
+>
+> **rev 22** — Completed the Cleaning/Maintenance removal end-to-end. `RoomStatus` union narrowed to `Available | Occupied | Reserved`. Removed Cleaning/Maintenance from `RoomsClient` filters/badges/dots, `RoomBoard` STATUS config and `statusCounts` initialiser, `canDeleteRoom` guard, and all three seed rooms. `bookingToRoomStatus["Checked Out"]` changed to `"Available"` (was `"Cleaning"` — the last live write path). DB RPC `2026-06-08-drop-cleaning-checkout-frees-room.sql` backfills and rewires all three checkout RPCs. The KNOWN FOLLOW-UP from rev 19 is now resolved.
 
 Comprehensive reference for AI assistants and developers working on this codebase.
 
@@ -945,6 +947,7 @@ cd /Users/arif80760/hotel-management &&
 | 2026-06-07 | `2026-06-07-booking-overlap-guard.sql` | Adds in-transaction room-overlap guard to `create_booking_with_rooms` and `add_room_to_booking`; both RPCs now fail closed on double-booking | ✅ Applied |
 | 2026-06-08 | `2026-06-08-update-booking-total-rooms-only.sql` | Fixes `update_booking_total` to sum `booking_rooms` only (excludes `booking_extra_charges`), preventing a latent double-count where re-running the RPC would have folded the scalar `extra_charge_amount` into `total_amount` and flipped `payment_status` | ✅ Applied |
 | 2026-06-08 | `2026-06-08-checkout-early-status-propagation.sql` | `checkout_booking`, `checkout_booking_room`, and `cancel_booking_room` now promote `bookings.status` to `checked_out_early` when any room departed early; `fn_stamp_booking_timestamps` stamps `checked_out_at` on both `checked_out` and `checked_out_early`; frontend `DB_TO_BOOKING_STATUS` maps `checked_out_early → "Checked Out"` | ✅ Applied |
+| 2026-06-08 | `2026-06-08-drop-cleaning-checkout-frees-room.sql` | The three checkout RPCs (`checkout_booking`, `checkout_booking_room`, `cancel_booking_room`) now set `rooms.status = 'available'` (was `'cleaning'`); existing cleaning/maintenance rooms backfilled to available | ✅ Applied |
 
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
