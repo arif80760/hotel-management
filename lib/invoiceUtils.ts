@@ -81,6 +81,7 @@ export function derivePaymentStatus(
   status:      BookingStatus,
 ): PaymentStatus {
   if (status === "Cancelled")    return "Cancelled";
+  if (status === "No Show")      return "Cancelled";   // no-show: settled, deposit kept
   if (amountPaid <= 0)           return "Unpaid";
   if (amountPaid >= totalAmount) return "Paid";
   return "Partial";

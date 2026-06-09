@@ -168,6 +168,12 @@ type HotelContextType = {
     disbursementNotes?:  string | null,
     disbursedBy?:        string | null,
   ) => Promise<void>;
+  /**
+   * Mark a Confirmed booking as a no-show. Optimistically flips the booking
+   * and its rooms to "No Show" and frees the physical rooms; the deposit is
+   * kept and the remaining balance is waived. Rolls back on failure.
+   */
+  markBookingNoShow: (bookingRef: string) => Promise<void>;
 };
 
 const HotelContext = createContext<HotelContextType | null>(null);
@@ -1061,6 +1067,53 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       });
   }
 
+  function markBookingNoShow(bookingRef: string) {
+    const target = bookings.find(b => b.id === bookingRef);
+    if (!target) return Promise.resolve();
+    const prevBookings = bookings;
+    const prevRooms    = rooms;
+
+    // Optimistic: all rooms -> No Show
+    const noShowRooms = target.rooms.map(r => ({
+      ...r,
+      status: "No Show" as BookingRoomStatus,
+    }));
+
+    // Physical rooms -> Available (rooms released; guest never arrived)
+    const releasedRoomNumbers = new Set(target.rooms.map(r => r.roomNumber));
+
+    setBookings(prev =>
+      prev.map(b => b.id !== bookingRef ? b : {
+        ...b,
+        rooms:   noShowRooms,
+        status:  "No Show" as BookingStatus,
+        // Total stays as-is; the DB waives the balance via a discount, so the
+        // authoritative figures arrive on the refresh below. Badge settles now.
+        payment: bookingsService.derivePaymentStatus(b.totalAmount, b.amountPaid, "No Show"),
+      })
+    );
+    setRooms(prev =>
+      prev.map(r =>
+        releasedRoomNumbers.has(r.roomNumber)
+          ? { ...r, status: "Available" as RoomStatus }
+          : r
+      )
+    );
+
+    return bookingsService.markBookingNoShow(bookingRef)
+      .then(() => bookingsService.getBookingByRef(bookingRef))
+      .then(updated => {
+        if (updated) setBookings(prev => prev.map(b => b.id === bookingRef ? updated : b));
+      })
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[HotelContext markBookingNoShow] failed — rolling back:", msg);
+        setBookings(prevBookings);
+        setRooms(prevRooms);
+        throw err;
+      });
+  }
+
   // ── Room actions ────────────────────────────────────────────
 
   function addRoom(room: MockRoom) {
@@ -1147,6 +1200,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       disburseRefund,
       denyRefund,
       cancelBooking,
+      markBookingNoShow,
       addRoom,
       updateRoom,
       deleteRoom,

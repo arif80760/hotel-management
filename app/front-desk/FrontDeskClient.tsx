@@ -59,6 +59,7 @@ function statusBadge(s: BookingStatus): string {
     "Checked In":  "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
     "Checked Out": "bg-slate-100 text-slate-500 ring-1 ring-slate-200",
     "Cancelled":   "bg-red-50 text-red-600 ring-1 ring-red-200",
+    "No Show":     "bg-orange-50 text-orange-700 ring-1 ring-orange-200",
   };
   return m[s];
 }

@@ -130,6 +130,7 @@ const DB_TO_BOOKING_STATUS: Record<string, BookingStatus> = {
   checked_out:        "Checked Out",
   checked_out_early:  "Checked Out",   // early checkout collapses to "Checked Out" in the UI
   cancelled:          "Cancelled",
+  no_show:            "No Show",
 };
 
 const BOOKING_STATUS_TO_DB: Record<BookingStatus, string> = {
@@ -137,6 +138,7 @@ const BOOKING_STATUS_TO_DB: Record<BookingStatus, string> = {
   "Checked In":  "checked_in",
   "Checked Out": "checked_out",
   "Cancelled":   "cancelled",
+  "No Show":     "no_show",
 };
 
 const DB_TO_PAYMENT_STATUS: Record<string, PaymentStatus> = {
@@ -152,6 +154,7 @@ const DB_TO_BOOKING_ROOM_STATUS: Record<string, BookingRoomStatus> = {
   checked_out:        "Checked Out",
   checked_out_early:  "Checked Out Early",
   cancelled:          "Cancelled",
+  no_show:            "No Show",
 };
 
 function cap(s: string): string {
@@ -2458,6 +2461,43 @@ export async function cancelBooking(
   }
 
   return { refundId: (data as string | null) ?? null };
+}
+
+/**
+ * Marks a Confirmed booking as a no-show: flips the booking and its rooms to
+ * 'no_show', frees the physical rooms, keeps any amount paid (deposit
+ * forfeited), and waives the remaining balance. The guest never checked in.
+ *
+ * Raises if the booking is not in 'confirmed' state (mirrors the RPC guard).
+ *
+ * @param bookingRef  booking_ref string ("BK-1041")
+ */
+export async function markBookingNoShow(bookingRef: string): Promise<void> {
+  // Resolve booking_ref -> UUID
+  const { data: bookingRow, error: bookingErr } = await supabase
+    .from("bookings")
+    .select("id")
+    .eq("booking_ref", bookingRef)
+    .single();
+
+  if (bookingErr || !bookingRow) {
+    throw new Error(`[markBookingNoShow] Booking ${bookingRef} not found`);
+  }
+
+  const { error: rpcErr } = await supabase.rpc("mark_booking_no_show", {
+    p_booking_id: bookingRow.id,
+  });
+
+  if (rpcErr) {
+    console.error("[markBookingNoShow] RPC failed:");
+    console.error("  bookingRef:", bookingRef);
+    console.error("  message   :", rpcErr.message);
+    console.error("  code      :", rpcErr.code);
+    throw new Error(
+      `[markBookingNoShow] ${rpcErr.message}` +
+      (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

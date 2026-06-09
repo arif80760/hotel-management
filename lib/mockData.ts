@@ -28,7 +28,8 @@ export type BookingStatus =
   | "Confirmed"
   | "Checked In"
   | "Checked Out"
-  | "Cancelled";
+  | "Cancelled"
+  | "No Show";
 
 /**
  * Payment state for a booking.

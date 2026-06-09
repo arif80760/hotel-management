@@ -49,7 +49,7 @@ export function deriveRoomStatusForDate(
   // 3. Standard active booking check (half-open — checkout day is released).
   //    Iterates b.rooms[] so multi-room bookings match each room correctly.
   for (const b of bookings) {
-    if (b.status === "Cancelled") continue;
+    if (b.status === "Cancelled" || b.status === "No Show") continue;
     const matched = b.rooms.find(
       r =>
         r.roomNumber === room.roomNumber &&
