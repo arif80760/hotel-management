@@ -20,8 +20,6 @@ const STATUS: Record<RoomStatus, {
   Available:   { bg: "bg-emerald-50",  border: "border-emerald-200", dot: "bg-emerald-500", label: "Available",   text: "text-emerald-700" },
   Occupied:    { bg: "bg-rose-50",     border: "border-rose-200",    dot: "bg-rose-500",    label: "Occupied",    text: "text-rose-700"    },
   Reserved:    { bg: "bg-blue-50",     border: "border-blue-200",    dot: "bg-blue-500",    label: "Reserved",    text: "text-blue-700"    },
-  Cleaning:    { bg: "bg-amber-50",    border: "border-amber-200",   dot: "bg-amber-500",   label: "Cleaning",    text: "text-amber-700"   },
-  Maintenance: { bg: "bg-slate-100",   border: "border-slate-300",   dot: "bg-slate-400",   label: "Maintenance", text: "text-slate-500"   },
 };
 
 const SUMMARY_STATUSES: RoomStatus[] = ["Available", "Reserved", "Occupied"];
@@ -116,7 +114,7 @@ export default function RoomBoard() {
 
   const statusCounts = useMemo(() => {
     const counts: Record<RoomStatus, number> = {
-      Available: 0, Reserved: 0, Occupied: 0, Cleaning: 0, Maintenance: 0,
+      Available: 0, Reserved: 0, Occupied: 0,
     };
     for (const room of roomsWithDerivedStatus) counts[room.displayStatus]++;
     return counts;

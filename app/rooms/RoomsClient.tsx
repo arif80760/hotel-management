@@ -12,8 +12,8 @@
 //     controlled by booking workflow (createBooking /
 //     changeBookingStatus) inside HotelContext. Editing a room
 //     preserves its current status unconditionally.
-//   • Delete is blocked when status is Occupied, Reserved, or
-//     Cleaning — those rooms have active or recent bookings.
+//   • Delete is blocked when status is Occupied or Reserved —
+//     those rooms have active bookings.
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { useHotel } from "@/contexts/HotelContext";
@@ -40,11 +40,11 @@ const FLOOR_OPTIONS = [
   "Floor 6", "Floor 7", "Floor 8", "Floor 9", "Floor 10",
 ] as const;
 const ALL_STATUSES: RoomStatus[] = [
-  "Available", "Occupied", "Reserved", "Cleaning", "Maintenance",
+  "Available", "Occupied", "Reserved",
 ];
 
 // Statuses that booking logic owns — delete blocked in these states
-const BOOKING_LOCKED: RoomStatus[] = ["Occupied", "Reserved", "Cleaning"];
+const BOOKING_LOCKED: RoomStatus[] = ["Occupied", "Reserved"];
 
 // ─────────────────────────────────────────────────────────────
 // FORM TYPE  (all strings so <input> bindings are simple)
@@ -75,22 +75,18 @@ const EMPTY_FORM: RoomFormData = {
 // ─────────────────────────────────────────────────────────────
 function statusStyle(s: RoomStatus): string {
   const m: Record<RoomStatus, string> = {
-    Available:   "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
-    Occupied:    "bg-rose-50    text-rose-700    ring-1 ring-rose-200",
-    Reserved:    "bg-blue-50    text-blue-700    ring-1 ring-blue-200",
-    Cleaning:    "bg-amber-50   text-amber-700   ring-1 ring-amber-200",
-    Maintenance: "bg-slate-100  text-slate-600   ring-1 ring-slate-200",
+    Available: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
+    Occupied:  "bg-rose-50    text-rose-700    ring-1 ring-rose-200",
+    Reserved:  "bg-blue-50    text-blue-700    ring-1 ring-blue-200",
   };
   return m[s];
 }
 
 function statusDot(s: RoomStatus): string {
   const m: Record<RoomStatus, string> = {
-    Available:   "bg-emerald-500",
-    Occupied:    "bg-rose-500",
-    Reserved:    "bg-blue-500",
-    Cleaning:    "bg-amber-500",
-    Maintenance: "bg-slate-400",
+    Available: "bg-emerald-500",
+    Occupied:  "bg-rose-500",
+    Reserved:  "bg-blue-500",
   };
   return m[s];
 }
@@ -436,8 +432,6 @@ export default function RoomsClient() {
           { label: "Available",   key: "Available",   style: "bg-emerald-50 border-emerald-200 text-emerald-700", dot: "bg-emerald-500" },
           { label: "Occupied",    key: "Occupied",    style: "bg-rose-50 border-rose-200 text-rose-700",          dot: "bg-rose-500"    },
           { label: "Reserved",    key: "Reserved",    style: "bg-blue-50 border-blue-200 text-blue-700",          dot: "bg-blue-500"    },
-          { label: "Cleaning",    key: "Cleaning",    style: "bg-amber-50 border-amber-200 text-amber-700",       dot: "bg-amber-500"   },
-          { label: "Maintenance", key: "Maintenance", style: "bg-slate-100 border-slate-200 text-slate-600",      dot: "bg-slate-400"   },
         ].map(pill => (
           <div
             key={pill.key}
@@ -1043,7 +1037,7 @@ export default function RoomsClient() {
                     <p className="text-[12px] text-slate-500 leading-relaxed">
                       <span className="font-semibold text-slate-700">Room status is not editable here.</span>{" "}
                       It is automatically managed by the booking workflow — Confirmed → Reserved,
-                      Checked In → Occupied, Checked Out → Cleaning, Cancelled → Available.
+                      Checked In → Occupied, Checked Out → Available, Cancelled → Available.
                     </p>
                   </div>
                 )}

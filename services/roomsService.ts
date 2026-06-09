@@ -285,12 +285,11 @@ export async function deleteRoom(id: string): Promise<void> {
 
 /**
  * Returns true when the room is safe to delete (not currently
- * Occupied, Reserved, or Cleaning — i.e., not booking-locked).
+ * Occupied or Reserved — i.e., not booking-locked).
  */
 export function canDeleteRoom(room: MockRoom): boolean {
   return (
     room.status !== "Occupied" &&
-    room.status !== "Reserved" &&
-    room.status !== "Cleaning"
+    room.status !== "Reserved"
   );
 }

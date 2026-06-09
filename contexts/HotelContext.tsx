@@ -79,8 +79,7 @@ type HotelContextType = {
   addRoom:             (room: MockRoom)                                            => void;
   updateRoom:          (id: string, updates: Partial<Omit<MockRoom, "id"|"status">>) => void;
   deleteRoom:          (id: string)                                                => void;
-  /** Flip a Cleaning room back to Available. Intentionally narrow API for now;
-   *  a generic updateRoomStatus belongs in the Day 3 housekeeping module. */
+  /** Flip a room back to Available (legacy helper retained for compatibility). */
   markRoomAvailable:   (roomNumber: string)                                        => Promise<void>;
   recordPayment:       (id: string, additionalAmount: number, method: PaymentMethod, callerRole?: string) => void;
   /** Normal checkout — no outstanding balance. Stores extra charges, early deduction, and additional discount. */
@@ -465,7 +464,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
           : b
       )
     );
-    // Multi-room fix: mark ALL rooms on this booking as Cleaning, not just rooms[0].
+    // Multi-room fix: mark ALL rooms on this booking as Available, not just rooms[0].
     // target.rooms contains BookingRoom[] with roomNumber from the rooms JOIN.
     const checkingOutRoomNumbers = new Set(
       target.rooms?.map(r => r.roomNumber) ?? [target.roomNumber]
@@ -548,7 +547,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
           : b
       )
     );
-    // Multi-room fix: mark ALL rooms on this booking as Cleaning, not just rooms[0].
+    // Multi-room fix: mark ALL rooms on this booking as Available, not just rooms[0].
     const checkingOutRoomNumbers = new Set(
       target.rooms?.map(r => r.roomNumber) ?? [target.roomNumber]
     );
@@ -1118,8 +1117,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     );
   }
 
-  // Intentionally narrow API — only Cleaning → Available today.
-  // A generic updateRoomStatus action comes with the Day 3 housekeeping module.
+  // Legacy helper — sets a room to Available via Supabase.
   async function markRoomAvailable(roomNumber: string) {
     setRooms(prev =>
       prev.map(r => r.roomNumber === roomNumber ? { ...r, status: "Available" as const } : r)

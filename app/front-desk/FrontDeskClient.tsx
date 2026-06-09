@@ -35,7 +35,6 @@ import { calcBookingLevelDeductions } from "@/lib/checkoutUtils";
 // ─────────────────────────────────────────────────────────────
 // LOCAL TYPES
 // ─────────────────────────────────────────────────────────────
-type AppRole = "Staff" | "Admin";
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS  (mirrors BookingsClient — kept local to avoid coupling)
@@ -215,8 +214,6 @@ export default function FrontDeskClient() {
   const { role: authRole } = useAuth();
   const isAdmin = authRole === "admin";
 
-  // ── Role simulation (UI demo toggle — remove when auth is final) ─
-  const [role, setRole] = useState<AppRole>("Staff");
 
   // ── Feedback ────────────────────────────────────────────────
   const [successMsg, setSuccessMsg] = useState<string>("");
@@ -433,7 +430,7 @@ export default function FrontDeskClient() {
       }
     }
     setSuccessMsg(
-      `${guestName} checked out · Room ${roomNumber} is now Cleaning.`
+      `${guestName} checked out · Room ${roomNumber} is now Available.`
     );
     closeCheckoutConfirm();
   }
@@ -442,9 +439,8 @@ export default function FrontDeskClient() {
     e.preventDefault();
     if (!checkoutConfirm) return;
     // Use real auth role; fall back to the demo role toggle for now
-    const canOverride = isAdmin || role === "Admin";
-    if (!canOverride) {
-      setOverrideError("Switch to Admin role to use this override.");
+    if (!isAdmin) {
+      setOverrideError("Admin access is required to override checkout.");
       return;
     }
     const charge = validateAndBuildCharge();
@@ -582,26 +578,6 @@ export default function FrontDeskClient() {
           </p>
         </div>
 
-        {/* Role simulator — same as Bookings page */}
-        <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg px-3 py-1.5 shadow-sm">
-          <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Role</span>
-          {(["Staff", "Admin"] as AppRole[]).map(r => (
-            <button
-              key={r}
-              onClick={() => setRole(r)}
-              className={`px-2.5 py-1 rounded-md text-[12px] font-semibold transition-colors ${
-                role === r
-                  ? r === "Admin"
-                    ? "bg-amber-500 text-white shadow-sm"
-                    : "bg-slate-800 text-white shadow-sm"
-                  : "text-slate-400 hover:text-slate-600"
-              }`}
-            >
-              {r}
-            </button>
-          ))}
-          <span className="text-[10.5px] text-slate-300 italic">demo</span>
-        </div>
       </div>
 
       {/* ══════════════════════════════════════════════════════
@@ -1023,7 +999,7 @@ export default function FrontDeskClient() {
         const modalPayAmtNum            = parseFloat(modalPayAmt) || 0;
         const finalPayable              = finalPayableBeforeModalPay - modalPayAmtNum;
         const isOverpayment             = modalPayAmtNum > Math.max(0, finalPayableBeforeModalPay);
-        const canOverride               = isAdmin || role === "Admin";
+        const canOverride               = isAdmin;
         const payStatus                 = derivePaymentStatus(checkoutConfirm.totalAmount, liveAmountPaid, checkoutConfirm.status);
         return (
           <div
@@ -1440,15 +1416,12 @@ export default function FrontDeskClient() {
                     <div className="flex items-center gap-2 mb-3">
                       <span className="text-[12px] text-slate-500">Signed in as:</span>
                       <span className={`text-[12px] font-bold px-2.5 py-0.5 rounded-full capitalize ${
-                        canOverride ? "bg-amber-100 text-amber-800 border border-amber-300" : "bg-slate-100 text-slate-600 border border-slate-200"
+                        isAdmin ? "bg-amber-100 text-amber-800 border border-amber-300" : "bg-slate-100 text-slate-600 border border-slate-200"
                       }`}>
-                        {role}
+                        {isAdmin ? "Admin" : "Staff"}
                       </span>
-                      {!canOverride && (
-                        <button onClick={() => setRole("Admin")}
-                          className="text-[11.5px] text-amber-600 hover:text-amber-700 hover:underline font-medium">
-                          Switch to Admin
-                        </button>
+                      {!isAdmin && (
+                        <span className="text-[11.5px] text-slate-400 italic">Admin access required</span>
                       )}
                     </div>
 
@@ -1461,7 +1434,7 @@ export default function FrontDeskClient() {
                         rows={2}
                         placeholder={canOverride
                           ? "e.g. Guest settling via bank transfer, confirmed by manager."
-                          : "Switch to Admin role to enter a reason."}
+                          : "Admin access is required to override."}
                         value={overrideReason}
                         onChange={e => { setOverrideReason(e.target.value); setOverrideError(""); }}
                         disabled={!canOverride}

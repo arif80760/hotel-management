@@ -21,9 +21,7 @@
 export type RoomStatus =
   | "Available"
   | "Occupied"
-  | "Reserved"
-  | "Cleaning"
-  | "Maintenance";
+  | "Reserved";
 
 /** Lifecycle states for a booking. */
 export type BookingStatus =
@@ -458,8 +456,8 @@ export type CreateBookingInput = {
 
 // ─────────────────────────────────────────────────────────────
 // MOCK ROOMS  — 48 rooms across 4 floors
-// Status counts: Occupied=31, Available=12, Cleaning=2,
-//                Maintenance=1, Reserved=2  →  total=48
+// Status counts: Occupied=31, Available=15, Reserved=2  →  total=48
+// (Cleaning and Maintenance removed — all such rooms are now Available)
 // ─────────────────────────────────────────────────────────────
 export const MOCK_ROOMS: MockRoom[] = [
 
@@ -467,13 +465,13 @@ export const MOCK_ROOMS: MockRoom[] = [
   { id: "room-101", roomNumber: "101", floor: "Floor 1", category: "Single", status: "Occupied",    price: 89,  capacity: 1, amenities: ["WiFi", "TV"] },
   { id: "room-102", roomNumber: "102", floor: "Floor 1", category: "Single", status: "Available",   price: 89,  capacity: 1, amenities: ["WiFi", "TV"] },
   { id: "room-103", roomNumber: "103", floor: "Floor 1", category: "Double", status: "Occupied",    price: 129, capacity: 2, amenities: ["WiFi", "TV"] },
-  { id: "room-104", roomNumber: "104", floor: "Floor 1", category: "Double", status: "Cleaning",    price: 129, capacity: 2, amenities: ["WiFi", "TV"] },
+  { id: "room-104", roomNumber: "104", floor: "Floor 1", category: "Double", status: "Available",   price: 129, capacity: 2, amenities: ["WiFi", "TV"] },
   { id: "room-105", roomNumber: "105", floor: "Floor 1", category: "Double", status: "Occupied",    price: 129, capacity: 2, amenities: ["WiFi", "TV", "Mini Bar"] },
   { id: "room-106", roomNumber: "106", floor: "Floor 1", category: "Double", status: "Available",   price: 129, capacity: 2, amenities: ["WiFi", "TV", "Mini Bar"] },
   { id: "room-107", roomNumber: "107", floor: "Floor 1", category: "Family", status: "Occupied",    price: 199, capacity: 4, amenities: ["WiFi", "TV", "Kitchenette"] },
   { id: "room-108", roomNumber: "108", floor: "Floor 1", category: "Family", status: "Occupied",    price: 199, capacity: 4, amenities: ["WiFi", "TV", "Kitchenette"] },
   { id: "room-109", roomNumber: "109", floor: "Floor 1", category: "Double", status: "Occupied",    price: 129, capacity: 2, amenities: ["WiFi", "TV"] },
-  { id: "room-110", roomNumber: "110", floor: "Floor 1", category: "Double", status: "Maintenance", price: 129, capacity: 2, amenities: ["WiFi", "TV"] },
+  { id: "room-110", roomNumber: "110", floor: "Floor 1", category: "Double", status: "Available",   price: 129, capacity: 2, amenities: ["WiFi", "TV"] },
   { id: "room-111", roomNumber: "111", floor: "Floor 1", category: "Single", status: "Occupied",    price: 89,  capacity: 1, amenities: ["WiFi", "TV"] },
   { id: "room-112", roomNumber: "112", floor: "Floor 1", category: "Single", status: "Available",   price: 89,  capacity: 1, amenities: ["WiFi", "TV"] },
   { id: "room-113", roomNumber: "113", floor: "Floor 1", category: "Double", status: "Occupied",    price: 129, capacity: 2, amenities: ["WiFi", "TV", "Mini Bar"] },
@@ -487,7 +485,7 @@ export const MOCK_ROOMS: MockRoom[] = [
   { id: "room-205", roomNumber: "205", floor: "Floor 2", category: "Deluxe", status: "Occupied",  price: 179, capacity: 2, amenities: ["WiFi", "TV", "Mini Bar", "City View"] },
   { id: "room-206", roomNumber: "206", floor: "Floor 2", category: "Suite",  status: "Reserved",  price: 299, capacity: 3, amenities: ["WiFi", "TV", "Jacuzzi", "Ocean View"] },
   { id: "room-207", roomNumber: "207", floor: "Floor 2", category: "Double", status: "Occupied",  price: 129, capacity: 2, amenities: ["WiFi", "TV"] },
-  { id: "room-208", roomNumber: "208", floor: "Floor 2", category: "Double", status: "Cleaning",  price: 129, capacity: 2, amenities: ["WiFi", "TV"] },
+  { id: "room-208", roomNumber: "208", floor: "Floor 2", category: "Double", status: "Available", price: 129, capacity: 2, amenities: ["WiFi", "TV"] },
   { id: "room-209", roomNumber: "209", floor: "Floor 2", category: "Deluxe", status: "Available", price: 179, capacity: 2, amenities: ["WiFi", "TV", "Mini Bar"] },
   { id: "room-210", roomNumber: "210", floor: "Floor 2", category: "Deluxe", status: "Occupied",  price: 179, capacity: 2, amenities: ["WiFi", "TV", "Mini Bar", "City View"] },
   { id: "room-211", roomNumber: "211", floor: "Floor 2", category: "Suite",  status: "Available", price: 299, capacity: 3, amenities: ["WiFi", "TV", "Jacuzzi", "Ocean View"] },

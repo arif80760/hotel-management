@@ -14,7 +14,7 @@
 // Room status sync (via HotelContext):
 //   Confirmed  → Reserved
 //   Checked In → Occupied
-//   Checked Out→ Cleaning
+//   Checked Out→ Available
 //   Cancelled  → Available
 
 import { useState, useEffect, useMemo, Fragment } from "react";
@@ -2169,8 +2169,8 @@ export default function BookingsClient({ initialRoom }: Props) {
     }
     setSuccessMsg(
       activeRoomCount <= 1
-        ? `${guestName} checked out · Room ${roomNumber} is now Cleaning.`
-        : `${guestName} checked out · ${activeRoomCount} rooms are now Cleaning.`
+        ? `${guestName} checked out · Room ${roomNumber} is now Available.`
+        : `${guestName} checked out · ${activeRoomCount} rooms are now Available.`
     );
     // Auto-open invoice in new tab. Fires within the same user-gesture microtask after a
     // short Supabase await — not blocked by Chrome's popup blocker.

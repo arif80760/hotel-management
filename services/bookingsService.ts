@@ -340,13 +340,13 @@ const BOOKING_SELECT = `
  * Booking → Room status mapping (for local state sync).
  *   Confirmed   → Reserved
  *   Checked In  → Occupied
- *   Checked Out → Cleaning
+ *   Checked Out → Available
  *   Cancelled   → Available
  */
 const BOOKING_TO_ROOM_STATUS: Partial<Record<BookingStatus, RoomStatus>> = {
   "Confirmed":   "Reserved",
   "Checked In":  "Occupied",
-  "Checked Out": "Cleaning",
+  "Checked Out": "Available",
   "Cancelled":   "Available",
 };
 
