@@ -279,20 +279,10 @@ export default function RoomBoard() {
               >
                 {floorRooms.map((room) => {
                   const cfg = STATUS[room.displayStatus];
-                  return (
-                    <Link
-                      key={room.roomNumber}
-                      href={`/bookings?room=${room.roomNumber}`}
-                      className={`
-                        group relative flex flex-col justify-between
-                        ${cfg.bg} border ${cfg.border}
-                        rounded-lg px-3 py-2.5
-                        hover:shadow-md hover:scale-[1.03]
-                        active:scale-[0.98]
-                        transition-all duration-150 cursor-pointer
-                        min-h-[72px]
-                      `}
-                    >
+                  const isClickable = room.displayStatus === "Occupied";
+
+                  const roomCard = (
+                    <>
                       <span className="text-[17px] font-extrabold text-slate-800 leading-none tracking-tight">
                         {room.roomNumber}
                       </span>
@@ -311,11 +301,50 @@ export default function RoomBoard() {
                           {extractFirstName(room.displayBooking.guestName)}
                         </p>
                       )}
-                      {/* Hover arrow */}
-                      <span className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity text-slate-400">
-                        {ArrowRight}
-                      </span>
-                    </Link>
+                      {/* Hover arrow — only for occupied rooms */}
+                      {isClickable && (
+                        <span className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity text-slate-400">
+                          {ArrowRight}
+                        </span>
+                      )}
+                    </>
+                  );
+
+                  if (isClickable) {
+                    // Occupied: clickable link
+                    return (
+                      <Link
+                        key={room.roomNumber}
+                        href={`/bookings?room=${room.roomNumber}`}
+                        className={`
+                          group relative flex flex-col justify-between
+                          ${cfg.bg} border ${cfg.border}
+                          rounded-lg px-3 py-2.5
+                          hover:shadow-md hover:scale-[1.03]
+                          active:scale-[0.98]
+                          transition-all duration-150 cursor-pointer
+                          min-h-[72px]
+                        `}
+                      >
+                        {roomCard}
+                      </Link>
+                    );
+                  }
+
+                  // Available/Reserved: non-clickable div
+                  return (
+                    <div
+                      key={room.roomNumber}
+                      className={`
+                        relative flex flex-col justify-between
+                        ${cfg.bg} border ${cfg.border}
+                        rounded-lg px-3 py-2.5
+                        cursor-default
+                        min-h-[72px]
+                      `}
+                    >
+                      {roomCard}
+                    </div>
                   );
                 })}
               </div>

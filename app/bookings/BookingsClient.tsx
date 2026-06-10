@@ -19,6 +19,7 @@
 
 import { useState, useEffect, useMemo, Fragment } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useHotel } from "@/contexts/HotelContext";
 import { useAuth } from "@/contexts/AuthContext";
 import {
@@ -303,7 +304,6 @@ function statusBadge(s: BookingStatus): string {
     "Checked In":  "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
     "Checked Out": "bg-slate-100 text-slate-500 ring-1 ring-slate-200",
     "Cancelled":   "bg-red-50 text-red-600 ring-1 ring-red-200",
-    "No Show":     "bg-orange-50 text-orange-700 ring-1 ring-orange-200",
   };
   return m[s];
 }
@@ -623,6 +623,11 @@ interface Props {
 }
 
 export default function BookingsClient({ initialRoom }: Props) {
+  // ── Read ?room= param for auto-highlight (when clicking RoomBoard)
+  const searchParams = useSearchParams();
+  const roomParam = searchParams.get("room");
+  const [hasAutoScrolled, setHasAutoScrolled] = useState(false);
+
   // ── Shared context ─────────────────────────────────────────
   const {
     rooms, bookings, nextBookingId,
@@ -637,7 +642,6 @@ export default function BookingsClient({ initialRoom }: Props) {
     disburseRefund:           ctxDisburseRefund,
     denyRefund:          ctxDenyRefund,
     cancelBooking:       ctxCancelBooking,
-    markBookingNoShow:   ctxMarkBookingNoShow,
   } = useHotel();
 
   // Real role from authenticated session
@@ -726,10 +730,6 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   // Cancel Booking (whole-booking) modal
   const [cancelBookingModal, setCancelBookingModal] = useState<CancelBookingModalState | null>(null);
-  // No-show confirm modal: holds the target booking (null = closed)
-  const [noShowTarget, setNoShowTarget] = useState<Booking | null>(null);
-  const [noShowSubmitting, setNoShowSubmitting] = useState(false);
-  const [noShowError, setNoShowError] = useState<string | null>(null);
 
   // ── Room blocks (Phase 5.4) ─────────────────────────────────
   // blocks[] stores UI metadata; actual rows live in form.rooms[].
@@ -904,7 +904,6 @@ export default function BookingsClient({ initialRoom }: Props) {
     "Checked In":  bookings.filter(b => b.status === "Checked In").length,
     "Checked Out": bookings.filter(b => b.status === "Checked Out").length,
     Cancelled:     bookings.filter(b => b.status === "Cancelled").length,
-    "No Show":     bookings.filter(b => b.status === "No Show").length,
   };
 
   // ── Dues view derived values ────────────────────────────────
@@ -1005,6 +1004,38 @@ export default function BookingsClient({ initialRoom }: Props) {
       );
     })
   );
+
+  // ── Auto-scroll effect for ?room= param ────────────────────
+  useEffect(() => {
+    if (roomParam && !hasAutoScrolled && pageView === "bookings") {
+      // Check if this room is currently occupied (exists in any active booking)
+      const occupiedBooking = bookings.find(b => {
+        return (b.status === "Checked In" || b.status === "Confirmed") &&
+               b.rooms.some(r => r.roomNumber === roomParam);
+      });
+
+      if (occupiedBooking) {
+        // Room is occupied — open that booking's details instead of new booking form
+        setEditTarget(occupiedBooking);
+        setFormOpen(false);
+        setHasAutoScrolled(true);
+        return;
+      }
+
+      // Room is available — proceed with new booking form highlighting
+      const timer = setTimeout(() => {
+        const target = document.querySelector(`[data-room-cell="${roomParam}"]`);
+        if (target) {
+          target.scrollIntoView({ behavior: "smooth", block: "center" });
+          // Optional: add a brief highlight animation
+          target.classList.add("ring-2", "ring-amber-400", "ring-offset-2");
+          setTimeout(() => target.classList.remove("ring-2", "ring-amber-400", "ring-offset-2"), 1500);
+          setHasAutoScrolled(true);
+        }
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [roomParam, hasAutoScrolled, pageView, bookings]);
 
   // ── Effects ────────────────────────────────────────────────
   useEffect(() => {
@@ -2551,6 +2582,12 @@ export default function BookingsClient({ initialRoom }: Props) {
   }
 
   function handleEditCancel() {
+    // If we came from Room Board (?room= param), navigate back there
+    if (roomParam) {
+      window.location.href = '/';  // Back to Room Board (dashboard)
+      return;
+    }
+    
     setEditTarget(null);
     setEditForm({ ...EMPTY_EDIT_FORM });
     setEditErrors({});
@@ -2680,10 +2717,16 @@ export default function BookingsClient({ initialRoom }: Props) {
       )}
 
       {/* ══════════════════════════════════════════════════════
-          NEW BOOKING FORM
+          NEW BOOKING MODAL (Modal A)
+          Fixed overlay with backdrop. Opens when formOpen=true.
+          Closes via handleCancel or close button.
       ══════════════════════════════════════════════════════ */}
       {formOpen && (
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <div
+          className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center overflow-y-auto p-4"
+          onClick={e => { if (e.target === e.currentTarget) handleCancel(); }}
+        >
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl my-auto">
 
           {/* Form header */}
           <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
@@ -2705,6 +2748,7 @@ export default function BookingsClient({ initialRoom }: Props) {
             </button>
           </div>
 
+        <div className="overflow-y-auto max-h-[calc(90vh-120px)]">
           <form onSubmit={handleSubmit} noValidate>
 
             {/* ── Section 1: Reservation details ── */}
@@ -3514,6 +3558,8 @@ export default function BookingsClient({ initialRoom }: Props) {
             </div>
           </form>
         </div>
+        </div>
+        </div>
       )}
 
       {/* ══════════════════════════════════════════════════════
@@ -3654,9 +3700,12 @@ export default function BookingsClient({ initialRoom }: Props) {
                 const isFutureCheckIn = action?.next === "Checked In" && !canCheckInToday(b.checkInISO);
                 const confirmedRoomsInBooking = b.rooms.filter(rm => rm.status === "Confirmed");
                 const showBulkCheckboxes = confirmedRoomsInBooking.length >= 2;
+                // Extract first room number for data attr
+                const firstRoomNum = b.rooms[0]?.roomNumber ?? "";
                 return (
                   <Fragment key={b.id}>
                   <tr
+                    data-room-cell={firstRoomNum}
                     className={`transition-colors ${
                       b.isNew ? "bg-emerald-50/60 hover:bg-emerald-50" : "hover:bg-slate-50/70"
                     }`}
@@ -3906,19 +3955,6 @@ export default function BookingsClient({ initialRoom }: Props) {
                               <circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/>
                             </svg>
                             Cancel
-                          </button>
-                        )}
-
-                        {/* Mark No-Show — all-confirmed only */}
-                        {b.status === "Confirmed" && b.rooms.every(r => r.status === "Confirmed") && (
-                          <button
-                            onClick={() => setNoShowTarget(b)}
-                            className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-500 hover:text-amber-700 transition-colors"
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 flex-shrink-0">
-                              <circle cx="12" cy="12" r="10"/><path d="M8 15s1.5-2 4-2 4 2 4 2"/><path d="M9 9h.01M15 9h.01"/>
-                            </svg>
-                            No-show
                           </button>
                         )}
 
@@ -6164,7 +6200,7 @@ export default function BookingsClient({ initialRoom }: Props) {
             onClick={handleEditCancel}
           >
             <div
-              className="bg-white rounded-2xl shadow-2xl w-full max-w-lg my-auto"
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl my-auto"
               onClick={e => e.stopPropagation()}
             >
               {/* Header */}
@@ -7801,89 +7837,6 @@ export default function BookingsClient({ initialRoom }: Props) {
                 </button>
               </div>
 
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* NO-SHOW CONFIRM MODAL */}
-      {noShowTarget && (() => {
-        const b = noShowTarget;
-        const paid = b.amountPaid;
-        return (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
-            style={{ backgroundColor: "rgba(0,0,0,0.45)" }}
-            onClick={() => !noShowSubmitting && setNoShowTarget(null)}
-          >
-            <div
-              className="bg-white rounded-2xl shadow-xl w-full max-w-md"
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-slate-100">
-                <div>
-                  <h2 className="text-[14px] font-semibold text-slate-800">
-                    Mark as No-Show
-                    <span className="text-slate-400 font-normal ml-1.5">
-                      {b.id} · {b.rooms.length} room{b.rooms.length !== 1 ? "s" : ""}
-                    </span>
-                  </h2>
-                  <p className="text-[11.5px] text-slate-500 mt-0.5">{b.guestName}</p>
-                </div>
-                <button
-                  onClick={() => !noShowSubmitting && setNoShowTarget(null)}
-                  className="w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4"><path d="M18 6L6 18M6 6l12 12"/></svg>
-                </button>
-              </div>
-
-              <div className="px-6 py-5 space-y-3">
-                <p className="text-[12.5px] text-slate-600 leading-relaxed">
-                  The guest never checked in. This marks the booking as a
-                  <span className="font-semibold text-slate-800"> no-show</span>, frees the
-                  room{b.rooms.length !== 1 ? "s" : ""}, keeps any deposit already paid, and waives
-                  the remaining balance. <span className="font-medium">No refund is issued.</span>
-                </p>
-                <div className="flex items-center justify-between text-[12px] bg-slate-50 rounded-lg px-3 py-2">
-                  <span className="text-slate-500">Deposit kept (forfeited by guest)</span>
-                  <span className="font-semibold text-slate-700">৳{paid.toLocaleString()}</span>
-                </div>
-                {noShowError && (
-                  <p className="text-[11.5px] text-rose-600 bg-rose-50 rounded-lg px-3 py-2">{noShowError}</p>
-                )}
-              </div>
-
-              <div className="px-6 pb-5 flex gap-2 justify-end">
-                <button
-                  type="button"
-                  onClick={() => !noShowSubmitting && setNoShowTarget(null)}
-                  disabled={noShowSubmitting}
-                  className="px-4 py-2 text-[13px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
-                >Keep Booking</button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setNoShowSubmitting(true);
-                    setNoShowError(null);
-                    try {
-                      await ctxMarkBookingNoShow(b.id);
-                      setNoShowTarget(null);
-                    } catch (err) {
-                      setNoShowError(err instanceof Error ? err.message : String(err));
-                    } finally {
-                      setNoShowSubmitting(false);
-                    }
-                  }}
-                  disabled={noShowSubmitting}
-                  className="px-5 py-2 text-[13px] font-semibold text-white bg-amber-500 hover:bg-amber-600 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-2"
-                >
-                  {noShowSubmitting && (
-                    <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                  )}
-                  {noShowSubmitting ? "Marking…" : "Mark No-Show"}
-                </button>
-              </div>
             </div>
           </div>
         );
