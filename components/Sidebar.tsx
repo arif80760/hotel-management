@@ -278,8 +278,8 @@ export default function Sidebar() {
                     )}
                   </button>
 
-                  {/* Children — indented, no icons */}
-                  {showAccountsChildren && (
+                  {/* Children — indented, no icons; hidden while collapsed */}
+                  {!isCollapsed && showAccountsChildren && (
                     <div className="mt-0.5 space-y-0.5">
                       {item.children.map((child) => {
                         const childActive = pathname === child.href || pathname.startsWith(child.href + "/");
