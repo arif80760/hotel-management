@@ -364,3 +364,13 @@ cd /Users/arif80760/hotel-management &&
 | Pack/base conversion logic | `app/inventory/InventoryClient.tsx` (stockUnit) or `app/accounts/expense/ExpenseClient.tsx` (exInvUnit + toBaseQty) |
 | Sidebar navigation | `components/Sidebar.tsx` |
 | Supabase client setup | `lib/supabase.ts` (browser) / `lib/supabaseAdmin.ts` (server) |
+
+## Pricing Architecture (updated 2026-06-11 — rev 26)
+
+- `room_categories.price` is the SINGLE SOURCE OF TRUTH for all pricing.
+- `rooms.price_per_night` column was DROPPED. Never re-add price to rooms.
+- `MockRoom.price` still exists in TypeScript as a placeholder (always 0) for type compatibility — do not read or write it.
+- New bookings pull live category price; old bookings/invoices keep their locked amounts (historical accuracy).
+- Category slug is the stable FK key in `rooms.category` — never change a slug. Only `name` and `price` are editable (Manage Categories modal in Rooms).
+- Category display: rooms store the slug; UI maps slug → `room_categories.name` via catNameMap (exists in both RoomsClient and BookingsClient). Any new UI showing a category must use this map.
+- Dropped: `booking_summary` view (stale, single-room era, unused).
