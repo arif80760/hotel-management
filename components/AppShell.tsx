@@ -87,12 +87,14 @@ export default function AppShell({ children }: { children: ReactNode }) {
   // unauthenticated would trigger Supabase fetches that RLS would block.
   return (
     <HotelProvider>
-      <Sidebar />
-      <div className="flex-1 flex flex-col min-h-screen overflow-hidden">
-        <TopBar />
-        <main className="flex-1 overflow-y-auto bg-slate-50">
-          {children}
-        </main>
+      <div className="flex w-full h-screen">
+        <Sidebar />
+        <div className="flex-1 flex flex-col min-h-screen">
+          <TopBar />
+          <main className="flex-1 overflow-auto bg-slate-50">
+            {children}
+          </main>
+        </div>
       </div>
     </HotelProvider>
   );

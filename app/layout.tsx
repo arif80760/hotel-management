@@ -47,8 +47,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${notoSansBengali.variable} h-full`}>
-      <body className="h-full flex antialiased">
+    <html lang="en" className={`${geistSans.variable} ${notoSansBengali.variable} h-full w-full`}>
+      <body className="h-full w-full flex antialiased">
 
         {/* AuthProvider — session + profile available to every component */}
         <AuthProvider>

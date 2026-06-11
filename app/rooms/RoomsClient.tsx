@@ -23,6 +23,7 @@ import {
   getRoomCategories,
   createRoomCategory,
   updateRoomCategoryName,
+  updateRoomCategoryPrice,
   setRoomCategoryActive,
   type RoomCategory,
 } from "@/services/roomCategoriesService";
@@ -54,19 +55,18 @@ type RoomFormData = {
   floor:      string;
   capacity:   string;   // parsed → number on save
   category:   string;
-  price:      string;   // parsed → number on save
   amenities:  string;   // comma-separated; split on save
 };
 
 type FormErrors = Partial<Record<keyof RoomFormData, string>>;
 
 // category stores the slug (e.g. "double"), matching what's written to rooms.category in the DB.
+// NOTE: price removed — pricing lives on room_categories and is edited in Manage Categories.
 const EMPTY_FORM: RoomFormData = {
   roomNumber: "",
   floor:      "Floor 1",
   capacity:   "2",
   category:   "double",
-  price:      "150",
   amenities:  "WiFi, TV",
 };
 
@@ -142,9 +142,12 @@ export default function RoomsClient() {
   // ── Manage Categories modal state ────────────────────────────
   const [manageOpen,    setManageOpen]    = useState(false);
   const [newCatName,    setNewCatName]    = useState("");
+  const [newCatPrice,   setNewCatPrice]   = useState("");
   const [savingNewCat,  setSavingNewCat]  = useState(false);
   const [renamingId,    setRenamingId]    = useState<string | null>(null);
   const [renameValue,   setRenameValue]   = useState("");
+  const [editingPriceId, setEditingPriceId] = useState<string | null>(null);
+  const [priceValue,    setPriceValue]    = useState("");
   const [togglingId,    setTogglingId]    = useState<string | null>(null);
   const [catError,      setCatError]      = useState("");
 
@@ -153,9 +156,12 @@ export default function RoomsClient() {
     setSavingNewCat(true);
     setCatError("");
     try {
-      const created = await createRoomCategory(newCatName);
+      const price = newCatPrice.trim() ? parseInt(newCatPrice) : 0;
+      if (price < 0) throw new Error("Price cannot be negative.");
+      const created = await createRoomCategory(newCatName, price);
       setCategories(prev => [...prev, created]);
       setNewCatName("");
+      setNewCatPrice("");
     } catch (err) {
       setCatError(err instanceof Error ? err.message : "Failed to create category.");
     } finally {
@@ -185,6 +191,23 @@ export default function RoomsClient() {
       setCatError(err instanceof Error ? err.message : "Toggle failed.");
     } finally {
       setTogglingId(null);
+    }
+  }
+
+  async function handleUpdatePrice(id: string, price: number) {
+    if (price < 0) {
+      setCatError("Price cannot be negative.");
+      return;
+    }
+    try {
+      const updated = await updateRoomCategoryPrice(id, price);
+      setCategories(prev => prev.map(c => c.id === id ? updated : c));
+      setCatError("");
+    } catch (err) {
+      setCatError(err instanceof Error ? err.message : "Price update failed.");
+    } finally {
+      setEditingPriceId(null);
+      setPriceValue("");
     }
   }
 
@@ -262,7 +285,6 @@ export default function RoomsClient() {
       floor:      room.floor,
       capacity:   String(room.capacity),
       category:   room.category.toLowerCase(), // store slug, e.g. "deluxe"
-      price:      String(room.price),
       amenities:  room.amenities.join(", "),
     });
     setErrors({});
@@ -304,11 +326,6 @@ export default function RoomsClient() {
       e.capacity = "Capacity must be between 1 and 20.";
     }
 
-    const price = parseFloat(form.price);
-    if (!form.price || isNaN(price) || price < 1) {
-      e.price = "Price must be a positive number.";
-    }
-
     setErrors(e);
     return Object.keys(e).length === 0;
   }
@@ -330,7 +347,6 @@ export default function RoomsClient() {
         floor:      form.floor,
         capacity:   parseInt(form.capacity),
         category:   form.category,
-        price:      parseFloat(form.price),
         amenities:  amenitiesArr,
       });
       setSuccessMsg(`Room ${form.roomNumber.trim()} updated successfully.`);
@@ -343,7 +359,7 @@ export default function RoomsClient() {
         floor:      form.floor,
         category:   form.category,
         status:     "Available",
-        price:      parseFloat(form.price),
+        price:      0,   // placeholder — pricing lives on room_categories
         capacity:   parseInt(form.capacity),
         amenities:  amenitiesArr,
       };
@@ -594,9 +610,9 @@ export default function RoomsClient() {
                       </span>
                     </td>
 
-                    {/* Price */}
+                    {/* Price — from room_categories (single source of truth) */}
                     <td className="px-5 py-3.5 font-semibold text-slate-800 whitespace-nowrap">
-                      ৳{room.price}
+                      ৳{(categories.find(c => c.slug === room.category.toLowerCase())?.price ?? 0).toLocaleString()}
                     </td>
 
                     {/* Actions — admin only; staff sees an empty cell */}
@@ -723,7 +739,7 @@ export default function RoomsClient() {
                 <label className="block text-[11.5px] font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
                   New Category
                 </label>
-                <div className="flex gap-2">
+                <div className="flex gap-2 mb-2">
                   <input
                     type="text"
                     placeholder="e.g. Penthouse"
@@ -741,6 +757,16 @@ export default function RoomsClient() {
                     {savingNewCat ? "Adding…" : "Add"}
                   </button>
                 </div>
+                {/* Price input for new category */}
+                <input
+                  type="number"
+                  placeholder="Price per night (BDT) - optional"
+                  value={newCatPrice}
+                  onChange={e => { setNewCatPrice(e.target.value); setCatError(""); }}
+                  min="0"
+                  className="w-full px-3.5 py-2 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                    placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
+                />
                 <p className="mt-1 text-[11px] text-slate-400">
                   A stable slug is derived automatically from the name.
                 </p>
@@ -792,6 +818,39 @@ export default function RoomsClient() {
                       }`}>
                         {cat.isActive ? "Active" : "Inactive"}
                       </span>
+
+                      {/* Price display/edit */}
+                      {editingPriceId === cat.id ? (
+                        <input
+                          autoFocus
+                          type="number"
+                          value={priceValue}
+                          onChange={e => setPriceValue(e.target.value)}
+                          onBlur={() => {
+                            if (priceValue.trim()) {
+                              handleUpdatePrice(cat.id, parseInt(priceValue));
+                            } else {
+                              setEditingPriceId(null);
+                            }
+                          }}
+                          onKeyDown={e => {
+                            if (e.key === "Enter") handleUpdatePrice(cat.id, parseInt(priceValue));
+                            if (e.key === "Escape") setEditingPriceId(null);
+                          }}
+                          min="0"
+                          className="w-16 px-2 py-1 text-[12px] text-slate-800 border border-blue-400 rounded-lg
+                            focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
+                          placeholder="Price"
+                        />
+                      ) : (
+                        <button
+                          onClick={() => { setEditingPriceId(cat.id); setPriceValue(cat.price.toString()); setCatError(""); }}
+                          className="px-2.5 py-1 text-[12px] font-semibold text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors"
+                          title="Click to edit price"
+                        >
+                          ৳ {cat.price.toLocaleString()}
+                        </button>
+                      )}
 
                       {/* Rename button */}
                       {renamingId !== cat.id && (
@@ -983,31 +1042,7 @@ export default function RoomsClient() {
                   </div>
                 </div>
 
-                {/* Row 3: Price */}
-                <div>
-                  <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                    Price per Night (BDT) <span className="text-rose-500">*</span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-semibold text-[14px] pointer-events-none">
-                      ৳
-                    </span>
-                    <input
-                      type="number"
-                      min={1}
-                      step="0.01"
-                      placeholder="150"
-                      value={form.price}
-                      onChange={e => setField("price", e.target.value)}
-                      className={`w-full pl-7 pr-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border rounded-lg
-                        placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
-                        ${errors.price ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
-                    />
-                  </div>
-                  {errors.price && (
-                    <p className="mt-1 text-[11.5px] text-rose-600">{errors.price}</p>
-                  )}
-                </div>
+                {/* Row 3: Price removed — pricing lives on room_categories (Manage Categories) */}
 
                 {/* Row 4: Amenities */}
                 <div>

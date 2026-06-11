@@ -168,43 +168,56 @@ const navItems: NavItem[] = [
 export default function Sidebar() {
   const pathname = usePathname();
   const { profile, role, signOut } = useAuth();
-
-  // Accounts group expansion state.
-  // Manual toggle when off /accounts/*; sticky-open when on any /accounts/*
-  // route (derived from pathname, not stored — the user can't collapse
-  // the group while inside it because the next render forces it open).
   const [accountsExpanded, setAccountsExpanded] = useState(false);
   const isAccountsRoute = pathname.startsWith("/accounts");
   const showAccountsChildren = accountsExpanded || isAccountsRoute;
 
+  // ── Collapsible sidebar state ────────────────────────────────
+  // Sidebar collapses on hover (desktop-friendly)
+  const [isCollapsed, setIsCollapsed] = useState(false);
+
   return (
-    <aside className="w-60 min-h-screen bg-slate-900 text-white flex flex-col flex-shrink-0">
+    <aside 
+      className={`
+        min-h-screen bg-slate-900 text-white flex flex-col flex-shrink-0
+        transition-all duration-300 ease-in-out
+        ${isCollapsed ? "w-16" : "w-60"}
+      `}
+      onMouseEnter={() => setIsCollapsed(false)}
+      onMouseLeave={() => setIsCollapsed(true)}
+    >
 
       {/* ── Brand header ─────────────────────────────────────── */}
       <div className="px-5 pt-6 pb-5 border-b border-slate-700/60">
-        {/* Logo mark — initials in an amber square */}
-        <div className="flex items-center gap-3 mb-0.5">
-          <div className="w-8 h-8 rounded-lg bg-amber-500 flex items-center justify-center flex-shrink-0">
-            <span className="text-slate-900 font-bold text-xs tracking-tight">HA</span>
-          </div>
-          <div>
-            {/* Hotel name — split across two lines for a premium look */}
-            <p className="text-[13px] font-semibold leading-tight text-white">
-              Hotel Albatross
-            </p>
-            <p className="text-[11px] text-amber-400/90 font-medium tracking-widest uppercase leading-tight">
-              Resort
-            </p>
-          </div>
+        {/* Logo mark — actual Hotel Albatross logo */}
+        <div className={`flex items-center gap-3 mb-0.5 ${isCollapsed ? "justify-center" : ""}`}>
+          <img 
+            src="/logo.png" 
+            alt="Hotel Albatross" 
+            className="w-8 h-8 object-contain flex-shrink-0"
+          />
+          {/* Hotel name — hidden when collapsed */}
+          {!isCollapsed && (
+            <div>
+              <p className="text-[13px] font-semibold leading-tight text-white">
+                Hotel Albatross
+              </p>
+              <p className="text-[11px] text-amber-400/90 font-medium tracking-widest uppercase leading-tight">
+                Resort
+              </p>
+            </div>
+          )}
         </div>
       </div>
 
       {/* ── Section label ────────────────────────────────────── */}
-      <div className="px-5 pt-5 pb-2">
-        <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">
-          Main Menu
-        </p>
-      </div>
+      {!isCollapsed && (
+        <div className="px-5 pt-5 pb-2">
+          <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">
+            Main Menu
+          </p>
+        </div>
+      )}
 
       {/* ── Navigation links ─────────────────────────────────── */}
       <nav className="flex-1 px-3 space-y-0.5">
@@ -231,31 +244,38 @@ export default function Sidebar() {
                     className={`
                       w-full group flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13.5px] font-medium
                       transition-all duration-150
+                      ${isCollapsed ? "justify-center" : ""}
                       ${parentSoftActive
                         ? "text-amber-400 hover:bg-slate-800/70"
                         : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-100"
                       }
                     `}
+                    title={isCollapsed ? item.label : undefined}
                   >
                     {/* Icon */}
                     <span className={parentSoftActive ? "text-amber-400" : "text-slate-500 group-hover:text-slate-300"}>
                       {item.icon}
                     </span>
-                    <span className="flex-1 text-left">{item.label}</span>
-                    {/* Chevron — rotates to indicate expand state */}
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      className={`w-3.5 h-3.5 transition-transform duration-200 ${
-                        showAccountsChildren ? "rotate-180" : ""
-                      } ${parentSoftActive ? "text-amber-400/70" : "text-slate-500 group-hover:text-slate-300"}`}
-                    >
-                      <path d="M6 9l6 6 6-6" />
-                    </svg>
+                    {/* Label — hidden when collapsed */}
+                    {!isCollapsed && (
+                      <>
+                        <span className="flex-1 text-left">{item.label}</span>
+                        {/* Chevron — hidden when collapsed */}
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className={`w-3.5 h-3.5 transition-transform duration-200 ${
+                            showAccountsChildren ? "rotate-180" : ""
+                          } ${parentSoftActive ? "text-amber-400/70" : "text-slate-500 group-hover:text-slate-300"}`}
+                        >
+                          <path d="M6 9l6 6 6-6" />
+                        </svg>
+                      </>
+                    )}
                   </button>
 
                   {/* Children — indented, no icons */}
@@ -306,11 +326,13 @@ export default function Sidebar() {
                 className={`
                   group flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13.5px] font-medium
                   transition-all duration-150 relative
+                  ${isCollapsed ? "justify-center" : ""}
                   ${isActive
                     ? "bg-slate-800 text-amber-400"
                     : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-100"
                   }
                 `}
+                title={isCollapsed ? item.label : undefined}
               >
                 {/* Active indicator bar on the left edge */}
                 {isActive && (
@@ -320,7 +342,8 @@ export default function Sidebar() {
                 <span className={isActive ? "text-amber-400" : "text-slate-500 group-hover:text-slate-300"}>
                   {item.icon}
                 </span>
-                {item.label}
+                {/* Label — hidden when collapsed */}
+                {!isCollapsed && item.label}
               </Link>
             );
           })}
@@ -329,49 +352,75 @@ export default function Sidebar() {
       {/* ── Bottom footer — real user info + sign out ────────── */}
       <div className="px-4 py-4 border-t border-slate-700/60 space-y-3">
 
-        {/* User identity */}
-        <div className="flex items-center gap-3">
-          {/* Avatar — initials derived from full_name */}
-          <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0">
-            {profile ? (
-              <span className="text-[11px] font-bold text-slate-300 uppercase leading-none">
-                {profile.full_name
-                  .split(" ")
-                  .slice(0, 2)
-                  .map(n => n[0])
-                  .join("")}
-              </span>
-            ) : (
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-slate-400">
-                <circle cx="12" cy="8" r="4" />
-                <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
-              </svg>
-            )}
+        {/* User identity — hidden when collapsed */}
+        {!isCollapsed && (
+          <div className="flex items-center gap-3">
+            {/* Avatar — initials derived from full_name */}
+            <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0">
+              {profile ? (
+                <span className="text-[11px] font-bold text-slate-300 uppercase leading-none">
+                  {profile.full_name
+                    .split(" ")
+                    .slice(0, 2)
+                    .map(n => n[0])
+                    .join("")}
+                </span>
+              ) : (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-slate-400">
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
+                </svg>
+              )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-[12px] font-medium text-slate-300 truncate leading-tight">
+                {profile?.full_name ?? "Loading…"}
+              </p>
+              <p className={`text-[11px] font-medium capitalize leading-tight mt-0.5 ${
+                role === "admin" ? "text-amber-400" : "text-slate-500"
+              }`}>
+                {role ?? "—"}
+              </p>
+            </div>
           </div>
-          <div className="min-w-0 flex-1">
-            <p className="text-[12px] font-medium text-slate-300 truncate leading-tight">
-              {profile?.full_name ?? "Loading…"}
-            </p>
-            <p className={`text-[11px] font-medium capitalize leading-tight mt-0.5 ${
-              role === "admin" ? "text-amber-400" : "text-slate-500"
-            }`}>
-              {role ?? "—"}
-            </p>
+        )}
+
+        {/* Collapsed state: just avatar */}
+        {isCollapsed && (
+          <div className="flex justify-center">
+            <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0" title={profile?.full_name ?? "User"}>
+              {profile ? (
+                <span className="text-[11px] font-bold text-slate-300 uppercase leading-none">
+                  {profile.full_name
+                    .split(" ")
+                    .slice(0, 2)
+                    .map(n => n[0])
+                    .join("")}
+                </span>
+              ) : (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-4 h-4 text-slate-400">
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
+                </svg>
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Sign out button */}
         <button
           onClick={signOut}
-          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[12.5px] font-medium
-            text-slate-400 hover:text-slate-100 hover:bg-slate-800/70 transition-colors"
+          className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[12.5px] font-medium
+            text-slate-400 hover:text-slate-100 hover:bg-slate-800/70 transition-colors
+            ${isCollapsed ? "justify-center" : ""}`}
+          title={isCollapsed ? "Sign out" : undefined}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 flex-shrink-0">
             <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" />
             <polyline points="16 17 21 12 16 7" />
             <line x1="21" y1="12" x2="9" y2="12" />
           </svg>
-          Sign out
+          {!isCollapsed && "Sign out"}
         </button>
 
       </div>

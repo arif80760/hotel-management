@@ -27,8 +27,17 @@ export default function TopBar() {
   return (
     <header className="h-14 bg-white border-b border-slate-200 flex items-center justify-between px-7 flex-shrink-0">
 
-      {/* Left — today's date */}
-      <p className="text-[13px] text-slate-400 font-medium">{dateStr}</p>
+      {/* Left — logo + today's date */}
+      <div className="flex items-center gap-3">
+        {/* Logo */}
+        <img 
+          src="/logo.png" 
+          alt="Hotel Albatross" 
+          className="h-8 w-auto object-contain"
+        />
+        {/* Date */}
+        <p className="text-[13px] text-slate-400 font-medium">{dateStr}</p>
+      </div>
 
       {/* Right — notification bell + divider + property badge */}
       <div className="flex items-center gap-4">
