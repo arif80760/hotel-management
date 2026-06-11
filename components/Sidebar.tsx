@@ -179,7 +179,7 @@ export default function Sidebar() {
   return (
     <aside 
       className={`
-        min-h-screen bg-slate-900 text-white flex flex-col flex-shrink-0
+        h-screen overflow-hidden bg-slate-900 text-white flex flex-col flex-shrink-0
         transition-all duration-300 ease-in-out
         ${isCollapsed ? "w-16" : "w-60"}
       `}
@@ -220,7 +220,7 @@ export default function Sidebar() {
       )}
 
       {/* ── Navigation links ─────────────────────────────────── */}
-      <nav className="flex-1 px-3 space-y-0.5">
+      <nav className="flex-1 overflow-y-auto px-3 space-y-0.5">
         {navItems
           // adminOnly items are hidden while role is null (profile loading)
           // — same behaviour as staff. No flash: null → hidden, 'admin' → visible.
