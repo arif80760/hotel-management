@@ -6,7 +6,7 @@
 // The active link is highlighted with an amber/gold accent
 // to give the app a premium resort feel.
 
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
@@ -173,8 +173,25 @@ export default function Sidebar() {
   const showAccountsChildren = accountsExpanded || isAccountsRoute;
 
   // ── Collapsible sidebar state ────────────────────────────────
-  // Sidebar collapses on hover (desktop-friendly)
+  // Toggled by an explicit button (no hover surprises). The choice is
+  // remembered across full page reloads via localStorage.
   const [isCollapsed, setIsCollapsed] = useState(false);
+
+  // Restore the saved preference after mount — done in an effect (not the
+  // initial state) so the server and first client render agree (no hydration
+  // mismatch). Falls back to expanded if nothing is stored.
+  useEffect(() => {
+    const saved = localStorage.getItem("sidebar-collapsed");
+    if (saved === "true") setIsCollapsed(true);
+  }, []);
+
+  function toggleCollapsed() {
+    setIsCollapsed(prev => {
+      const next = !prev;
+      try { localStorage.setItem("sidebar-collapsed", String(next)); } catch { /* ignore */ }
+      return next;
+    });
+  }
 
   return (
     <aside 
@@ -183,31 +200,61 @@ export default function Sidebar() {
         transition-all duration-300 ease-in-out
         ${isCollapsed ? "w-16" : "w-60"}
       `}
-      onMouseEnter={() => setIsCollapsed(false)}
-      onMouseLeave={() => setIsCollapsed(true)}
     >
 
       {/* ── Brand header ─────────────────────────────────────── */}
       <div className="px-5 pt-6 pb-5 border-b border-slate-700/60">
-        {/* Logo mark — actual Hotel Albatross logo */}
-        <div className={`flex items-center gap-3 mb-0.5 ${isCollapsed ? "justify-center" : ""}`}>
-          <img 
-            src="/logo.png" 
-            alt="Hotel Albatross" 
-            className="w-8 h-8 object-contain flex-shrink-0"
-          />
-          {/* Hotel name — hidden when collapsed */}
+        {/* Logo + name (left) and collapse button (right, when expanded) */}
+        <div className={`flex items-center gap-3 ${isCollapsed ? "justify-center" : "justify-between"}`}>
+          <div className="flex items-center gap-3 min-w-0">
+            <img 
+              src="/logo.png" 
+              alt="Hotel Albatross" 
+              className="w-8 h-8 object-contain flex-shrink-0"
+            />
+            {/* Hotel name — hidden when collapsed */}
+            {!isCollapsed && (
+              <div className="min-w-0">
+                <p className="text-[13px] font-semibold leading-tight text-white truncate">
+                  Hotel Albatross
+                </p>
+                <p className="text-[11px] text-amber-400/90 font-medium tracking-widest uppercase leading-tight">
+                  Resort
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Collapse button — inline on the right when expanded */}
           {!isCollapsed && (
-            <div>
-              <p className="text-[13px] font-semibold leading-tight text-white">
-                Hotel Albatross
-              </p>
-              <p className="text-[11px] text-amber-400/90 font-medium tracking-widest uppercase leading-tight">
-                Resort
-              </p>
-            </div>
+            <button
+              type="button"
+              onClick={toggleCollapsed}
+              aria-label="Collapse sidebar"
+              title="Collapse sidebar"
+              className="flex-shrink-0 p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800/70 transition-colors"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                <path d="M15 18l-6-6 6-6" />
+              </svg>
+            </button>
           )}
         </div>
+
+        {/* Expand button — centered under the logo when collapsed */}
+        {isCollapsed && (
+          <button
+            type="button"
+            onClick={toggleCollapsed}
+            aria-label="Expand sidebar"
+            title="Expand sidebar"
+            className="mt-3 mx-auto flex p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800/70 transition-colors"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <path d="M9 18l6-6-6-6" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* ── Section label ────────────────────────────────────── */}
