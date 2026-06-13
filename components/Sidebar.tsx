@@ -235,7 +235,8 @@ export default function Sidebar() {
               className="flex-shrink-0 p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800/70 transition-colors"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
-                <path d="M15 18l-6-6 6-6" />
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M9 3v18" />
               </svg>
             </button>
           )}
@@ -251,7 +252,8 @@ export default function Sidebar() {
             className="mt-3 mx-auto flex p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800/70 transition-colors"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
-              <path d="M9 18l6-6-6-6" />
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <path d="M9 3v18" />
             </svg>
           </button>
         )}
