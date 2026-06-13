@@ -287,6 +287,7 @@ export default function Sidebar() {
                           <Link
                             key={child.href}
                             href={child.href}
+                            prefetch={false}
                             className={`
                               flex items-center pl-12 pr-3 py-2 rounded-lg text-[13px] font-medium
                               transition-all duration-150 relative
@@ -323,6 +324,7 @@ export default function Sidebar() {
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch={false}
                 className={`
                   group flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13.5px] font-medium
                   transition-all duration-150 relative
