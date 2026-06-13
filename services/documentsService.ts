@@ -30,6 +30,34 @@ export type DocumentType = (typeof DOCUMENT_TYPES)[number];
 
 const BUCKET = "guest-documents";
 
+// Signed URLs are time-limited; generated fresh on every read so the
+// private bucket's files are only viewable by an authenticated session.
+const SIGNED_URL_TTL = 60 * 60; // 1 hour
+
+/**
+ * Given a list of storage paths, returns a Map of path → signed URL.
+ * Fails soft: on error returns an empty map so the UI degrades to
+ * "no preview" rather than throwing.
+ */
+async function signPaths(paths: string[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const valid = paths.filter(Boolean);
+  if (valid.length === 0) return map;
+
+  const { data, error } = await supabase.storage
+    .from(BUCKET)
+    .createSignedUrls(valid, SIGNED_URL_TTL);
+
+  if (error || !data) {
+    logSupabaseError("signPaths / createSignedUrls", error);
+    return map;
+  }
+  for (const item of data) {
+    if (item.path && item.signedUrl) map.set(item.path, item.signedUrl);
+  }
+  return map;
+}
+
 // Allowed MIME types — images and PDF only
 export const ALLOWED_MIME_TYPES = [
   "image/jpeg",
@@ -132,7 +160,17 @@ export async function getDocuments(bookingRef: string): Promise<BookingDocument[
   }
 
   console.log(`[documentsService] getDocuments → ${data?.length ?? 0} row(s) returned`);
-  return (data as DocumentRow[]).map(mapDoc);
+
+  const rows = data as DocumentRow[];
+  const docs = rows.map(mapDoc);
+
+  // Replace the stored (now-private) file_url with a fresh signed URL
+  // generated from storage_path, so previews work on the private bucket.
+  const signed = await signPaths(rows.map(r => r.storage_path));
+  for (const doc of docs) {
+    doc.fileUrl = signed.get(doc.storagePath) ?? doc.fileUrl;
+  }
+  return docs;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -169,20 +207,15 @@ export async function uploadDocument(
     throw new Error(msg);
   }
 
-  // 3. Get the public URL (bucket must be set to Public in Supabase Dashboard)
-  const { data: urlData } = supabase.storage
-    .from(BUCKET)
-    .getPublicUrl(storagePath);
-
-  console.log(`[documentsService] uploadDocument → public URL: ${urlData.publicUrl}`);
-
-  // 4. Insert metadata row into booking_documents
+  // 3. Insert metadata row into booking_documents.
+  //    file_url holds the storage path (not a public URL) — the bucket is
+  //    private, so viewable URLs are signed on read in getDocuments().
   const { data, error: insertError } = await supabase
     .from("booking_documents")
     .insert({
       booking_ref:   bookingRef,
       document_type: documentType,
-      file_url:      urlData.publicUrl,
+      file_url:      storagePath,
       storage_path:  storagePath,
       file_name:     file.name,
       file_type:     file.type,
@@ -200,7 +233,14 @@ export async function uploadDocument(
   }
 
   console.log(`[documentsService] uploadDocument → metadata saved, id: ${(data as DocumentRow).id}`);
-  return mapDoc(data as DocumentRow);
+
+  // Return with a fresh signed URL so the UI can preview immediately.
+  const doc = mapDoc(data as DocumentRow);
+  const { data: signed } = await supabase.storage
+    .from(BUCKET)
+    .createSignedUrl(storagePath, SIGNED_URL_TTL);
+  if (signed?.signedUrl) doc.fileUrl = signed.signedUrl;
+  return doc;
 }
 
 // ─────────────────────────────────────────────────────────────

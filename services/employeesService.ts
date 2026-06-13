@@ -190,6 +190,53 @@ function mapEmployee(row: EmployeeRow): Employee {
   };
 }
 
+// ─────────────────────────────────────────────────────────────
+// SIGNED PHOTO URLS
+// employee-photos is a PRIVATE bucket. photo_url stores the storage
+// PATH (e.g. "uuid/123.jpg"); viewable URLs are signed on read.
+// toStoragePath() also tolerates legacy full public URLs so existing
+// rows keep working without a data migration.
+// ─────────────────────────────────────────────────────────────
+const PHOTO_BUCKET     = "employee-photos";
+const PHOTO_SIGNED_TTL = 60 * 60; // 1 hour
+
+function toStoragePath(value: string): string {
+  const marker = `/${PHOTO_BUCKET}/`;
+  const i = value.indexOf(marker);
+  return i === -1 ? value : value.slice(i + marker.length);
+}
+
+/**
+ * Replaces each employee's photoUrl (a storage path, or legacy public URL)
+ * with a fresh signed URL. Fails soft: on error photoUrl becomes null so
+ * the UI shows a placeholder instead of a broken image.
+ */
+async function signEmployeePhotos(emps: Employee[]): Promise<Employee[]> {
+  const paths = emps
+    .map(e => e.photoUrl)
+    .filter((v): v is string => !!v)
+    .map(toStoragePath);
+
+  if (paths.length === 0) return emps;
+
+  const { data, error } = await supabase.storage
+    .from(PHOTO_BUCKET)
+    .createSignedUrls(paths, PHOTO_SIGNED_TTL);
+
+  if (error || !data) {
+    console.error("[employeesService] signEmployeePhotos failed:", error?.message);
+    return emps.map(e => (e.photoUrl ? { ...e, photoUrl: null } : e));
+  }
+
+  const byPath = new Map<string, string>();
+  for (const item of data) {
+    if (item.path && item.signedUrl) byPath.set(item.path, item.signedUrl);
+  }
+  return emps.map(e =>
+    e.photoUrl ? { ...e, photoUrl: byPath.get(toStoragePath(e.photoUrl)) ?? null } : e,
+  );
+}
+
 function toPayload(emp: Omit<Employee, "id" | "createdAt">) {
   return {
     employee_id:       emp.employeeId.trim(),
@@ -228,7 +275,7 @@ export async function getAllEmployees(): Promise<Employee[]> {
     throw new Error(`[getAllEmployees] ${error.message}`);
   }
 
-  return (data as EmployeeRow[]).map(mapEmployee);
+  return signEmployeePhotos((data as EmployeeRow[]).map(mapEmployee));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -381,13 +428,15 @@ export async function getEmployeeByAuthUserId(
     throw new Error(`[getEmployeeByAuthUserId] ${error.message}`);
   }
 
-  return data ? mapEmployee(data as EmployeeRow) : null;
+  if (!data) return null;
+  const [emp] = await signEmployeePhotos([mapEmployee(data as EmployeeRow)]);
+  return emp;
 }
 
 /**
  * Upload a profile photo to the "employee-photos" Storage bucket.
  * Overwrites any previous file for this employee.
- * Returns the public URL of the uploaded image.
+ * Returns the storage PATH (stored in employees.photo_url; signed on read).
  */
 export async function uploadEmployeePhoto(
   employeeUuid: string,
@@ -408,9 +457,7 @@ export async function uploadEmployeePhoto(
     throw new Error(`[uploadEmployeePhoto] ${uploadError.message}`);
   }
 
-  const { data } = supabase.storage
-    .from("employee-photos")
-    .getPublicUrl(path);
-
-  return data.publicUrl;
+  // Private bucket: return the storage PATH (stored in employees.photo_url).
+  // Viewable URLs are generated on read via signEmployeePhotos().
+  return path;
 }
