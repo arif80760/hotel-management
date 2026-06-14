@@ -18,11 +18,33 @@
 //   • Page heading / layout
 
 import { useMemo } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useHotel, type RoomStatus, type Room, type Booking, type BookingStatus } from "@/contexts/HotelContext";
 import { deriveRoomStatusForDate, localDateToISO, TODAY_ISO } from "@/lib/roomStatus";
 import DashboardStats      from "@/components/DashboardStats";
-import RoomBoard           from "@/components/RoomBoard";
+
+// ── RoomBoard is lazy-loaded ────────────────────────────────────────────
+// It sits below the fold and is the heaviest component on this route, so we
+// keep its JavaScript OUT of the dashboard's initial bundle. That lets the
+// heading + KPI cards (the LCP region) render without waiting on RoomBoard's
+// code to download and parse. ssr:false is fine — the whole app already
+// renders client-side behind the AppShell auth gate, and this is an internal
+// tool with no SEO concern. The placeholder reserves height to avoid CLS.
+const RoomBoard = dynamic(() => import("@/components/RoomBoard"), {
+  ssr: false,
+  loading: () => (
+    <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 min-h-[420px]">
+      <div className="h-4 w-44 bg-slate-100 rounded animate-pulse mb-1" />
+      <div className="h-3 w-60 bg-slate-50 rounded animate-pulse mb-5" />
+      <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+        {Array.from({ length: 18 }).map((_, i) => (
+          <div key={i} className="h-16 bg-slate-50 rounded-lg animate-pulse" />
+        ))}
+      </div>
+    </div>
+  ),
+});
 
 // Matches the format stored in booking.checkIn / booking.checkOut
 // so we can compare with a plain string equality check.
