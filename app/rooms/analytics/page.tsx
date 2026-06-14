@@ -1,21 +1,31 @@
+"use client";
+
 // app/rooms/analytics/page.tsx
-// Server wrapper with role guard — admin only.
-// Cloned from app/accounts/revenue-report/page.tsx.
-import { redirect }                   from "next/navigation";
-import { createSupabaseServerClient } from "@/lib/supabaseServer";
-import RoomAnalyticsClient            from "./RoomAnalyticsClient";
+//
+// Admin-only Room Analytics route.
+//
+// BEFORE: a force-dynamic SERVER component that ran getUser() + a profiles role
+//   query on every request — two sequential Supabase round trips from the Vercel
+//   function (Virginia) to the database (Tokyo), ~350ms of TTFB before any HTML
+//   shipped, and uncacheable.
+//
+// AFTER: a thin CLIENT component. AppShell already enforces sign-in; AdminGate
+//   enforces the admin role using the role already loaded in AuthContext (no
+//   network round trip). RLS on the underlying tables / RPCs remains the real
+//   security boundary. Result: this page loads like the dashboard — the shell
+//   paints immediately, and RoomAnalyticsClient's two RPCs fetch client-side in
+//   parallel.
+//
+// (The `export const dynamic = "force-dynamic"` line is intentionally gone —
+//  this route no longer runs on the server.)
 
-export const dynamic = "force-dynamic";
+import AdminGate from "@/components/AdminGate";
+import RoomAnalyticsClient from "./RoomAnalyticsClient";
 
-export default async function RoomAnalyticsPage() {
-  const serverClient = await createSupabaseServerClient();
-  const { data: { user } } = await serverClient.auth.getUser();
-  if (!user) redirect("/login");
-  const { data: profile } = await serverClient
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-  if (profile?.role !== "admin") redirect("/");
-  return <RoomAnalyticsClient />;
+export default function RoomAnalyticsPage() {
+  return (
+    <AdminGate>
+      <RoomAnalyticsClient />
+    </AdminGate>
+  );
 }
