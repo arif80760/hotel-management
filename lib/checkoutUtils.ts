@@ -26,8 +26,15 @@ export interface BookingLevelDeductions {
  * Computes early-checkout deductions for a booking-level "Check Out".
  *
  * Iterates rooms with status "Checked In" or "Confirmed" and for each:
- *   earlyDays = max(0, midnight(room.checkOutISO) − midnight(actualAt))
+ *   rawDays   = max(0, midnight(room.checkOutISO) − midnight(actualAt))
+ *   earlyDays = min(rawDays, max(0, room.nights − 1))   ← min-one-night floor
  *   earlyAmt  = earlyDays × room.bookingRate
+ *
+ * The floor guarantees a room always keeps at least one night charged once it
+ * carries a stay — a same-day checkout charges the check-in day rather than
+ * refunding everything. This mirrors the authoritative DB floor in
+ * checkout_booking / cancel_booking_room (deduction capped at nights − 1), so
+ * the operator preview matches what the RPC will actually write.
  *
  * Uses room.checkOutISO ("YYYY-MM-DD") directly — no display-string
  * parsing, no single booking-level proxy. Each room contributes its own
@@ -57,9 +64,15 @@ export function calcBookingLevelDeductions(
     const plannedMidnight = new Date(`${room.checkOutISO}T00:00:00`);
     plannedMidnight.setHours(0, 0, 0, 0);
 
-    const earlyDays = Math.max(0, Math.round(
+    const rawDays = Math.max(0, Math.round(
       (plannedMidnight.getTime() - actualMidnight.getTime()) / 86_400_000
     ));
+
+    // Min-one-night floor: cap the deduction at (booked nights − 1) so a
+    // checked-in room is always charged for at least the check-in day.
+    // Mirrors the DB floor in checkout_booking / cancel_booking_room.
+    const earlyDays = Math.min(rawDays, Math.max(0, room.nights - 1));
+
     const earlyAmt = earlyDays * room.bookingRate;
 
     totalDays += earlyDays;
