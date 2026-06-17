@@ -21,7 +21,7 @@
 //   UI action    ─(optimistic)──→  useState (immediate)
 //              └─(async persist)→  Supabase DB (background)
 
-import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useMemo, useCallback, type ReactNode } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import type {
   MockRoom,
@@ -40,6 +40,8 @@ import * as roomsService    from "@/services/roomsService";
 import * as bookingsService from "@/services/bookingsService";
 import type { UpdateBookingPayload, BulkCheckinResult } from "@/services/bookingsService";
 import { deriveBookingSpan } from "@/lib/bookingSpan";
+import { getRoomCategories, type RoomCategory } from "@/services/roomCategoriesService";
+import { buildCategoryNameMap, displayCategory } from "@/lib/categoryNames";
 
 // Re-export types and ROOM_CATALOG so other files keep working unchanged.
 export type { MockRoom as Room, MockBooking as Booking, RoomStatus, BookingStatus };
@@ -175,6 +177,14 @@ type HotelContextType = {
    * kept and the remaining balance is waived. Rolls back on failure.
    */
   markBookingNoShow: (bookingRef: string) => Promise<void>;
+  /**
+   * Resolve a room-category slug (or capitalised snapshot) to its CURRENT
+   * display name from room_categories. Display text only — never use the result
+   * as a key, badge-colour lookup, grouping/sort key, or DB write value; those
+   * stay on the raw slug. Falls back to the input unchanged for unknown slugs
+   * (e.g. before categories load, or a deleted category).
+   */
+  categoryName: (c: string) => string;
 };
 
 const HotelContext = createContext<HotelContextType | null>(null);
@@ -187,21 +197,33 @@ export function HotelProvider({ children }: { children: ReactNode }) {
 
   const [rooms,         setRooms]         = useState<MockRoom[]>([]);
   const [bookings,      setBookings]      = useState<MockBooking[]>([]);
+  const [categories,    setCategories]    = useState<RoomCategory[]>([]);
   const [loading,       setLoading]       = useState(true);
   const [nextBookingId, setNextBookingId] = useState<number>(1042);
   const [nextRoomId,    setNextRoomId]    = useState<number>(49);
+
+  // Central room-category name resolver. Map keyed on lowercased slug; the
+  // callback resolves slug → current name and is what every UI surface uses so
+  // none of them render the raw slug.
+  const categoryNameMap = useMemo(() => buildCategoryNameMap(categories), [categories]);
+  const categoryName = useCallback(
+    (c: string) => displayCategory(c, categoryNameMap),
+    [categoryNameMap],
+  );
 
   // ── Initial data load ──────────────────────────────────────
   // Fetches rooms and bookings from Supabase once when the app starts.
   useEffect(() => {
     async function loadData() {
       try {
-        const [fetchedRooms, fetchedBookings] = await Promise.all([
+        const [fetchedRooms, fetchedBookings, fetchedCategories] = await Promise.all([
           roomsService.getAllRooms(),
           bookingsService.getAllBookings(),
+          getRoomCategories(),
         ]);
         setRooms(fetchedRooms);
         setBookings(fetchedBookings);
+        setCategories(fetchedCategories);
 
         // Seed nextBookingId from the highest existing booking_ref
         if (fetchedBookings.length > 0) {
@@ -1214,6 +1236,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       deleteRoom,
       markRoomAvailable,
       recordPayment,
+      categoryName,
     }}>
       {children}
     </HotelContext.Provider>

@@ -209,6 +209,7 @@ export default function FrontDeskClient() {
     checkoutNormal,
     checkoutWithOverride,
     recordPayment,
+    categoryName,
   } = useHotel();
 
   // Real role from authenticated session
@@ -689,7 +690,7 @@ export default function FrontDeskClient() {
                         {b.guestName}
                       </p>
                       <p className="text-[12px] text-slate-400 mt-0.5">
-                        Room {b.roomNumber} · {b.roomCategory} · {b.nights} nt
+                        Room {b.roomNumber} · {categoryName(b.roomCategory)} · {b.nights} nt
                       </p>
                       {/* Payment indicator */}
                       <div className="flex items-center gap-1.5 mt-1.5">
@@ -813,7 +814,7 @@ export default function FrontDeskClient() {
                         )}
                       </div>
                       <p className="text-[12px] text-slate-400 mt-0.5">
-                        Room {b.roomNumber} · {b.roomCategory} · {b.nights} nt
+                        Room {b.roomNumber} · {categoryName(b.roomCategory)} · {b.nights} nt
                       </p>
                       <p className="text-[11.5px] text-slate-400 mt-0.5">
                         In {b.checkIn} · Out {b.checkOut}
@@ -915,7 +916,7 @@ export default function FrontDeskClient() {
                         {b.guestName}
                       </p>
                       <p className="text-[12px] text-slate-400 mt-0.5">
-                        Room {b.roomNumber} · {b.roomCategory} · {b.nights} nt
+                        Room {b.roomNumber} · {categoryName(b.roomCategory)} · {b.nights} nt
                       </p>
                       {/* Status + balance */}
                       <div className="flex items-center gap-2 flex-wrap mt-1.5">
@@ -1049,7 +1050,7 @@ export default function FrontDeskClient() {
                   </div>
                   <div>
                     <p className="text-[13.5px] font-semibold text-slate-800">{checkoutConfirm.guestName}</p>
-                    <p className="text-[12px] text-slate-500">Room {checkoutConfirm.roomNumber} · {checkoutConfirm.roomCategory} · {checkoutConfirm.nights} nt</p>
+                    <p className="text-[12px] text-slate-500">Room {checkoutConfirm.roomNumber} · {categoryName(checkoutConfirm.roomCategory)} · {checkoutConfirm.nights} nt</p>
                     <p className="text-[12px] text-slate-400">{checkoutConfirm.checkIn} → {checkoutConfirm.checkOut}</p>
                   </div>
                   <span className={`ml-auto flex-shrink-0 text-[11.5px] font-semibold px-2.5 py-0.5 rounded-full ${statusBadge(checkoutConfirm.status)}`}>
@@ -1545,7 +1546,7 @@ export default function FrontDeskClient() {
                 <div>
                   <p className="text-[13.5px] font-semibold text-slate-800">{payModal.guestName}</p>
                   <p className="text-[12px] text-slate-400">
-                    Room {payModal.roomNumber} · {payModal.roomCategory}
+                    Room {payModal.roomNumber} · {categoryName(payModal.roomCategory)}
                   </p>
                 </div>
               </div>

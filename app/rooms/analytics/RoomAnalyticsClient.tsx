@@ -18,6 +18,7 @@ import {
   type RoomAnalyticsRow,
   type OccupancyTrendRow,
 } from "@/services/roomAnalyticsService";
+import { useHotel } from "@/contexts/HotelContext";
 
 // ─────────────────────────────────────────────────────────────
 // DATE UTILITIES
@@ -54,7 +55,6 @@ function fmt(n: number, dp = 2): string {
   }).format(n);
 }
 function fmtPct(n: number): string { return `${fmt(n, 1)}%`; }
-function cap(s: string): string { return s.charAt(0).toUpperCase() + s.slice(1); }
 
 // ─────────────────────────────────────────────────────────────
 // TYPES
@@ -196,6 +196,10 @@ function sortNumVal(row: RoomAnalyticsRow, key: SortKey, dir: "asc" | "desc"): n
 // ─────────────────────────────────────────────────────────────
 
 export default function RoomAnalyticsClient() {
+  // Central room-category name resolver (display only; badge colour + grouping
+  // keys below stay on the raw slug).
+  const { categoryName } = useHotel();
+
   // ── Data state ───────────────────────────────────────────
   const [rows,    setRows]    = useState<RoomAnalyticsRow[]>([]);
   const [trend,   setTrend]   = useState<OccupancyTrendRow[]>([]);
@@ -594,7 +598,7 @@ export default function RoomAnalyticsClient() {
                   </td>
                   <td className="px-4 py-3">
                     <span className={`px-2.5 py-0.5 rounded-md text-[12px] font-semibold ${catBadge(r.category)}`}>
-                      {cap(r.category)}
+                      {categoryName(r.category)}
                     </span>
                   </td>
                   <td className="px-4 py-3 tabular-nums">
@@ -707,7 +711,7 @@ export default function RoomAnalyticsClient() {
                 <tr key={t.category} className="hover:bg-slate-50/60">
                   <td className="px-5 py-3">
                     <span className={`px-2.5 py-0.5 rounded-md text-[12px] font-semibold ${catBadge(t.category)}`}>
-                      {cap(t.category)}
+                      {categoryName(t.category)}
                     </span>
                   </td>
                   <td className="px-5 py-3 tabular-nums text-slate-600">{t.roomCount}</td>
@@ -735,7 +739,7 @@ export default function RoomAnalyticsClient() {
                 {r.roomNumber}
               </span>
               <span className={`w-16 flex-shrink-0 text-[11.5px] font-semibold px-1.5 py-0.5 rounded ${catBadge(r.category)}`}>
-                {cap(r.category)}
+                {categoryName(r.category)}
               </span>
               <div className="flex-1">
                 <Bar value={r.revenue} max={maxRevenue} color="bg-amber-500" />

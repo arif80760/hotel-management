@@ -13,6 +13,7 @@ import { getRevenues, type Revenue } from "@/services/revenueService";
 import { getRevenueCategories } from "@/services/revenueCategoriesService";
 import { getAllBookings, getBookingPaymentMap } from "@/services/bookingsService";
 import type { MockBooking } from "@/lib/mockData";
+import { useHotel } from "@/contexts/HotelContext";
 
 const BOOKING_LABEL = "Room / Booking";
 
@@ -71,6 +72,10 @@ async function loadTxns(f: string, t: string) {
 }
 
 export default function RevenueReportClient() {
+  // Room-category resolver from context. Aliased because this component already
+  // has a local `categoryName` for *revenue* categories (revenueCategoryId).
+  const { categoryName: roomCategoryName } = useHotel();
+
   const [fromDate, setFromDate] = useState<string>(firstOfMonthISO());
   const [toDate, setToDate]     = useState<string>(todayISO());
   const [preset, setPreset]     = useState<Preset>("this_month");
@@ -405,7 +410,7 @@ export default function RevenueReportClient() {
                   {booking ? (
                     <div className="mt-1.5 rounded-lg bg-slate-50 border border-slate-100 px-3 py-2 space-y-0.5 text-[12px] text-slate-600">
                       {booking.rooms.map((r) => (
-                        <div key={r.id}>Room {r.roomNumber} · {r.roomCategory} · {r.checkIn} → {r.checkOut} · {r.nights} night{r.nights === 1 ? "" : "s"}</div>
+                        <div key={r.id}>Room {r.roomNumber} · {roomCategoryName(r.roomCategory)} · {r.checkIn} → {r.checkOut} · {r.nights} night{r.nights === 1 ? "" : "s"}</div>
                       ))}
                       <div>Guest: {booking.guestName}{booking.phone ? ` · ${booking.phone}` : ""} · {booking.totalGuests} guest{booking.totalGuests === 1 ? "" : "s"}</div>
                       <div>Booking: {booking.status} · {booking.payment} · total ৳{formatAmount(booking.totalAmount)} / paid ৳{formatAmount(booking.amountPaid)}</div>

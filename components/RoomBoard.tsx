@@ -73,7 +73,7 @@ function extractFirstName(fullName: string): string {
 }
 
 export default function RoomBoard() {
-  const { rooms, bookings } = useHotel();
+  const { rooms, bookings, categoryName } = useHotel();
 
   const [selectedDate, setSelectedDate] = useState<string>(TODAY_ISO);
   const isToday = selectedDate === TODAY_ISO;
@@ -287,7 +287,7 @@ export default function RoomBoard() {
                         {room.roomNumber}
                       </span>
                       <span className="text-[10.5px] font-medium text-slate-500 leading-none mt-1">
-                        {room.category}
+                        {categoryName(room.category)}
                       </span>
                       <div className="flex items-center gap-1 mt-2">
                         <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot} flex-shrink-0`} />

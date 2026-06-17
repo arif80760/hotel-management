@@ -100,7 +100,7 @@ function initials(name: string) {
 // PAGE
 // ─────────────────────────────────────────────────────────────
 export default function DashboardPage() {
-  const { rooms, bookings, loading } = useHotel();
+  const { rooms, bookings, loading, categoryName } = useHotel();
 
   // ── Derived: today's arrivals ───────────────────────────────
   // Confirmed bookings whose check-in date is today.
@@ -229,13 +229,13 @@ export default function DashboardPage() {
                     <div className="min-w-0">
                       <p className="text-[13px] font-semibold text-slate-800 truncate">{b.guestName}</p>
                       <p className="text-[12px] text-slate-400">
-                        Room {b.roomNumber}&nbsp;·&nbsp;{b.roomCategory}&nbsp;·&nbsp;{b.nights} night{b.nights !== 1 ? "s" : ""}
+                        Room {b.roomNumber}&nbsp;·&nbsp;{categoryName(b.roomCategory)}&nbsp;·&nbsp;{b.nights} night{b.nights !== 1 ? "s" : ""}
                       </p>
                     </div>
                   </div>
                   <div className="flex-shrink-0 ml-4">
                     <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 ring-1 ring-blue-200 px-2.5 py-1 rounded-full">
-                      {b.roomCategory}
+                      {categoryName(b.roomCategory)}
                     </span>
                   </div>
                 </li>
