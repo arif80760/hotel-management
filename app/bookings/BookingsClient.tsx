@@ -269,12 +269,15 @@ function rowNights(r: RoomFormRow): number {
  * - 1 room : "Room 204" / "Suite"  (unchanged; not clickable)
  * - 2+ rooms: "3 rooms"  / "3 × Suite" or "Mixed (3)"  (clickable — opens popover)
  */
-function roomCellDisplay(bRooms: BookingRoom[]): { top: string; sub: string; multi: boolean } {
+function roomCellDisplay(
+  bRooms: BookingRoom[],
+  catDisplay: (c: string) => string,
+): { top: string; sub: string; multi: boolean } {
   const n = bRooms.length;
   if (n === 0) return { top: "—", sub: "", multi: false };
-  if (n === 1) return { top: `Room ${bRooms[0].roomNumber}`, sub: bRooms[0].roomCategory, multi: false };
+  if (n === 1) return { top: `Room ${bRooms[0].roomNumber}`, sub: catDisplay(bRooms[0].roomCategory), multi: false };
   const cats = [...new Set(bRooms.map(r => r.roomCategory))];
-  const sub  = cats.length === 1 ? `${n} × ${cats[0]}` : `Mixed (${n})`;
+  const sub  = cats.length === 1 ? `${n} × ${catDisplay(cats[0])}` : `Mixed (${n})`;
   return { top: `${n} rooms`, sub, multi: true };
 }
 
@@ -3768,7 +3771,7 @@ export default function BookingsClient({ initialRoom }: Props) {
 
                     {/* Room — multi-room cells toggle an inline detail row */}
                     {(() => {
-                      const { top, sub } = roomCellDisplay(b.rooms);
+                      const { top, sub } = roomCellDisplay(b.rooms, catDisplay);
                       const expanded = expandedBookingId === b.id;
                       return (
                         <td
@@ -4056,7 +4059,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                                     />
                                   )}
                                   <span className="text-[13px] font-semibold text-slate-800 w-20 shrink-0">Room {r.roomNumber}</span>
-                                  <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">{r.roomCategory}</span>
+                                  <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">{catDisplay(r.roomCategory)}</span>
                                   {/* Per-room status badge */}
                                   <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap ${
                                     r.status === "Confirmed"          ? "bg-sky-50 text-sky-700 border border-sky-200" :
@@ -4366,7 +4369,7 @@ export default function BookingsClient({ initialRoom }: Props) {
 
                         {/* Room — multi-room cells toggle an inline detail row */}
                         {(() => {
-                          const { top, sub } = roomCellDisplay(b.rooms);
+                          const { top, sub } = roomCellDisplay(b.rooms, catDisplay);
                           const expanded = expandedBookingId === b.id;
                           return (
                             <td
@@ -4562,7 +4565,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                                         />
                                       )}
                                       <span className="text-[13px] font-semibold text-slate-800 w-20 shrink-0">Room {r.roomNumber}</span>
-                                      <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">{r.roomCategory}</span>
+                                      <span className="text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded whitespace-nowrap">{catDisplay(r.roomCategory)}</span>
                                       <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap ${
                                         r.status === "Confirmed"          ? "bg-sky-50 text-sky-700 border border-sky-200" :
                                         r.status === "Checked In"         ? "bg-emerald-50 text-emerald-700 border border-emerald-200" :
@@ -4743,7 +4746,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                       if (activeRooms.length <= 1) {
                         return (
                           <p className="text-[12px] text-slate-500">
-                            Room {checkoutConfirm.roomNumber} · {checkoutConfirm.roomCategory} · {checkoutConfirm.nights} nt
+                            Room {checkoutConfirm.roomNumber} · {catDisplay(checkoutConfirm.roomCategory)} · {checkoutConfirm.nights} nt
                           </p>
                         );
                       }
@@ -5542,7 +5545,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 <div>
                   <p className="text-[13.5px] font-semibold text-slate-800">{payModal.guestName}</p>
                   <p className="text-[12px] text-slate-400">
-                    Room {payModal.roomNumber} · {payModal.roomCategory} · {payModal.nights} night{payModal.nights !== 1 ? "s" : ""}
+                    Room {payModal.roomNumber} · {catDisplay(payModal.roomCategory)} · {payModal.nights} night{payModal.nights !== 1 ? "s" : ""}
                   </p>
                 </div>
               </div>
@@ -7518,7 +7521,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                       <div key={r.id} className="flex items-center gap-2 text-[11.5px] text-slate-600 bg-slate-50 rounded-lg px-3 py-1.5">
                         <span className="font-semibold">Room {r.roomNumber}</span>
                         <span className="text-slate-400">·</span>
-                        <span>{r.roomCategory}</span>
+                        <span>{catDisplay(r.roomCategory)}</span>
                         <span className="text-slate-400">·</span>
                         <span>{r.checkIn} → {r.checkOut}</span>
                         <span className="ml-auto font-medium text-slate-500">
@@ -7777,7 +7780,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                       <div key={r.id} className="flex items-center gap-2 px-3 py-2.5">
                         <div className="flex-1 min-w-0">
                           <p className="text-[12.5px] font-semibold text-slate-800">
-                            Room {r.roomNumber} ({r.roomCategory})
+                            Room {r.roomNumber} ({catDisplay(r.roomCategory)})
                           </p>
                           <p className="text-[11px] text-slate-500 mt-0.5">
                             {r.checkIn} → {r.checkOut} · {nights} night{nights !== 1 ? "s" : ""}
