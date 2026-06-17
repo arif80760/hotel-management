@@ -21,6 +21,7 @@
 
 import { supabase }             from "@/lib/supabase";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { deriveBookingSpan }    from "@/lib/bookingSpan";
 import {
   type MockBooking,
   type BookingStatus,
@@ -251,6 +252,10 @@ function mapBooking(row: BookingRow): MockBooking {
   // that need per-room detail should read booking.rooms[i] directly.
   const r0 = rooms[0];
 
+  // Booking-level stay span — earliest check-in … latest check-out … nights —
+  // derived through the shared helper so this matches the optimistic writers.
+  const span = deriveBookingSpan(rooms);
+
   return {
     id:           row.booking_ref,
     guestName:    row.guests?.name    ?? "",
@@ -267,11 +272,11 @@ function mapBooking(row: BookingRow): MockBooking {
     // ── Backward-compat shims (sourced from rooms[0]) ─────────
     roomNumber:   r0?.roomNumber   ?? "",
     roomCategory: r0?.roomCategory ?? cap(row.room_category_at_booking),
-    checkIn:      r0?.checkIn      ?? formatDateForDisplay(row.check_in_date),
-    checkOut:     r0?.checkOut     ?? formatDateForDisplay(row.check_out_date),
-    checkInISO:   r0?.checkInISO   ?? row.check_in_date  ?? undefined,
-    checkOutISO:  r0?.checkOutISO  ?? row.check_out_date ?? undefined,
-    nights:       r0?.nights       ?? row.nights,
+    checkIn:      span.checkInISO  ? formatDateForDisplay(span.checkInISO)  : (r0?.checkIn  ?? formatDateForDisplay(row.check_in_date)),
+    checkOut:     span.checkOutISO ? formatDateForDisplay(span.checkOutISO) : (r0?.checkOut ?? formatDateForDisplay(row.check_out_date)),
+    checkInISO:   span.checkInISO  ?? row.check_in_date  ?? undefined,
+    checkOutISO:  span.checkOutISO ?? row.check_out_date ?? undefined,
+    nights:       span.nights      ?? row.nights,
     bookingRate:  r0?.bookingRate  ?? row.booking_rate   ?? undefined,
 
     // ── Fields that remain on the bookings table ──────────────

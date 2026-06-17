@@ -39,6 +39,7 @@ import type {
 import * as roomsService    from "@/services/roomsService";
 import * as bookingsService from "@/services/bookingsService";
 import type { UpdateBookingPayload, BulkCheckinResult } from "@/services/bookingsService";
+import { deriveBookingSpan } from "@/lib/bookingSpan";
 
 // Re-export types and ROOM_CATALOG so other files keep working unchanged.
 export type { MockRoom as Room, MockBooking as Booking, RoomStatus, BookingStatus };
@@ -258,6 +259,10 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       earlyDeductionAmount: 0,
     }));
 
+    // Booking-level stay span across the optimistic rooms — same helper the row
+    // mapper uses, so the optimistic object and the re-fetched one never disagree.
+    const span = deriveBookingSpan(optimisticRooms);
+
     const optimisticBooking: MockBooking = {
       id:               input.id,
       guestName:        input.primaryGuest.name,
@@ -266,11 +271,11 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       guestId:          undefined,
       roomNumber:       r0.roomNumber,
       roomCategory:     r0.roomCategory,
-      checkIn:          formatDateDisplay(r0.checkIn),
-      checkOut:         formatDateDisplay(r0.checkOut),
-      checkInISO:       r0.checkIn,
-      checkOutISO:      r0.checkOut,
-      nights:           r0.nights,
+      checkIn:          formatDateDisplay(span.checkInISO  ?? r0.checkIn),
+      checkOut:         formatDateDisplay(span.checkOutISO ?? r0.checkOut),
+      checkInISO:       span.checkInISO  ?? r0.checkIn,
+      checkOutISO:      span.checkOutISO ?? r0.checkOut,
+      nights:           span.nights      ?? r0.nights,
       status:           input.status,
       payment:          bookingsService.derivePaymentStatus(input.totalAmount, input.amountPaid, input.status),
       totalAmount:      input.totalAmount,
@@ -638,16 +643,19 @@ export function HotelProvider({ children }: { children: ReactNode }) {
               bookingRate: rc.bookingRate,
             };
           });
-          // Refresh backward-compat shims from rooms[0]
+          // Refresh backward-compat shims. roomNumber/roomCategory stay sourced
+          // from rooms[0]; the stay span (dates + nights) goes through the shared
+          // helper so it matches the row mapper and the optimistic-create writer.
           const r0 = patch.rooms[0];
           if (r0) {
+            const span = deriveBookingSpan(patch.rooms);
             patch.roomNumber   = r0.roomNumber;
             patch.roomCategory = r0.roomCategory;
-            patch.checkInISO   = r0.checkInISO;
-            patch.checkOutISO  = r0.checkOutISO;
-            patch.checkIn      = r0.checkIn;
-            patch.checkOut     = r0.checkOut;
-            patch.nights       = patch.rooms.reduce((s, r) => s + r.nights, 0);
+            patch.checkInISO   = span.checkInISO  ?? r0.checkInISO;
+            patch.checkOutISO  = span.checkOutISO ?? r0.checkOutISO;
+            patch.checkIn      = span.checkInISO  ? formatDateDisplay(span.checkInISO)  : r0.checkIn;
+            patch.checkOut     = span.checkOutISO ? formatDateDisplay(span.checkOutISO) : r0.checkOut;
+            patch.nights       = span.nights      ?? r0.nights;
           }
         }
 
