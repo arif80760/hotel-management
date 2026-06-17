@@ -13,16 +13,18 @@ import { useHotel, type RoomStatus, type Room, type Booking, type BookingStatus 
 import { deriveRoomStatusForDate, localDateToISO, TODAY_ISO } from "@/lib/roomStatus";
 
 // ── Status colour config — single source of truth ────────────
-const STATUS: Record<RoomStatus, {
-  bg: string; border: string; dot: string;
-  label: string; text: string;
+type BoardStatus = RoomStatus | "DepartsToday";
+
+const STATUS: Record<BoardStatus, {
+  bg: string; border: string; dot: string; label: string; text: string;
 }> = {
-  Available:   { bg: "bg-emerald-50",  border: "border-emerald-200", dot: "bg-emerald-500", label: "Available",   text: "text-emerald-700" },
-  Occupied:    { bg: "bg-rose-50",     border: "border-rose-200",    dot: "bg-rose-500",    label: "Occupied",    text: "text-rose-700"    },
-  Reserved:    { bg: "bg-blue-50",     border: "border-blue-200",    dot: "bg-blue-500",    label: "Reserved",    text: "text-blue-700"    },
+  Available:    { bg: "bg-emerald-50", border: "border-emerald-200", dot: "bg-emerald-500", label: "Available",     text: "text-emerald-700" },
+  Reserved:     { bg: "bg-blue-50",    border: "border-blue-200",    dot: "bg-blue-500",    label: "Reserved",      text: "text-blue-700"    },
+  Occupied:     { bg: "bg-violet-50",  border: "border-violet-200",  dot: "bg-violet-500",  label: "Occupied",      text: "text-violet-700"  },
+  DepartsToday: { bg: "bg-amber-50",   border: "border-amber-200",   dot: "bg-amber-500",   label: "Departs today", text: "text-amber-700"   },
 };
 
-const SUMMARY_STATUSES: RoomStatus[] = ["Available", "Reserved", "Occupied"];
+const SUMMARY_STATUSES: BoardStatus[] = ["Available", "Reserved", "Occupied", "DepartsToday"];
 
 const ArrowRight = (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
@@ -57,6 +59,22 @@ function getBookingForRoomOnDate(
           r.checkInISO <= dateISO && dateISO < r.checkOutISO,
       ),
   );
+}
+
+function boardStatusForRoom(
+  room: Room, dateISO: string, todayISO: string, bookings: Booking[],
+): BoardStatus {
+  const base = deriveRoomStatusForDate(room, dateISO, todayISO, bookings);
+  if (base === "Occupied" && dateISO === todayISO) {
+    const departs = bookings.some(b =>
+      b.status !== "Cancelled" &&
+      b.rooms.some(r =>
+        r.roomNumber === room.roomNumber &&
+        r.status === "Checked In" &&
+        r.checkOutISO === todayISO));
+    if (departs) return "DepartsToday";
+  }
+  return base;
 }
 
 /**
@@ -106,16 +124,14 @@ export default function RoomBoard() {
   const roomsWithDerivedStatus = useMemo(
     () => rooms.map(r => ({
       ...r,
-      displayStatus: deriveRoomStatusForDate(r, selectedDate, TODAY_ISO, bookings),
+      displayStatus: boardStatusForRoom(r, selectedDate, TODAY_ISO, bookings),
       displayBooking: getBookingForRoomOnDate(r, selectedDate, TODAY_ISO, bookings),
     })),
     [rooms, bookings, selectedDate],
   );
 
   const statusCounts = useMemo(() => {
-    const counts: Record<RoomStatus, number> = {
-      Available: 0, Reserved: 0, Occupied: 0,
-    };
+    const counts: Record<BoardStatus, number> = { Available: 0, Reserved: 0, Occupied: 0, DepartsToday: 0 };
     for (const room of roomsWithDerivedStatus) counts[room.displayStatus]++;
     return counts;
   }, [roomsWithDerivedStatus]);
@@ -279,14 +295,14 @@ export default function RoomBoard() {
               >
                 {floorRooms.map((room) => {
                   const cfg = STATUS[room.displayStatus];
-                  const isClickable = room.displayStatus === "Occupied";
+                  const isClickable = room.displayStatus === "Occupied" || room.displayStatus === "DepartsToday";
 
                   const roomCard = (
                     <>
                       <span className="text-[17px] font-extrabold text-slate-800 leading-none tracking-tight">
                         {room.roomNumber}
                       </span>
-                      <span className="text-[10.5px] font-medium text-slate-500 leading-none mt-1">
+                      <span className="text-[10.5px] font-medium text-slate-500 leading-snug mt-1 line-clamp-2 min-h-[26px]">
                         {categoryName(room.category)}
                       </span>
                       <div className="flex items-center gap-1 mt-2">
