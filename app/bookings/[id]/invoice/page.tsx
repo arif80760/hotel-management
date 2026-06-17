@@ -21,6 +21,9 @@ import { createSupabaseServerClient }    from "@/lib/supabaseServer";
 import { getBookingByRef,
          getPaymentsByBookingRef,
          listRefunds }                    from "@/services/bookingsService";
+import { getRoomCategories }              from "@/services/roomCategoriesService";
+import { buildCategoryNameMap,
+         displayCategory }                from "@/lib/categoryNames";
 import LetterHead                        from "@/components/invoice/LetterHead";
 import PrintButtons                      from "@/components/invoice/PrintButtons";
 import { calcTrueDue,
@@ -50,6 +53,10 @@ export default async function InvoicePage({ params }: Props) {
   ]);
 
   if (!booking) notFound();
+
+  // Resolve category slugs to their CURRENT names (renames reflect everywhere).
+  const categories = await getRoomCategories(serverClient);
+  const nameMap    = buildCategoryNameMap(categories);
 
   // ── Derived values ───────────────────────────────────────────────────────
   const invoiceNumber = formatInvoiceNumber(booking);
@@ -179,7 +186,7 @@ export default async function InvoicePage({ params }: Props) {
               return (
                 <div key={room.id} className={i > 0 ? "mt-2" : ""}>
                   <p className={`text-[13px] font-semibold ${isCancelled ? "line-through text-slate-400" : "text-slate-900"}`}>
-                    Room {room.roomNumber} ({room.roomCategory})
+                    Room {room.roomNumber} ({displayCategory(room.roomCategory, nameMap)})
                   </p>
                   <p className={`text-[11px] ${isCancelled ? "line-through text-slate-400" : "text-slate-600"}`}>
                     {room.checkInISO ? formatInvoiceDate(room.checkInISO) : room.checkIn}
@@ -223,7 +230,7 @@ export default async function InvoicePage({ params }: Props) {
                         Room accommodation
                       </p>
                       <p className={`text-[11px] mt-0.5 ${isCancelled ? "line-through text-slate-400" : "text-slate-500"}`}>
-                        Room {room.roomNumber} ({room.roomCategory})
+                        Room {room.roomNumber} ({displayCategory(room.roomCategory, nameMap)})
                         {" · "}{computedNights} {computedNights === 1 ? "night" : "nights"}
                         {" × "}{formatTaka(room.bookingRate)}
                       </p>

@@ -22,6 +22,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { supabase } from "@/lib/supabase";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 // ─────────────────────────────────────────────────────────────
 // TYPES
@@ -86,8 +87,10 @@ export function slugifyCategory(name: string): string {
 /**
  * List all room categories ordered by sort_order (active first within order).
  */
-export async function getRoomCategories(): Promise<RoomCategory[]> {
-  const { data, error } = await supabase
+export async function getRoomCategories(
+  client: SupabaseClient = supabase,
+): Promise<RoomCategory[]> {
+  const { data, error } = await client
     .from("room_categories")
     .select("id, slug, name, price, sort_order, is_active, created_at, updated_at")
     .order("sort_order", { ascending: true })
