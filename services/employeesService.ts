@@ -88,7 +88,9 @@ export type Designation =
   | "Manager"
   | "Receptionist"
   | "Cleaner"
-  | "Room Attendant";
+  | "Room Attendant"
+  | "Laundry Boy"
+  | "Security Guard";
 
 export type EmployeeAppRole = "admin" | "staff";
 
@@ -124,6 +126,8 @@ export const DESIGNATIONS: Designation[] = [
   "Receptionist",
   "Cleaner",
   "Room Attendant",
+  "Laundry Boy",
+  "Security Guard",
 ];
 
 export const DESIGNATION_DEFAULTS: Record<
@@ -135,6 +139,8 @@ export const DESIGNATION_DEFAULTS: Record<
   "Receptionist":    { canAccessApp: true,  appRole: "staff" },
   "Cleaner":         { canAccessApp: false, appRole: null    },
   "Room Attendant":  { canAccessApp: false, appRole: null    },
+  "Laundry Boy":     { canAccessApp: false, appRole: null    },
+  "Security Guard":  { canAccessApp: false, appRole: null    },
 };
 
 export const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];

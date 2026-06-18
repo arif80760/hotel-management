@@ -83,6 +83,8 @@ function designationBadge(d: string): string {
     "Receptionist":    "bg-blue-50   text-blue-700   ring-1 ring-blue-200",
     "Cleaner":         "bg-slate-100 text-slate-600  ring-1 ring-slate-200",
     "Room Attendant":  "bg-teal-50   text-teal-700   ring-1 ring-teal-200",
+    "Laundry Boy":     "bg-cyan-50   text-cyan-700   ring-1 ring-cyan-200",
+    "Security Guard":  "bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200",
   };
   return m[d] ?? "bg-slate-100 text-slate-500";
 }
