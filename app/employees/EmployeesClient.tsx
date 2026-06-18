@@ -78,6 +78,9 @@ const EMPTY_FORM: EmployeeFormData = {
 // ─────────────────────────────────────────────────────────────
 function designationBadge(d: string): string {
   const m: Record<string, string> = {
+    "Chairman":          "bg-orange-50  text-orange-700  ring-1 ring-orange-200",
+    "Managing Director": "bg-rose-50    text-rose-700    ring-1 ring-rose-200",
+    "Director":          "bg-fuchsia-50 text-fuchsia-700 ring-1 ring-fuchsia-200",
     "General Manager": "bg-amber-50  text-amber-700  ring-1 ring-amber-200",
     "Manager":         "bg-violet-50 text-violet-700 ring-1 ring-violet-200",
     "Receptionist":    "bg-blue-50   text-blue-700   ring-1 ring-blue-200",

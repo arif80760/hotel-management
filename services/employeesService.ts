@@ -84,6 +84,9 @@ import { supabase } from "@/lib/supabase";
 // ─────────────────────────────────────────────────────────────
 
 export type Designation =
+  | "Chairman"
+  | "Managing Director"
+  | "Director"
   | "General Manager"
   | "Manager"
   | "Receptionist"
@@ -121,6 +124,9 @@ export type Employee = {
 // ─────────────────────────────────────────────────────────────
 
 export const DESIGNATIONS: Designation[] = [
+  "Chairman",
+  "Managing Director",
+  "Director",
   "General Manager",
   "Manager",
   "Receptionist",
@@ -134,6 +140,9 @@ export const DESIGNATION_DEFAULTS: Record<
   Designation,
   { canAccessApp: boolean; appRole: EmployeeAppRole | null }
 > = {
+  "Chairman":          { canAccessApp: true,  appRole: "admin" },
+  "Managing Director": { canAccessApp: true,  appRole: "admin" },
+  "Director":          { canAccessApp: true,  appRole: "admin" },
   "General Manager": { canAccessApp: true,  appRole: "admin" },
   "Manager":         { canAccessApp: true,  appRole: "staff" },
   "Receptionist":    { canAccessApp: true,  appRole: "staff" },
