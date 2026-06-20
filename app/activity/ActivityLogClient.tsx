@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
 type ActivityRow = {
@@ -9,7 +9,7 @@ type ActivityRow = {
   summary: string; details: Record<string, unknown> | null;
 };
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 25;
 
 type CategoryKey = "booking" | "payment" | "refund" | "room" | "employee" | "inventory" | "day" | "other";
 
@@ -36,25 +36,29 @@ function categoryOf(action: string): CategoryKey {
   return "other";
 }
 
-const FILTERS: { key: string; label: string; match: (c: CategoryKey) => boolean }[] = [
-  { key: "all",     label: "All",       match: () => true },
-  { key: "booking", label: "Bookings",  match: c => c === "booking" || c === "room" },
-  { key: "money",   label: "Money",     match: c => c === "payment" || c === "refund" },
-  { key: "staff",   label: "Staff",     match: c => c === "employee" },
-  { key: "stock",   label: "Inventory", match: c => c === "inventory" || c === "day" },
+// Pills filter server-side by entity_type so page counts stay accurate.
+const FILTERS: { key: string; label: string; types: string[] | null }[] = [
+  { key: "all",     label: "All",       types: null },
+  { key: "booking", label: "Bookings",  types: ["booking", "booking_room"] },
+  { key: "money",   label: "Money",     types: ["payment", "refund", "cash"] },
+  { key: "staff",   label: "Staff",     types: ["employee"] },
+  { key: "stock",   label: "Inventory", types: ["inventory", "day_close"] },
 ];
 
-const WINDOWS: { key: string; label: string; hours: number | null }[] = [
-  { key: "24h", label: "Last 24h", hours: 24 },
-  { key: "7d",  label: "7 days",   hours: 24 * 7 },
-  { key: "30d", label: "30 days",  hours: 24 * 30 },
-  { key: "all", label: "All time", hours: null },
+const RANGES: { key: string; label: string; hours: number | null }[] = [
+  { key: "24h",    label: "Last 24h",     hours: 24 },
+  { key: "7d",     label: "Last 7 days",  hours: 24 * 7 },
+  { key: "30d",    label: "Last 30 days", hours: 24 * 30 },
+  { key: "all",    label: "All time",     hours: null },
+  { key: "custom", label: "Custom range", hours: null },
 ];
 
 const dhakaTime = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Asia/Dhaka", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: true,
 });
-
+function dhakaDateStr(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Dhaka", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+}
 function relativeTime(iso: string): string {
   const secs = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
   if (secs < 45) return "just now";
@@ -67,63 +71,73 @@ function relativeTime(iso: string): string {
   if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
   return dhakaTime.format(new Date(iso));
 }
-
 function initials(name: string | null): string {
   if (!name) return "·";
   return name.trim().split(/\s+/).slice(0, 2).map(n => n[0]?.toUpperCase() ?? "").join("") || "·";
 }
 
 export default function ActivityLogClient() {
-  const [rows, setRows] = useState<ActivityRow[]>([]);
+  const [rows, setRows]   = useState<ActivityRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage]   = useState(0);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(false);
-  const [filter, setFilter] = useState("all");
-  const [windowKey, setWindow] = useState("7d");
-  const [search, setSearch] = useState("");
+  const [error, setError]     = useState<string | null>(null);
 
-  const fetchPage = useCallback(async (reset: boolean) => {
-    reset ? setLoading(true) : setMore(true);
-    setError(null);
-    const win = WINDOWS.find(w => w.key === windowKey);
-    const from = reset ? 0 : rows.length;
+  const [filter, setFilter]   = useState("all");
+  const [rangeKey, setRange]  = useState("7d");
+  const [search, setSearch]   = useState("");
+  const [debounced, setDeb]   = useState("");
+
+  const [customStart, setCustomStart] = useState(dhakaDateStr(new Date(Date.now() - 7 * 24 * 3600 * 1000)));
+  const [customEnd,   setCustomEnd]   = useState(dhakaDateStr(new Date()));
+
+  // Debounce the search box; reset to first page on a new term.
+  useEffect(() => {
+    const t = setTimeout(() => { setDeb(search); setPage(0); }, 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true); setError(null);
+
+    const f = FILTERS.find(x => x.key === filter);
+    let gte: string | null = null;
+    let lte: string | null = null;
+    if (rangeKey === "custom") {
+      if (customStart) gte = new Date(`${customStart}T00:00:00+06:00`).toISOString();
+      if (customEnd)   lte = new Date(`${customEnd}T23:59:59.999+06:00`).toISOString();
+    } else {
+      const r = RANGES.find(x => x.key === rangeKey);
+      if (r?.hours) gte = new Date(Date.now() - r.hours * 3600 * 1000).toISOString();
+    }
+
     let q = supabase
       .from("activity_log")
-      .select("id, occurred_at, actor_name, action, entity_type, entity_id, entity_label, summary, details")
+      .select("id, occurred_at, actor_name, action, entity_type, entity_id, entity_label, summary, details", { count: "exact" })
       .order("occurred_at", { ascending: false })
       .order("id", { ascending: false })
-      .range(from, from + PAGE_SIZE - 1);
-    if (win?.hours) {
-      const since = new Date(Date.now() - win.hours * 3600 * 1000).toISOString();
-      q = q.gte("occurred_at", since);
-    }
-    const { data, error } = await q;
-    if (error) {
-      setError(error.message);
-    } else {
-      const batch = (data ?? []) as ActivityRow[];
-      setRows(prev => (reset ? batch : [...prev, ...batch]));
-      setHasMore(batch.length === PAGE_SIZE);
-    }
-    reset ? setLoading(false) : setMore(false);
-  }, [windowKey, rows.length]);
+      .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
 
-  useEffect(() => { fetchPage(true); /* eslint-disable-next-line */ }, [windowKey]);
+    if (f?.types) q = q.in("entity_type", f.types);
+    if (gte) q = q.gte("occurred_at", gte);
+    if (lte) q = q.lte("occurred_at", lte);
 
-  const visible = useMemo(() => {
-    const f = FILTERS.find(x => x.key === filter) ?? FILTERS[0];
-    const needle = search.trim().toLowerCase();
-    return rows.filter(r => {
-      if (!f.match(categoryOf(r.action))) return false;
-      if (!needle) return true;
-      return (
-        r.summary.toLowerCase().includes(needle) ||
-        (r.actor_name ?? "").toLowerCase().includes(needle) ||
-        (r.entity_label ?? "").toLowerCase().includes(needle)
-      );
-    });
-  }, [rows, filter, search]);
+    const term = debounced.trim().replace(/[%,()]/g, " ").trim();
+    if (term) q = q.or(`summary.ilike.%${term}%,actor_name.ilike.%${term}%,entity_label.ilike.%${term}%`);
+
+    const { data, error, count } = await q;
+    if (error) setError(error.message);
+    else { setRows((data ?? []) as ActivityRow[]); setTotal(count ?? 0); }
+    setLoading(false);
+  }, [filter, rangeKey, customStart, customEnd, debounced, page]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const fromN = total === 0 ? 0 : page * PAGE_SIZE + 1;
+  const toN   = Math.min((page + 1) * PAGE_SIZE, total);
+
+  const inputCls = "px-3 py-1.5 rounded-lg text-[12.5px] font-medium text-slate-700 bg-white ring-1 ring-slate-200 focus:outline-none focus:ring-amber-400";
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6">
@@ -134,10 +148,10 @@ export default function ActivityLogClient() {
         </p>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 mb-4">
+      <div className="flex flex-wrap items-center gap-2 mb-3">
         <div className="flex flex-wrap gap-1">
           {FILTERS.map(f => (
-            <button key={f.key} onClick={() => setFilter(f.key)}
+            <button key={f.key} onClick={() => { setFilter(f.key); setPage(0); }}
               className={`px-3 py-1.5 rounded-full text-[12.5px] font-medium transition-colors ${
                 filter === f.key ? "bg-slate-900 text-white" : "bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50"
               }`}>
@@ -146,13 +160,22 @@ export default function ActivityLogClient() {
           ))}
         </div>
         <div className="flex-1" />
-        <select value={windowKey} onChange={e => setWindow(e.target.value)}
-          className="px-3 py-1.5 rounded-lg text-[12.5px] font-medium text-slate-700 bg-white ring-1 ring-slate-200 focus:outline-none focus:ring-amber-400">
-          {WINDOWS.map(w => <option key={w.key} value={w.key}>{w.label}</option>)}
+        <select value={rangeKey} onChange={e => { setRange(e.target.value); setPage(0); }} className={inputCls}>
+          {RANGES.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
         </select>
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…"
-          className="px-3 py-1.5 rounded-lg text-[12.5px] text-slate-700 bg-white ring-1 ring-slate-200 focus:outline-none focus:ring-amber-400 w-32 sm:w-44" />
+          className={`${inputCls} w-32 sm:w-44 font-normal`} />
       </div>
+
+      {rangeKey === "custom" && (
+        <div className="flex items-center gap-2 mb-4">
+          <input type="date" value={customStart} max={customEnd}
+            onChange={e => { setCustomStart(e.target.value); setPage(0); }} className={inputCls} />
+          <span className="text-[12px] text-slate-400">to</span>
+          <input type="date" value={customEnd} min={customStart} max={dhakaDateStr(new Date())}
+            onChange={e => { setCustomEnd(e.target.value); setPage(0); }} className={inputCls} />
+        </div>
+      )}
 
       {loading ? (
         <div className="space-y-2">
@@ -162,15 +185,13 @@ export default function ActivityLogClient() {
         <div className="rounded-xl bg-rose-50 ring-1 ring-rose-200 px-4 py-3 text-[13px] text-rose-700">
           Couldn’t load the activity log: {error}
         </div>
-      ) : visible.length === 0 ? (
+      ) : rows.length === 0 ? (
         <div className="rounded-xl bg-white ring-1 ring-slate-200 px-4 py-10 text-center">
-          <p className="text-[13px] text-slate-500">
-            {rows.length === 0 ? "No activity recorded in this period yet." : "Nothing matches this filter."}
-          </p>
+          <p className="text-[13px] text-slate-500">No activity matches these filters.</p>
         </div>
       ) : (
         <ul className="space-y-1.5">
-          {visible.map(r => {
+          {rows.map(r => {
             const cat = CATEGORY[categoryOf(r.action)];
             const detailEntries = r.details
               ? Object.entries(r.details).filter(([, v]) => v !== null && v !== undefined && v !== "")
@@ -210,12 +231,20 @@ export default function ActivityLogClient() {
         </ul>
       )}
 
-      {!loading && !error && hasMore && (
-        <div className="flex justify-center mt-4">
-          <button onClick={() => fetchPage(false)} disabled={loadingMore}
-            className="px-4 py-2 rounded-lg text-[13px] font-medium text-slate-700 bg-white ring-1 ring-slate-200 hover:bg-slate-50 disabled:opacity-60">
-            {loadingMore ? "Loading…" : "Load more"}
-          </button>
+      {!loading && !error && total > 0 && (
+        <div className="flex items-center justify-between mt-4 text-[12.5px] text-slate-500">
+          <span>Showing {fromN}–{toN} of {total}</span>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
+              className="px-3 py-1.5 rounded-lg font-medium text-slate-700 bg-white ring-1 ring-slate-200 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">
+              Prev
+            </button>
+            <span className="text-slate-400">Page {page + 1} / {totalPages}</span>
+            <button onClick={() => setPage(p => (p + 1 < totalPages ? p + 1 : p))} disabled={page + 1 >= totalPages}
+              className="px-3 py-1.5 rounded-lg font-medium text-slate-700 bg-white ring-1 ring-slate-200 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">
+              Next
+            </button>
+          </div>
         </div>
       )}
     </div>
