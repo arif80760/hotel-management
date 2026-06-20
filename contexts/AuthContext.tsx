@@ -63,6 +63,7 @@ type AuthContextType = {
   profile: UserProfile | null;
   role:    UserRole | null;
   loading: boolean;
+  canViewActivityLog: boolean;
   signIn:  (email: string, password: string) => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
 };
@@ -119,6 +120,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user,    setUser]    = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true); // cleared after INITIAL_SESSION
+  const [canViewActivityLog, setCanViewActivityLog] = useState(false);
 
   // ── Effect 1: Auth subscription — SYNCHRONOUS, NO await ──────
   //
@@ -196,6 +198,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [user?.id]); // only re-run when the logged-in user actually changes
 
+  // ── Effect 3: Activity-log visibility (admins + managers) ────────────
+  useEffect(() => {
+    if (!user) { setCanViewActivityLog(false); return; }
+    let cancelled = false;
+    (async () => {
+      if (profile?.role === "admin") { if (!cancelled) setCanViewActivityLog(true); return; }
+      const { data, error } = await supabase.rpc("can_view_activity_log");
+      if (!cancelled) setCanViewActivityLog(!error && data === true);
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id, profile?.role]);
+
   // ── Auth actions ──────────────────────────────────────────────
 
   async function signIn(
@@ -229,6 +243,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         profile,
         role: profile?.role ?? null,
         loading,
+        canViewActivityLog,
         signIn,
         signOut,
       }}

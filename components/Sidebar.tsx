@@ -15,6 +15,11 @@ import { useAuth } from "@/contexts/AuthContext";
 // Each icon is a tiny inline SVG. strokeWidth="1.75" keeps
 // them feeling light and modern, not heavy.
 const Icons = {
+  activity: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">
+      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l3 2" />
+    </svg>
+  ),
   dashboard: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">
       <rect x="3" y="3" width="7" height="7" rx="1.5" />
@@ -120,6 +125,7 @@ type NavLeaf = {
   href:       string;
   icon:       ReactNode;
   adminOnly?: boolean;
+  activityLog?: boolean;
 };
 
 type NavChild = {
@@ -162,12 +168,13 @@ const navItems: NavItem[] = [
       { label: "Loans",              href: "/accounts/loans" },
     ],
   },
+  { label: "Activity Log", href: "/activity", icon: Icons.activity, activityLog: true },
   { label: "My Profile", href: "/profile",     icon: Icons.profile    },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { profile, role, signOut } = useAuth();
+  const { profile, role, signOut, canViewActivityLog } = useAuth();
   const [accountsExpanded, setAccountsExpanded] = useState(false);
   const isAccountsRoute = pathname.startsWith("/accounts");
   const showAccountsChildren = accountsExpanded || isAccountsRoute;
@@ -273,7 +280,11 @@ export default function Sidebar() {
         {navItems
           // adminOnly items are hidden while role is null (profile loading)
           // — same behaviour as staff. No flash: null → hidden, 'admin' → visible.
-          .filter(item => !item.adminOnly || role === "admin")
+          .filter(item => {
+            if (item.adminOnly) return role === "admin";
+            if ("activityLog" in item && item.activityLog) return canViewActivityLog;
+            return true;
+          })
           .map((item) => {
 
             // ─── Group (Accounts) ─────────────────────────────
