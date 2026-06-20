@@ -13,6 +13,11 @@
 --
 -- Only meaningful changes are logged (status transitions; skips updated_at-only
 -- and trigger-synced churn like paid_amount/payment_status).
+--
+-- DEDUP NOTE: account_transactions rows that mirror a payment/refund
+-- (booking_payment_id set) are NOT logged here — they are already captured at the
+-- payments/refunds level. Only MANUAL daybook entries (booking_payment_id null)
+-- are logged as cash.* events, so the same money is never counted twice.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 create or replace function public.fn_capture_activity()
@@ -37,7 +42,6 @@ begin
     if v_actor_id is not null then
       select full_name into v_actor_name from public.profiles where id = v_actor_id;
       if v_actor_name is null then
-        -- email fallback, guarded so an auth.users read issue can't lose the log
         begin
           select email into v_actor_name from auth.users where id = v_actor_id;
         exception when others then
@@ -129,10 +133,13 @@ begin
     -- ═══════════════════════ ACCOUNT_TRANSACTIONS ═══════════════════════
     elsif tg_table_name = 'account_transactions' then
       v_entity_type := 'cash';
-      if tg_op = 'INSERT' then
+      -- Only log MANUAL daybook entries here. Payment-/refund-linked transactions
+      -- (booking_payment_id set) are already captured at the payments/refunds level,
+      -- so logging them again would double-count the same money.
+      if tg_op = 'INSERT' and new.booking_payment_id is null then
         v_action := 'cash.' || new.type::text;
         v_entity_id := new.id;
-        v_entity_label := coalesce(new.voucher_number, new.payee, new.type::text);
+        v_entity_label := coalesce(new.note, new.type::text);
         v_summary := format('BDT %s %s', new.amount, replace(new.type::text, '_', ' '));
         v_details := jsonb_build_object('type', new.type, 'amount', new.amount);
       end if;
