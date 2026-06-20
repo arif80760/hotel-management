@@ -802,6 +802,7 @@ export default function EmployeesClient() {
         // If the admin typed a new password for an app-access employee, reset it
         // server-side via the admin-only route. Blank = leave the password as-is.
         // A thrown error here is caught by the outer catch and shown on the form.
+        let passwordChanged = false;
         if (form.canAccessApp && form.tempPassword.trim()) {
           const { data: { session } } = await supabase.auth.getSession();
           if (!session) throw new Error("No active session — please sign in again.");
@@ -821,11 +822,24 @@ export default function EmployeesClient() {
           catch { console.error("[set-password] non-JSON response:", rawText.slice(0, 500)); }
 
           if (!res.ok || !json?.ok) {
-            throw new Error(json?.error ?? `Password reset failed (HTTP ${res.status}).`);
+            // Surface the failure AT the password field + a visible banner, and
+            // keep the modal open. The employee fields already saved above; only
+            // the password change failed — never let it look silent.
+            const msg = json?.error ?? `Password reset failed (HTTP ${res.status}).`;
+            console.error("[set-password] failed:", msg);
+            setErrors(prev => ({ ...prev, tempPassword: msg }));
+            setActionError(`Password not updated for ${form.fullName.trim()}: ${msg}`);
+            setSaving(false);
+            return;
           }
+          passwordChanged = true;
         }
 
-        setSuccessMsg(`${form.fullName.trim()} updated successfully.`);
+        setSuccessMsg(
+          passwordChanged
+            ? `${form.fullName.trim()} updated — password changed.`
+            : `${form.fullName.trim()} updated successfully.`,
+        );
 
       // ── ADD with app access → provision endpoint ────────────
       } else if (form.canAccessApp) {
