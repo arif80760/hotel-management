@@ -249,11 +249,31 @@ async function handleProvision(req: NextRequest): Promise<NextResponse> {
     );
 
   if (profileUpsertError) {
-    // Non-fatal — employee + auth user exist; profile row can be fixed manually.
-    console.error("[provision] profile upsert failed (non-fatal):", profileUpsertError.message);
-  } else {
-    console.log(`[provision] profile row upserted for auth user: ${authUserId}`);
+    // FATAL: without a profiles row the user logs in with role = null (broken).
+    // Roll back in reverse order — employee row, then auth user — so we never
+    // leave a login account with no role behind.
+    console.error("[provision] profile upsert FAILED — rolling back:", profileUpsertError.message);
+
+    const { error: empRollbackError } = await adminClient
+      .from("employees")
+      .delete()
+      .eq("id", empRow.id);
+    if (empRollbackError) {
+      console.error("[provision] employee rollback failed:", empRollbackError.message);
+    }
+
+    const { error: authRollbackError } = await adminClient.auth.admin.deleteUser(authUserId);
+    if (authRollbackError) {
+      console.error("[provision] auth-user rollback failed:", authRollbackError.message);
+    }
+
+    return NextResponse.json(
+      { error: `Could not create profile (role) record: ${profileUpsertError.message}. Provisioning rolled back.` },
+      { status: 500 },
+    );
   }
+
+  console.log(`[provision] profile row upserted for auth user: ${authUserId}`);
 
   // ── 8. Return the created employee (camelCase) ─────────────
   const created = {

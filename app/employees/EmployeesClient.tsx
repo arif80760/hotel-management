@@ -556,6 +556,8 @@ export default function EmployeesClient() {
   const [employees,  setEmployees]  = useState<Employee[]>([]);
   const [fetching,   setFetching]   = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  // Banner for failed actions (delete, etc.) — distinct from load errors.
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // ── Filter state ────────────────────────────────────────────
   const [statusFilter,      setStatusFilter]      = useState<"All" | "Active" | "Inactive">("All");
@@ -598,6 +600,13 @@ export default function EmployeesClient() {
     const t = setTimeout(() => setSuccessMsg(""), 4000);
     return () => clearTimeout(t);
   }, [successMsg]);
+
+  // Auto-clear action-error banner
+  useEffect(() => {
+    if (!actionError) return;
+    const t = setTimeout(() => setActionError(null), 6000);
+    return () => clearTimeout(t);
+  }, [actionError]);
 
   // Close modal on Escape
   useEffect(() => {
@@ -789,6 +798,33 @@ export default function EmployeesClient() {
           emp.id === editingId ? { ...emp, ...empData } : emp,
         ));
         await employeesService.updateEmployee(editingId, empData);
+
+        // If the admin typed a new password for an app-access employee, reset it
+        // server-side via the admin-only route. Blank = leave the password as-is.
+        // A thrown error here is caught by the outer catch and shown on the form.
+        if (form.canAccessApp && form.tempPassword.trim()) {
+          const { data: { session } } = await supabase.auth.getSession();
+          if (!session) throw new Error("No active session — please sign in again.");
+
+          const res = await fetch("/api/employees/set-password", {
+            method:  "POST",
+            headers: {
+              "Content-Type":  "application/json",
+              "Authorization": `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify({ id: editingId, newPassword: form.tempPassword }),
+          });
+
+          const rawText = await res.text();
+          let json: { ok?: boolean; error?: string } | null = null;
+          try { json = JSON.parse(rawText) as { ok?: boolean; error?: string }; }
+          catch { console.error("[set-password] non-JSON response:", rawText.slice(0, 500)); }
+
+          if (!res.ok || !json?.ok) {
+            throw new Error(json?.error ?? `Password reset failed (HTTP ${res.status}).`);
+          }
+        }
+
         setSuccessMsg(`${form.fullName.trim()} updated successfully.`);
 
       // ── ADD with app access → provision endpoint ────────────
@@ -892,14 +928,46 @@ export default function EmployeesClient() {
   }
 
   // ── Delete ───────────────────────────────────────────────────
-  function handleDeleteClick(emp: Employee) {
+  // Routes through /api/employees/delete (admin-only, server-side) so the
+  // Supabase Auth user + profiles row are torn down too — deleting only the
+  // employees row would leave a working login behind.
+  async function handleDeleteClick(emp: Employee) {
     if (deleteConfirmId === emp.id) {
-      setEmployees(prev => prev.filter(e => e.id !== emp.id));
-      employeesService.deleteEmployee(emp.id).catch(err =>
-        console.error("[EmployeesClient deleteEmployee] failed:", err instanceof Error ? err.message : err),
-      );
-      setSuccessMsg(`${emp.fullName} removed from directory.`);
       setDeleteConfirmId(null);
+      // Optimistic removal; restore (sorted by full_name, the canonical order) on failure.
+      setEmployees(prev => prev.filter(e => e.id !== emp.id));
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) throw new Error("No active session — please sign in again.");
+
+        const res = await fetch("/api/employees/delete", {
+          method:  "POST",
+          headers: {
+            "Content-Type":  "application/json",
+            "Authorization": `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ id: emp.id, authUserId: emp.authUserId ?? undefined }),
+        });
+
+        const rawText = await res.text();
+        let json: { ok?: boolean; error?: string } | null = null;
+        try { json = JSON.parse(rawText) as { ok?: boolean; error?: string }; }
+        catch { console.error("[delete] non-JSON response:", rawText.slice(0, 500)); }
+
+        if (!res.ok || !json?.ok) {
+          throw new Error(json?.error ?? `Delete failed (HTTP ${res.status}).`);
+        }
+
+        setSuccessMsg(`${emp.fullName} removed (login, profile, and record).`);
+      } catch (err) {
+        // Restore the row — deletion did not complete.
+        setEmployees(prev =>
+          [...prev, emp].sort((a, b) => a.fullName.localeCompare(b.fullName)),
+        );
+        setActionError(
+          `Could not delete ${emp.fullName}: ${err instanceof Error ? err.message : "unknown error"}`,
+        );
+      }
     } else {
       setDeleteConfirmId(emp.id);
     }
@@ -946,6 +1014,15 @@ export default function EmployeesClient() {
             <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
           </svg>
           <p className="text-[13px] font-medium text-emerald-800">{successMsg}</p>
+        </div>
+      )}
+
+      {actionError && (
+        <div className="flex items-center gap-3 bg-rose-50 border border-rose-200 rounded-xl px-5 py-3.5">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5 text-rose-600 flex-shrink-0">
+            <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
+          </svg>
+          <p className="text-[13px] font-medium text-rose-800">{actionError}</p>
         </div>
       )}
 
@@ -1436,7 +1513,9 @@ export default function EmployeesClient() {
 
                         {/* Temporary Password */}
                         <div>
-                          <FieldLabel hint="(for initial login)">Temporary Password</FieldLabel>
+                          <FieldLabel hint={editingId ? "(leave blank to keep current)" : "(for initial login)"}>
+                            {editingId ? "New Password" : "Temporary Password"}
+                          </FieldLabel>
                           <div className="relative">
                             <input
                               type={showPassword ? "text" : "password"}
