@@ -13,8 +13,8 @@
 // return gate.response;`.
 //
 // NOTE: provision/route.ts keeps its own inline copy of this gate intentionally
-// (do not refactor it onto this helper) — these two NEW routes (delete,
-// set-password) are the only callers.
+// (do not refactor it onto this helper) — the delete and update-login routes are
+// the only callers.
 
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminClient } from "@/lib/supabaseAdmin";

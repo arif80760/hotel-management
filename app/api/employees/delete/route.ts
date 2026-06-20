@@ -80,6 +80,8 @@ async function handleDelete(req: NextRequest): Promise<NextResponse> {
   }
 
   const authUserId: string | null = emp.auth_user_id ?? null;
+  const empId:   string = emp.id;          // captured for use inside the closures below
+  const empName: string = emp.full_name;
 
   // ── Self-delete guard ──────────────────────────────────────
   if (authUserId && authUserId === caller.id) {
@@ -89,19 +91,53 @@ async function handleDelete(req: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // Fallback helpers — used when a hard delete is blocked by FK references
+  // (the employee/login has booking/transaction history that must be preserved).
+  // Ban the login (~100 years) so it can never sign in again:
+  async function banLogin(uid: string): Promise<string | null> {
+    const { error } = await adminClient.auth.admin.updateUserById(uid, { ban_duration: "876000h" });
+    return error ? error.message : null;
+  }
+  // Flip the employee inactive — the SAME field as the "Active employee" toggle:
+  async function deactivateEmployee(): Promise<string | null> {
+    const { error } = await adminClient.from("employees").update({ is_active: false }).eq("id", empId);
+    return error ? error.message : null;
+  }
+
   // ── Delete the auth user FIRST (if a login exists) ──────────
   if (authUserId) {
     const { error: authDelError } = await adminClient.auth.admin.deleteUser(authUserId);
     if (authDelError) {
-      // Hard stop — do NOT delete the employees row, so state stays consistent.
-      console.error("[delete] auth.admin.deleteUser failed:", authDelError.message);
+      // The auth user is FK-referenced (e.g. bookings/account_transactions point
+      // at auth.users) and can't be hard-deleted ("Database error deleting user").
+      // Fall back: ban the login + deactivate the employee so they can't sign in
+      // and drop off the active roster, while preserving the historical links.
+      console.warn("[delete] deleteUser failed — ban + deactivate fallback:", authDelError.message);
+      const banErr   = await banLogin(authUserId);
+      const deactErr = await deactivateEmployee();
+      if (banErr || deactErr) {
+        return NextResponse.json(
+          {
+            error:
+              `Could not delete, and the fallback failed` +
+              `${banErr ? ` (ban: ${banErr})` : ""}${deactErr ? ` (deactivate: ${deactErr})` : ""}. Please retry.`,
+          },
+          { status: 500 },
+        );
+      }
+      console.log(`[delete] ⓘ ${emp.full_name} kept — login banned + deactivated (history present).`);
       return NextResponse.json(
-        { error: `Could not remove login account: ${authDelError.message}. No records were deleted.` },
-        { status: 500 },
+        {
+          ok: true,
+          outcome: "deactivated",
+          id: emp.id,
+          message: `${emp.full_name} has history, so the record was kept — login disabled and employee deactivated.`,
+        },
+        { status: 200 },
       );
     }
 
-    // Explicitly remove the profiles row (idempotent after the cascade above).
+    // Hard-delete succeeded — remove the profiles row (idempotent after cascade).
     const { error: profDelError } = await adminClient
       .from("profiles")
       .delete()
@@ -127,19 +163,36 @@ async function handleDelete(req: NextRequest): Promise<NextResponse> {
     .eq("id", emp.id);
 
   if (empDelError) {
-    console.error("[delete] employees delete failed:", empDelError.message);
+    // FK-referenced (e.g. inventory_movements.issued_to_employee_id is RESTRICT).
+    // Can't hard-delete the row → deactivate instead. Any login was already
+    // removed above, so deactivation just drops them off the active roster.
+    console.warn("[delete] employees delete failed — deactivate fallback:", empDelError.message);
+    const deactErr = await deactivateEmployee();
+    if (deactErr) {
+      return NextResponse.json(
+        {
+          error:
+            `Could not delete the employee record (${empDelError.message}) ` +
+            `and deactivation also failed (${deactErr}). Please retry.`,
+        },
+        { status: 500 },
+      );
+    }
     return NextResponse.json(
       {
-        error:
-          `Login and profile removed, but the employee record could not be deleted: ${empDelError.message}. ` +
-          `Please retry or remove the employees row manually.`,
+        ok: true,
+        outcome: "deactivated",
+        id: emp.id,
+        message:
+          `${emp.full_name} has history, so the record was kept — employee deactivated` +
+          `${authUserId ? " (login already removed)" : ""}.`,
       },
-      { status: 500 },
+      { status: 200 },
     );
   }
 
   console.log(
     `[delete] ✓ employee ${emp.id} (${emp.full_name}) fully removed${authUserId ? " incl. login" : " (no login)"}`,
   );
-  return NextResponse.json({ ok: true, id: emp.id, hadLogin: !!authUserId }, { status: 200 });
+  return NextResponse.json({ ok: true, outcome: "deleted", id: emp.id, hadLogin: !!authUserId }, { status: 200 });
 }

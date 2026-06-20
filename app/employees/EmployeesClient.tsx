@@ -799,45 +799,65 @@ export default function EmployeesClient() {
         ));
         await employeesService.updateEmployee(editingId, empData);
 
-        // If the admin typed a new password for an app-access employee, reset it
-        // server-side via the admin-only route. Blank = leave the password as-is.
-        // A thrown error here is caught by the outer catch and shown on the form.
-        let passwordChanged = false;
-        if (form.canAccessApp && form.tempPassword.trim()) {
+        // Keep the AUTH login in sync with the employees row. For an employee
+        // that HAS a login (auth_user_id set): sync the email if it changed, and
+        // set a new password if one was typed — both server-side via the
+        // admin-only update-login route. The auth email otherwise diverges from
+        // the displayed email (UI shows one address, login uses another).
+        const original      = employees.find(e => e.id === editingId);
+        const hasLogin      = !!original?.authUserId;
+        const newEmail      = form.email.trim();
+        const wantPassword  = form.canAccessApp && !!form.tempPassword.trim();
+
+        let loginChange: { emailChanged: boolean; passwordChanged: boolean } | null = null;
+
+        // Fire on ANY edit-save of an employee that has a login (with an email to
+        // sync, or a password to set). The route no-ops when nothing differs, so
+        // accounts whose auth email drifted from the displayed email self-heal on
+        // the next save. The email is always sent; the route skips a blank one.
+        if (hasLogin && (newEmail || wantPassword)) {
           const { data: { session } } = await supabase.auth.getSession();
           if (!session) throw new Error("No active session — please sign in again.");
 
-          const res = await fetch("/api/employees/set-password", {
+          const res = await fetch("/api/employees/update-login", {
             method:  "POST",
             headers: {
               "Content-Type":  "application/json",
               "Authorization": `Bearer ${session.access_token}`,
             },
-            body: JSON.stringify({ id: editingId, newPassword: form.tempPassword }),
+            body: JSON.stringify({
+              id:          editingId,
+              newEmail:    newEmail || undefined,
+              newPassword: wantPassword ? form.tempPassword : undefined,
+            }),
           });
 
           const rawText = await res.text();
-          let json: { ok?: boolean; error?: string } | null = null;
-          try { json = JSON.parse(rawText) as { ok?: boolean; error?: string }; }
-          catch { console.error("[set-password] non-JSON response:", rawText.slice(0, 500)); }
+          type UpdateLoginResp = { ok?: boolean; emailChanged?: boolean; passwordChanged?: boolean; error?: string };
+          let json: UpdateLoginResp | null = null;
+          try { json = JSON.parse(rawText) as UpdateLoginResp; }
+          catch { console.error("[update-login] non-JSON response:", rawText.slice(0, 500)); }
 
           if (!res.ok || !json?.ok) {
-            // Surface the failure AT the password field + a visible banner, and
-            // keep the modal open. The employee fields already saved above; only
-            // the password change failed — never let it look silent.
-            const msg = json?.error ?? `Password reset failed (HTTP ${res.status}).`;
-            console.error("[set-password] failed:", msg);
-            setErrors(prev => ({ ...prev, tempPassword: msg }));
-            setActionError(`Password not updated for ${form.fullName.trim()}: ${msg}`);
+            // Surface at the most relevant field + a visible banner; keep the
+            // modal open. The employee fields already saved above; only the auth
+            // login update failed — never let it look silent.
+            const msg = json?.error ?? `Login update failed (HTTP ${res.status}).`;
+            console.error("[update-login] failed:", msg);
+            setErrors(prev => ({ ...prev, [wantPassword ? "tempPassword" : "email"]: msg }));
+            setActionError(`Login not updated for ${form.fullName.trim()}: ${msg}`);
             setSaving(false);
             return;
           }
-          passwordChanged = true;
+          loginChange = { emailChanged: !!json.emailChanged, passwordChanged: !!json.passwordChanged };
         }
 
+        const changedBits: string[] = [];
+        if (loginChange?.emailChanged)    changedBits.push("login email synced");
+        if (loginChange?.passwordChanged) changedBits.push("password changed");
         setSuccessMsg(
-          passwordChanged
-            ? `${form.fullName.trim()} updated — password changed.`
+          changedBits.length
+            ? `${form.fullName.trim()} updated — ${changedBits.join(" & ")}.`
             : `${form.fullName.trim()} updated successfully.`,
         );
 
@@ -964,15 +984,25 @@ export default function EmployeesClient() {
         });
 
         const rawText = await res.text();
-        let json: { ok?: boolean; error?: string } | null = null;
-        try { json = JSON.parse(rawText) as { ok?: boolean; error?: string }; }
+        type DeleteResp = { ok?: boolean; outcome?: "deleted" | "deactivated"; message?: string; error?: string };
+        let json: DeleteResp | null = null;
+        try { json = JSON.parse(rawText) as DeleteResp; }
         catch { console.error("[delete] non-JSON response:", rawText.slice(0, 500)); }
 
         if (!res.ok || !json?.ok) {
           throw new Error(json?.error ?? `Delete failed (HTTP ${res.status}).`);
         }
 
-        setSuccessMsg(`${emp.fullName} removed (login, profile, and record).`);
+        if (json.outcome === "deactivated") {
+          // Could not hard-delete (booking/transaction history). The row was kept
+          // and deactivated — restore it to the list as inactive, don't remove it.
+          setEmployees(prev =>
+            [...prev, { ...emp, isActive: false }].sort((a, b) => a.fullName.localeCompare(b.fullName)),
+          );
+          setSuccessMsg(json.message ?? `${emp.fullName} deactivated (history kept).`);
+        } else {
+          setSuccessMsg(`${emp.fullName} removed (login, profile, and record).`);
+        }
       } catch (err) {
         // Restore the row — deletion did not complete.
         setEmployees(prev =>
