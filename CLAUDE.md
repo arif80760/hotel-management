@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-09 (rev 25)
+Last updated: 2026-06-20 (rev 27)
 
 > **rev 19** — Removed the cleaning/maintenance lifecycle from the dashboard Room Board. Checkout now releases a room straight to Available (`checkoutNormal`/`checkoutWithOverride` set the physical room Available and optimistically mark `booking_rooms` Checked Out). `lib/roomStatus.deriveRoomStatusForDate` no longer special-cases Cleaning/Maintenance — the board shows only Available/Reserved/Occupied, derived from bookings; summary/legend trimmed to those three.
 >
@@ -12,6 +12,8 @@ Last updated: 2026-06-09 (rev 25)
 >
 > **rev 25** — First-tier RLS hardening on bookings. Direct DELETE on `bookings` and `booking_rooms` is now admin-only: added a SECURITY DEFINER `public.is_admin()` helper and replaced the wide-open "Authenticated can delete ..." policies with `USING (public.is_admin())`. SELECT/INSERT/UPDATE stay open to authenticated because the write RPCs (`create_booking_with_rooms`, `add_room_to_booking`, `cancel_booking`, `checkin_booking_atomic`) are SECURITY INVOKER and depend on them; cancellation is a status UPDATE, and no function deletes these rows, so the lock breaks nothing. Migration `2026-06-09-bookings-delete-admin-only.sql`. KNOWN FOLLOW-UP: full role-based hardening (column-level limits on what staff may change; converting the invoker RPCs to SECURITY DEFINER with internal role checks so INSERT/UPDATE can also be tightened) is still open.
 > **GiST EXCLUDE constraint**: a `daterange` exclusion constraint would be the ideal DB-level backstop but is deferred to pre-launch test-data cleanup (existing rows with gaps/overlaps would block the constraint creation).
+>
+> **rev 27** — Completed the staff-login lifecycle (deprovision + password reset). Two new admin-only server routes share one gate, `lib/requireAdmin.ts` (Bearer token → `auth.getUser` → `profiles.role === 'admin'`; same logic as `provision/route.ts`, which keeps its own inline copy on purpose). `/api/employees/delete` tears the login down in order — `auth.admin.deleteUser` FIRST (relies on `profiles.id → auth.users ON DELETE CASCADE` to drop the profile and `employees.auth_user_id → auth.users ON DELETE SET NULL` so the employees row survives), then deletes the profiles row explicitly, then the employees row; it has a self-delete guard and reports partial failures. **This fixes the bug where deleting an employee left a working login** (the old client-only `employeesService.deleteEmployee` removed just the employees row — now unused). `/api/employees/set-password` calls `auth.admin.updateUserById`; the previously dead edit-mode password field is wired to it (blank = keep current; relabelled "New Password"). `provision/route.ts` hardened: the `profiles` upsert is now FATAL — on failure it rolls back the employee row + auth user so a login is never left with `role = null`. All three routes need `SUPABASE_SERVICE_ROLE_KEY`; no DB migration (existing FKs suffice). KNOWN FOLLOW-UP: employee row-level RLS still allows broad authenticated writes — the delete now goes through the service-role route, but tightening direct table RLS is a separate task.
 
 ### Role Permissions
 | Action | staff | admin |
