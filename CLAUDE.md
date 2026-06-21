@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-20 (rev 29)
+Last updated: 2026-06-20 (rev 30)
 
 > **rev 19** — Removed the cleaning/maintenance lifecycle from the dashboard Room Board. Checkout now releases a room straight to Available (`checkoutNormal`/`checkoutWithOverride` set the physical room Available and optimistically mark `booking_rooms` Checked Out). `lib/roomStatus.deriveRoomStatusForDate` no longer special-cases Cleaning/Maintenance — the board shows only Available/Reserved/Occupied, derived from bookings; summary/legend trimmed to those three.
 >
@@ -20,6 +20,8 @@ Last updated: 2026-06-20 (rev 29)
 > **rev 29** — Two features: Activity Log + self-service Profile.
 > **Activity Log** (`/activity`, admins + managers only): a new `activity_log` table (append-only — `fn_activity_log_immutable` blocks UPDATE/DELETE; visibility via `can_view_activity_log()` = admin OR employee designation in Manager/General Manager) is populated by ONE SECURITY DEFINER trigger `fn_capture_activity()` (migration `2026-06-20-activity-log-capture-triggers.sql`) attached AFTER INS/UPD/DEL to bookings, booking_rooms, payments, refunds, account_transactions, employees, inventory_movements, day_closes. The whole body is wrapped in `BEGIN…EXCEPTION WHEN OTHERS THEN RETURN NULL` so logging can never abort the audited write; only meaningful changes are logged (status transitions, not updated_at/paid_amount churn). **Dedup rule: payment/refund-linked `account_transactions` rows (`booking_payment_id` set) are NOT logged as `cash.*`** — they're already captured at the payments/refunds level, so money isn't double-counted; only manual daybook entries log as `cash.*`. Employee changes by a null actor (service-role admin routes) are skipped (those routes log themselves). UI: `app/activity/ActivityLogClient.tsx` — server-side pagination (25/page with exact count), `entity_type` pill filters, debounced search, custom Dhaka-anchored date range. `AuthContext` exposes `canViewActivityLog` (Effect 3); Sidebar shows the link gated on it.
 > **Self-service Profile** (`/profile`, any signed-in user): migration `2026-06-20-profile-self-service.sql` adds `profiles.avatar_url` and a **public `avatars` bucket** with own-folder RLS (`(storage.foldername(name))[1] = auth.uid()::text`). `ProfileClient` lets a user edit their name (writes both `profiles.full_name` and the linked `employees.full_name`), phone (`employees.phone`), avatar (uploads to `avatars/{uid}/{ts}.ext`, stores the path in `profiles.avatar_url`, public URL on read), and password (`supabase.auth.updateUser`). Role/designation/login-email are read-only. NOTE: this is a SECOND photo location — `profiles.avatar_url`→public `avatars` (self-service) is independent of `employees.photo_url`→private `employee-photos` (admin Employees page / `signEmployeePhotos`); the two do not mirror each other. The name edit depends on the live-only `trg_prevent_role_escalation` permitting a `full_name`-only self-update (saveProfile sends only `full_name`, never `role`).
+>
+> **rev 30** — Staff-booking RLS launch-blocker fixed, plus consolidation of the auth/activity/profile work. **Staff-booking fix:** `fn_sync_account_transactions()` is now SECURITY DEFINER (`SET search_path = public, pg_temp`) so the automatic payment→`account_transactions` mirror bypasses the admin-only INSERT RLS — staff can now create bookings that include an initial payment. MANUAL daybook entries (direct client INSERT into `account_transactions`) stay admin-only via the unchanged policy. Migration `2026-06-20-account-transactions-sync-definer.sql` (commit `670bb01`). **Already documented above and confirmed shipped:** the Activity Log (rev 29; capture-trigger repo/live dedup correction `76dfff9`), self-service Profile (rev 29), and the employee auth lifecycle — login email-sync on edit via `update-login` and smart-delete (FK-referenced employees are deactivated + login banned rather than hard-deleted; commits `397d0f0`, `5844ba6`, `d3017e2`). NOTE: saving one's own profile while linked to an employee row fires `employee.updated` in the activity log. See the **Pending / TODO** section below for open verification + post-launch items.
 
 ### Role Permissions
 | Action | staff | admin |
@@ -382,3 +384,21 @@ cd /Users/arif80760/hotel-management &&
 - Category slug is the stable FK key in `rooms.category` — never change a slug. Only `name` and `price` are editable (Manage Categories modal in Rooms).
 - Category display: rooms store the slug; UI maps slug → `room_categories.name` via catNameMap (exists in both RoomsClient and BookingsClient). Any new UI showing a category must use this map.
 - Dropped: `booking_summary` view (stale, single-room era, unused).
+
+---
+
+## Pending / TODO (as of rev 30)
+
+### Verify live (auth lifecycle + activity log)
+- Confirm a deactivated account (Salam) cannot log in; confirm auth email self-heals on the next employee edit; confirm a clean hard-delete of an unreferenced throwaway employee; confirm the Zahid orphan auth-user delete actually ran.
+- Activity log: the **manual cash/daybook branch** (`account_transactions` with `booking_payment_id IS NULL`) is the only capture branch not yet exercised live — verify by recording a manual cash entry.
+
+### Known minor issues (non-blocking)
+- **Guest-dedup 409:** a `guests` INSERT can hit `guests_email_key` for a returning guest whose email already exists, because matching is on phone, not email. Minor.
+- **Profile:** contact email is read-only on `/profile` — optionally make it self-editable.
+
+### Deferred (pre-/post-launch)
+- **Test-data cleanup:** wipe transactional/test data to free FK-referenced test employees for true hard-delete and a clean launch slate. Harvest `booking_documents.storage_path` first; do the separate storage-object cleanup (guest-documents + employee-photos + avatars). (See the safe delete order from the schema mapping.)
+- **Schema drift backfill:** ~17 live-only objects (incl. `prevent_role_escalation`, the `*_updated_at` triggers + `fn_set_updated_at`, and value CHECK constraints on bookings/employees/profiles/rooms/room_categories) and the live `storage.objects` policies are NOT in tracked SQL — backfill into `sql/` post-launch so the repo matches live.
+- **Launch:** Supabase Pro; domain transfer (albatrossresort.com) + fresh public site; soft launch.
+- **Post-launch hardening:** middleware/SSR auth; add `WITH CHECK` to the `profiles` UPDATE policy (defense-in-depth alongside `trg_prevent_role_escalation`); audit all `auth.users`-referencing FK `ON DELETE` rules (enables true hard-delete of referenced staff); orphan-avatar cleanup.
