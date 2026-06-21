@@ -621,6 +621,12 @@ function getCategoryPrice(categorySlug: string, categories: RoomCategory[]): num
   return cat?.price ?? 0;
 }
 
+function calcDiscount(published: number, rate: number, nights: number) {
+  const perNight = published > 0 && rate < published ? published - rate : 0;
+  const pct = published > 0 && perNight > 0 ? Math.round((perNight / published) * 100) : 0;
+  return { perNight, pct, totalSaving: perNight * Math.max(0, nights) };
+}
+
 // ─────────────────────────────────────────────────────────────
 // ROLE SIMULATION
 // ─────────────────────────────────────────────────────────────
@@ -7184,6 +7190,32 @@ export default function BookingsClient({ initialRoom }: Props) {
                                   />
                                 </div>
                               </div>
+
+                              {/* Published hint + discount banner — parity with the single-room card */}
+                              {(() => {
+                                const published = getCategoryPrice(cat.toLowerCase(), categories);
+                                const rate      = parseFloat(sec.bookingRate) || 0;
+                                const disc      = calcDiscount(published, rate, blockNights);
+                                return (
+                                  <>
+                                    {rate > 0 && rate !== published && (
+                                      <p className="mt-1 text-[11px] text-slate-400">Published: ৳{published}</p>
+                                    )}
+                                    {disc.perNight > 0 && (
+                                      <div className="flex items-center gap-2 text-[12px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 flex-shrink-0">
+                                          <path d="M20 12V22H4V12"/><path d="M22 7H2v5h20V7z"/><path d="M12 22V7"/><path d="M12 7H7.5a2.5 2.5 0 010-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 000-5C13 2 12 7 12 7z"/>
+                                        </svg>
+                                        <span>
+                                          <span className="font-bold">{disc.pct}% discount</span>
+                                          {" · "}৳{disc.perNight.toLocaleString()}/night off
+                                          {blockNights > 0 && <span className="font-bold"> · Total saving: ৳{disc.totalSaving.toLocaleString()}</span>}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </>
+                                );
+                              })()}
 
                               {/* Select all / Deselect all */}
                               {datesValid && available.length > 0 && (
