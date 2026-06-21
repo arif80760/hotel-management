@@ -36,6 +36,7 @@ import { supabase } from "@/lib/supabase";
 export type ExpenseCategory = {
   id:         string;
   name:       string;
+  kind:       "operating" | "owner_draw";
   isActive:   boolean;
   createdAt:  string;
   createdBy:  string | null;
@@ -45,6 +46,7 @@ export type ExpenseCategory = {
 type ExpenseCategoryRow = {
   id:         string;
   name:       string;
+  kind:       string | null;
   is_active:  boolean;
   created_at: string;
   created_by: string | null;
@@ -55,6 +57,7 @@ function mapCategory(r: ExpenseCategoryRow): ExpenseCategory {
   return {
     id:        r.id,
     name:      r.name,
+    kind:      (r.kind as "operating" | "owner_draw") ?? "operating",
     isActive:  r.is_active,
     createdAt: r.created_at,
     createdBy: r.created_by,
@@ -73,7 +76,7 @@ function mapCategory(r: ExpenseCategoryRow): ExpenseCategory {
 export async function getExpenseCategories(): Promise<ExpenseCategory[]> {
   const { data, error } = await supabase
     .from("expense_categories")
-    .select("id, name, is_active, created_at, created_by, updated_at")
+    .select("id, name, kind, is_active, created_at, created_by, updated_at")
     .order("is_active", { ascending: false })
     .order("name",       { ascending: true });
 
@@ -98,7 +101,10 @@ export async function getExpenseCategories(): Promise<ExpenseCategory[]> {
  *
  * Throws if the name is empty or a duplicate.
  */
-export async function createExpenseCategory(name: string): Promise<ExpenseCategory> {
+export async function createExpenseCategory(
+  name: string,
+  kind: "operating" | "owner_draw" = "operating",
+): Promise<ExpenseCategory> {
   const trimmed = name.trim();
   if (!trimmed) throw new Error("[createExpenseCategory] Name is required.");
 
@@ -108,8 +114,8 @@ export async function createExpenseCategory(name: string): Promise<ExpenseCatego
 
   const { data, error } = await supabase
     .from("expense_categories")
-    .insert({ name: trimmed, created_by: createdBy })
-    .select("id, name, is_active, created_at, created_by, updated_at")
+    .insert({ name: trimmed, kind, created_by: createdBy })
+    .select("id, name, kind, is_active, created_at, created_by, updated_at")
     .single();
 
   if (error || !data) {
@@ -133,7 +139,7 @@ export async function updateExpenseCategoryName(id: string, newName: string): Pr
     .from("expense_categories")
     .update({ name: trimmed })
     .eq("id", id)
-    .select("id, name, is_active, created_at, created_by, updated_at")
+    .select("id, name, kind, is_active, created_at, created_by, updated_at")
     .single();
 
   if (error || !data) {
@@ -155,13 +161,37 @@ export async function setExpenseCategoryActive(id: string, isActive: boolean): P
     .from("expense_categories")
     .update({ is_active: isActive })
     .eq("id", id)
-    .select("id, name, is_active, created_at, created_by, updated_at")
+    .select("id, name, kind, is_active, created_at, created_by, updated_at")
     .single();
 
   if (error || !data) {
     console.error("──────────── [setExpenseCategoryActive] FAILED ────────────");
     console.error("  message:", error?.message, "| code:", error?.code);
     throw new Error(`[setExpenseCategoryActive] ${error?.message ?? "no row returned"}`);
+  }
+
+  return mapCategory(data as ExpenseCategoryRow);
+}
+
+/**
+ * Reclassify a category as operating vs owner_draw. owner_draw categories
+ * record as cash-out but are excluded from operating-expense/profit totals.
+ */
+export async function updateExpenseCategoryKind(
+  id: string,
+  kind: "operating" | "owner_draw",
+): Promise<ExpenseCategory> {
+  const { data, error } = await supabase
+    .from("expense_categories")
+    .update({ kind })
+    .eq("id", id)
+    .select("id, name, kind, is_active, created_at, created_by, updated_at")
+    .single();
+
+  if (error || !data) {
+    console.error("──────────── [updateExpenseCategoryKind] FAILED ────────────");
+    console.error("  message:", error?.message, "| code:", error?.code);
+    throw new Error(`[updateExpenseCategoryKind] ${error?.message ?? "no row returned"}`);
   }
 
   return mapCategory(data as ExpenseCategoryRow);

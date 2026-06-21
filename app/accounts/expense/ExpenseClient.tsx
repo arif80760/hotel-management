@@ -27,6 +27,7 @@ import {
   getExpenseCategories,
   createExpenseCategory,
   updateExpenseCategoryName,
+  updateExpenseCategoryKind,
   setExpenseCategoryActive,
   type ExpenseCategory,
 } from "@/services/expenseCategoriesService";
@@ -130,10 +131,12 @@ export default function ExpenseClient() {
   const [editError, setEditError] = useState<string | null>(null);
 
   const [newCategoryName, setNewCategoryName] = useState("");
+  const [newCategoryKind, setNewCategoryKind] = useState<"operating" | "owner_draw">("operating");
   const [creatingCategory, setCreatingCategory] = useState(false);
   const [createCategoryError, setCreateCategoryError] = useState<string | null>(null);
 
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [kindUpdatingId, setKindUpdatingId] = useState<string | null>(null);
 
   // ── Add Expense modal (Phase 4C, NEW) ──────────────────────
   const [expenseModalOpen, setExpenseModalOpen] = useState(false);
@@ -327,14 +330,29 @@ export default function ExpenseClient() {
     setCreateCategoryError(null);
     setCreatingCategory(true);
     try {
-      await createExpenseCategory(trimmed);
+      await createExpenseCategory(trimmed, newCategoryKind);
       setNewCategoryName("");
+      setNewCategoryKind("operating");
       setSuccessMsg(`Category "${trimmed}" created.`);
       await reloadCategories();
     } catch (err) {
       setCreateCategoryError(err instanceof Error ? err.message : "Create failed.");
     } finally {
       setCreatingCategory(false);
+    }
+  }
+  async function handleChangeKind(c: ExpenseCategory, kind: "operating" | "owner_draw") {
+    if (kind === c.kind) return;
+    setKindUpdatingId(c.id);
+    try {
+      await updateExpenseCategoryKind(c.id, kind);
+      setSuccessMsg(`"${c.name}" set to ${kind === "owner_draw" ? "Owner drawing" : "Operating expense"}.`);
+      await reloadCategories();
+    } catch (err) {
+      console.error("[ExpenseClient] kind change failed:", err);
+      setSuccessMsg(err instanceof Error ? err.message : "Could not change category type.");
+    } finally {
+      setKindUpdatingId(null);
     }
   }
   function startEdit(c: ExpenseCategory) {
@@ -706,6 +724,15 @@ export default function ExpenseClient() {
                   disabled={creatingCategory}
                   className={inputCls(!!createCategoryError)}
                 />
+                <select
+                  value={newCategoryKind}
+                  onChange={(e) => setNewCategoryKind(e.target.value as "operating" | "owner_draw")}
+                  disabled={creatingCategory}
+                  className="px-3 py-2.5 rounded-lg border border-slate-200 bg-white text-[13px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-40 whitespace-nowrap"
+                >
+                  <option value="operating">Operating expense</option>
+                  <option value="owner_draw">Owner drawing</option>
+                </select>
                 <button
                   type="button"
                   onClick={handleCreateCategory}
@@ -716,6 +743,7 @@ export default function ExpenseClient() {
                 </button>
               </div>
               {createCategoryError && (<p className="text-[12px] text-rose-600">{createCategoryError}</p>)}
+              <p className="text-[11.5px] text-slate-400">Owner drawings (director/MD/chairman withdrawals) record as cash out but are kept out of operating expenses and profit.</p>
             </div>
             <div className="flex-1 overflow-y-auto px-5 py-3">
               {categories.length === 0 ? (
@@ -755,9 +783,22 @@ export default function ExpenseClient() {
                             <button type="button" onClick={() => startEdit(c)} className="flex-1 text-left text-[13.5px] font-medium text-slate-800 hover:text-amber-700 transition-colors" title="Click to rename">
                               {c.name}
                             </button>
+                            {c.kind === "owner_draw" && (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 ring-1 ring-amber-200 text-[10.5px] font-semibold uppercase tracking-wider">Owner draw</span>
+                            )}
                             {!c.isActive && (
                               <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10.5px] font-semibold uppercase tracking-wider">Inactive</span>
                             )}
+                            <select
+                              value={c.kind}
+                              onChange={(e) => handleChangeKind(c, e.target.value as "operating" | "owner_draw")}
+                              disabled={kindUpdatingId === c.id}
+                              title="Classification"
+                              className="px-2 py-1.5 rounded-md border border-slate-200 bg-white text-[11.5px] text-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-40"
+                            >
+                              <option value="operating">Operating</option>
+                              <option value="owner_draw">Owner draw</option>
+                            </select>
                             <button
                               type="button"
                               onClick={() => handleToggleActive(c)}
