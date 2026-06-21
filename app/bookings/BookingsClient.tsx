@@ -50,6 +50,7 @@ import {
 import { getRoomCategories, type RoomCategory } from "@/services/roomCategoriesService";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
 import { calcBookingLevelDeductions } from "@/lib/checkoutUtils";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import type { Refund } from "@/lib/mockData";
 import * as bookingsService from "@/services/bookingsService";
 import type { Payment, BulkCheckinFailure } from "@/services/bookingsService";
@@ -709,6 +710,12 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   // ── Checkout confirmation modal state ──────────────────────
   const [checkoutConfirm, setCheckoutConfirm] = useState<Booking | null>(null);
+
+  // Generic confirm dialog (check-in / check-out gates).
+  const [confirm, setConfirm] = useState<
+    { title: string; message: string; confirmLabel: string; tone: "normal" | "warning" | "danger"; onConfirm: () => void | Promise<void> } | null
+  >(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
   // Extra charge fields
   const [chargeType,   setChargeType]   = useState<string>("");
   const [chargeAmount, setChargeAmount] = useState<string>("");
@@ -2120,7 +2127,7 @@ export default function BookingsClient({ initialRoom }: Props) {
    * can ever happen without the operator reviewing the billing summary first.
    * Check In passes straight through.
    */
-  function handleWorkflowAction(booking: Booking, nextStatus: BookingStatus) {
+  function handleWorkflowAction(booking: Booking, nextStatus: BookingStatus, confirmed = false) {
     if (nextStatus === "Checked Out") {
       setCheckoutConfirm(booking);
       setCheckoutOpenedAt(new Date());   // stamp "actual checkout time" for timing panel
@@ -2130,6 +2137,16 @@ export default function BookingsClient({ initialRoom }: Props) {
       setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
       setCheckoutPayMethod("cash");
     } else {
+      if (!confirmed) {
+        setConfirm({
+          title: "Check in",
+          message: `Check in ${booking.id}?`,
+          confirmLabel: "Check in",
+          tone: "normal",
+          onConfirm: () => handleWorkflowAction(booking, nextStatus, true),
+        });
+        return;
+      }
       changeBookingStatus(booking.id, nextStatus);
     }
   }
@@ -2188,7 +2205,7 @@ export default function BookingsClient({ initialRoom }: Props) {
    * Confirms normal checkout (finalPayable ≤ 0).
    * Stores extra charges if present, then changes status to Checked Out.
    */
-  async function handleConfirmCheckout() {
+  async function handleConfirmCheckout(confirmed = false) {
     if (!checkoutConfirm) return;
     const charge = validateAndBuildCharge();
     if (charge === undefined) return;
@@ -2225,6 +2242,16 @@ export default function BookingsClient({ initialRoom }: Props) {
       setOverrideError("There is an outstanding balance. Admin override is required to proceed.");
       return;
     }
+    if (!confirmed) {
+      setConfirm({
+        title: "Confirm check-out",
+        message: `Check out ${bookingId}?`,
+        confirmLabel: "Check out",
+        tone: "normal",
+        onConfirm: () => handleConfirmCheckout(true),
+      });
+      return;
+    }
     await checkoutNormal(
       bookingId,
       charge.amount,
@@ -2254,8 +2281,7 @@ export default function BookingsClient({ initialRoom }: Props) {
     closeCheckoutConfirm();
   }
 
-  async function handleAdminOverride(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleAdminOverride(confirmed = false) {
     if (!checkoutConfirm) return;
     if (!isAdmin) {
       setOverrideError("Only admins can use this override.");
@@ -2287,6 +2313,17 @@ export default function BookingsClient({ initialRoom }: Props) {
     }
 
     const finalPayable = finalPayableBeforeCapture - capturedPayAmt;
+
+    if (!confirmed) {
+      setConfirm({
+        title: "Confirm check-out",
+        message: `Check out with ৳${finalPayable.toLocaleString()} still due?`,
+        confirmLabel: "Check out",
+        tone: "warning",
+        onConfirm: () => handleAdminOverride(true),
+      });
+      return;
+    }
 
     await checkoutWithOverride(
       bookingId,
@@ -5150,7 +5187,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </span>
                     </div>
 
-                    <form onSubmit={handleAdminOverride}>
+                    <form onSubmit={e => { e.preventDefault(); handleAdminOverride(); }}>
                       <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
                         Override Reason
                         <span className="ml-1 font-normal normal-case text-slate-400">(required for audit log)</span>
@@ -5202,7 +5239,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </button>
                       <button
                         type="button"
-                        onClick={handleConfirmCheckout}
+                        onClick={() => handleConfirmCheckout()}
                         disabled={isOverpayment}
                         className={`flex items-center gap-2 px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-colors shadow-sm ${
                           isOverpayment
@@ -7905,6 +7942,21 @@ export default function BookingsClient({ initialRoom }: Props) {
           </div>
         );
       })()}
+
+      <ConfirmDialog
+        open={!!confirm}
+        title={confirm?.title ?? ""}
+        message={confirm?.message ?? ""}
+        confirmLabel={confirm?.confirmLabel ?? "Confirm"}
+        tone={confirm?.tone ?? "normal"}
+        busy={confirmBusy}
+        onCancel={() => { if (!confirmBusy) setConfirm(null); }}
+        onConfirm={async () => {
+          if (!confirm) return;
+          setConfirmBusy(true);
+          try { await confirm.onConfirm(); } finally { setConfirmBusy(false); setConfirm(null); }
+        }}
+      />
 
     </div>
   );

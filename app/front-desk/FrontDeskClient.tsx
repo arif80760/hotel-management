@@ -31,6 +31,7 @@ import {
 } from "@/lib/mockData";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
 import { calcBookingLevelDeductions } from "@/lib/checkoutUtils";
+import ConfirmDialog from "@/components/ConfirmDialog";
 
 // ─────────────────────────────────────────────────────────────
 // LOCAL TYPES
@@ -223,6 +224,12 @@ export default function FrontDeskClient() {
   // ── Checkout confirmation modal ─────────────────────────────
   // Always shown when "Check Out" is clicked — full billing summary.
   const [checkoutConfirm, setCheckoutConfirm] = useState<Booking | null>(null);
+
+  // Generic confirm dialog (check-in / check-out gates).
+  const [confirm, setConfirm] = useState<
+    { title: string; message: string; confirmLabel: string; tone: "normal" | "warning" | "danger"; onConfirm: () => void | Promise<void> } | null
+  >(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
   // Extra charge fields
   const [chargeType,   setChargeType]   = useState<string>("");
   const [chargeAmount, setChargeAmount] = useState<string>("");
@@ -310,7 +317,17 @@ export default function FrontDeskClient() {
   // ── Handlers ─────────────────────────────────────────────────
 
   /** Check In: Confirmed → Checked In (room becomes Occupied via context). */
-  function handleCheckIn(booking: Booking) {
+  function handleCheckIn(booking: Booking, confirmed = false) {
+    if (!confirmed) {
+      setConfirm({
+        title: "Check in",
+        message: `Check in ${booking.id}? Room ${booking.roomNumber} will be marked Occupied.`,
+        confirmLabel: "Check in",
+        tone: "normal",
+        onConfirm: () => handleCheckIn(booking, true),
+      });
+      return;
+    }
     changeBookingStatus(booking.id, "Checked In");
     setSuccessMsg(
       `${booking.guestName} checked in · Room ${booking.roomNumber} is now Occupied.`
@@ -379,7 +396,7 @@ export default function FrontDeskClient() {
     return { amount: amt };
   }
 
-  async function handleConfirmCheckout() {
+  async function handleConfirmCheckout(confirmed = false) {
     if (!checkoutConfirm) return;
     const charge = validateAndBuildCharge();
     if (charge === undefined) return;
@@ -413,6 +430,16 @@ export default function FrontDeskClient() {
       setOverrideError("There is an outstanding balance. Admin override is required to proceed.");
       return;
     }
+    if (!confirmed) {
+      setConfirm({
+        title: "Confirm check-out",
+        message: `Check out ${checkoutConfirm.id}?`,
+        confirmLabel: "Check out",
+        tone: "normal",
+        onConfirm: () => handleConfirmCheckout(true),
+      });
+      return;
+    }
     await checkoutNormal(
       bookingId,
       charge.amount,
@@ -437,8 +464,7 @@ export default function FrontDeskClient() {
     closeCheckoutConfirm();
   }
 
-  async function handleAdminOverride(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleAdminOverride(confirmed = false) {
     if (!checkoutConfirm) return;
     // Use real auth role; fall back to the demo role toggle for now
     if (!isAdmin) {
@@ -471,6 +497,17 @@ export default function FrontDeskClient() {
     }
 
     const finalPayable = finalPayableBeforeCapture - capturedPayAmt;
+
+    if (!confirmed) {
+      setConfirm({
+        title: "Confirm check-out",
+        message: `Check out with ৳${finalPayable.toLocaleString()} still due?`,
+        confirmLabel: "Check out",
+        tone: "warning",
+        onConfirm: () => handleAdminOverride(true),
+      });
+      return;
+    }
 
     await checkoutWithOverride(
       bookingId,
@@ -1427,7 +1464,7 @@ export default function FrontDeskClient() {
                       )}
                     </div>
 
-                    <form onSubmit={handleAdminOverride}>
+                    <form onSubmit={e => { e.preventDefault(); handleAdminOverride(); }}>
                       <label className="block text-[12px] font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
                         Override Reason
                         <span className="ml-1 font-normal normal-case text-slate-400">(required for audit log)</span>
@@ -1481,7 +1518,7 @@ export default function FrontDeskClient() {
                       </button>
                       <button
                         type="button"
-                        onClick={handleConfirmCheckout}
+                        onClick={() => handleConfirmCheckout()}
                         disabled={isOverpayment}
                         className={`flex items-center gap-2 px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-colors shadow-sm ${
                           isOverpayment
@@ -1686,6 +1723,21 @@ export default function FrontDeskClient() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!confirm}
+        title={confirm?.title ?? ""}
+        message={confirm?.message ?? ""}
+        confirmLabel={confirm?.confirmLabel ?? "Confirm"}
+        tone={confirm?.tone ?? "normal"}
+        busy={confirmBusy}
+        onCancel={() => { if (!confirmBusy) setConfirm(null); }}
+        onConfirm={async () => {
+          if (!confirm) return;
+          setConfirmBusy(true);
+          try { await confirm.onConfirm(); } finally { setConfirmBusy(false); setConfirm(null); }
+        }}
+      />
 
     </div>
   );
