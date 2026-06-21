@@ -295,3 +295,108 @@ export async function createExpense(input: NewExpense): Promise<Expense> {
     createdBy:     r.created_by,
   };
 }
+
+/**
+ * In-place edit of a user-recorded expense_out row (covers both general
+ * expenses and director remuneration — both are expense_out).
+ *
+ * UPDATEs only the editable fields (txn_date, amount, category_id,
+ * employee_id|payee, note) plus the edited_at/edited_by audit stamp. The
+ * voucher_number is preserved. expense_out integrity is maintained: category_id
+ * stays set and exactly one of (employee_id, payee) is populated.
+ *
+ * Guards: only a live (deleted_at IS NULL), user-recorded (booking_payment_id
+ * IS NULL) row of type='expense_out' may be edited. The day-close immutability
+ * trigger rejects the UPDATE if the row's day (or the new date) is closed — that
+ * error is allowed to surface to the caller.
+ */
+export async function editExpense(id: string, input: NewExpense): Promise<Expense> {
+  // ── Validate (mirrors createExpense) ─────────────────────
+  if (!input.txnDate) throw new Error("[editExpense] txnDate is required.");
+  if (!(input.amount > 0)) throw new Error("[editExpense] amount must be positive.");
+  if (!input.categoryId) throw new Error("[editExpense] categoryId is required.");
+
+  if (input.payeeMode === "employee") {
+    if (!input.employeeId) throw new Error("[editExpense] employeeId required when payeeMode='employee'.");
+    if (input.payee)       throw new Error("[editExpense] payee must be empty when payeeMode='employee'.");
+  } else if (input.payeeMode === "vendor") {
+    if (!input.payee?.trim()) throw new Error("[editExpense] payee required when payeeMode='vendor'.");
+    if (input.employeeId)     throw new Error("[editExpense] employeeId must be empty when payeeMode='vendor'.");
+  } else {
+    throw new Error(`[editExpense] unknown payeeMode: ${input.payeeMode}`);
+  }
+
+  // ── Guard: must be a live, user-recorded expense_out row ──
+  const { data: existing, error: fetchErr } = await supabase
+    .from("account_transactions")
+    .select("id, type, booking_payment_id, deleted_at")
+    .eq("id", id)
+    .single();
+
+  if (fetchErr || !existing) {
+    throw new Error(`[editExpense] ${fetchErr?.message ?? "transaction not found"}`);
+  }
+  if (existing.type !== "expense_out") {
+    throw new Error("[editExpense] Only expense rows can be edited here.");
+  }
+  if (existing.booking_payment_id !== null) {
+    throw new Error("[editExpense] Booking-linked transactions cannot be edited from the expense page.");
+  }
+  if (existing.deleted_at !== null) {
+    throw new Error("[editExpense] This transaction has been voided and cannot be edited.");
+  }
+
+  // ── Audit: who is editing (fails open) ───────────────────
+  const { data: authData } = await supabase.auth.getUser();
+  const editedBy = authData?.user?.id ?? null;
+
+  // ── Update (voucher_number untouched) ────────────────────
+  const { data, error } = await supabase
+    .from("account_transactions")
+    .update({
+      txn_date:    input.txnDate,
+      amount:      input.amount,
+      category_id: input.categoryId,
+      payee:       input.payeeMode === "vendor"   ? input.payee!.trim() : null,
+      employee_id: input.payeeMode === "employee" ? input.employeeId!   : null,
+      note:        input.note?.trim() || null,
+      edited_at:   new Date().toISOString(),
+      edited_by:   editedBy,
+    })
+    .eq("id", id)
+    .is("deleted_at", null)
+    .select("id, txn_date, amount, voucher_number, category_id, payee, employee_id, note, created_at, created_by")
+    .single();
+
+  if (error || !data) {
+    console.error("──────────── [editExpense] UPDATE FAILED ────────────");
+    console.error("  message:", error?.message, "| code:", error?.code, "| details:", error?.details, "| hint:", error?.hint);
+    throw new Error(`[editExpense] ${error?.message ?? "no row returned"}`);
+  }
+
+  const r = data as {
+    id: string;
+    txn_date: string;
+    amount: string | number;
+    voucher_number: string;
+    category_id: string;
+    payee: string | null;
+    employee_id: string | null;
+    note: string | null;
+    created_at: string;
+    created_by: string | null;
+  };
+
+  return {
+    id:            r.id,
+    txnDate:       r.txn_date,
+    amount:        typeof r.amount === "string" ? parseFloat(r.amount) : r.amount,
+    voucherNumber: r.voucher_number,
+    categoryId:    r.category_id,
+    payee:         r.payee,
+    employeeId:    r.employee_id,
+    note:          r.note,
+    createdAt:     r.created_at,
+    createdBy:     r.created_by,
+  };
+}

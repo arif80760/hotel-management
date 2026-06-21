@@ -37,9 +37,12 @@ import {
   getExpenses,
   getDistinctPayees,
   createExpense,
+  editExpense,
   type Expense,
   type NewExpense,
 } from "@/services/expensesService";
+
+import { getDayCloseStatus } from "@/services/dayCloseService";
 
 import {
   getAllEmployees,
@@ -142,6 +145,14 @@ export default function ExpenseClient() {
   // ── View toggle: operating Expenses vs Remuneration ─────────
   const [view, setView] = useState<"expenses" | "remuneration">("expenses");
 
+  // ── Edit mode: when set, the matching modal edits this row (in place) ──
+  const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
+  const [editingRemunId,   setEditingRemunId]   = useState<string | null>(null);
+  const [editingRemunCategoryId, setEditingRemunCategoryId] = useState<string | null>(null);
+
+  // ── Day-close: a row whose txn_date <= lastClosedDate can't be edited ──
+  const [lastClosedDate, setLastClosedDate] = useState<string | null>(null);
+
   // ── Add Remuneration modal ──────────────────────────────────
   const [remunModalOpen, setRemunModalOpen] = useState(false);
   const [remunRecipientId, setRemunRecipientId] = useState<string>("");
@@ -204,13 +215,14 @@ export default function ExpenseClient() {
     let cancelled = false;
     async function load() {
       try {
-        const [exps, cats, emps, payeesH, invItems, invCats] = await Promise.all([
+        const [exps, cats, emps, payeesH, invItems, invCats, dayClose] = await Promise.all([
           getExpenses({ fromDate: filterFromDate, toDate: filterToDate }),
           getExpenseCategories(),
           getAllEmployees(),
           getDistinctPayees(),
           getInventoryItems({ activeOnly: false }),
           getInventoryCategories(),
+          getDayCloseStatus().catch(() => null),
         ]);
         if (cancelled) return;
         setExpenses(exps);
@@ -219,6 +231,7 @@ export default function ExpenseClient() {
         setPayeesHistory(payeesH);
         setInventoryItems(invItems);
         setInventoryCategories(invCats);
+        setLastClosedDate(dayClose?.lastClosedDate ?? null);
       } catch (err) {
         if (!cancelled) {
           setFetchError(err instanceof Error ? err.message : "Failed to load.");
@@ -291,6 +304,7 @@ export default function ExpenseClient() {
 
   // ── Expense Modal helpers ──────────────────────────────────
   function openExpenseModal() {
+    setEditingExpenseId(null);
     setExpenseModalOpen(true);
     setExTxnDate(todayISO());
     setExAmount("");
@@ -317,6 +331,43 @@ export default function ExpenseClient() {
   function closeExpenseModal() {
     if (creatingExpense) return;
     setExpenseModalOpen(false);
+    setEditingExpenseId(null);
+  }
+
+  // A row is locked once its day is closed (day-close immutability trigger
+  // would reject the edit anyway; we disable the button to avoid the error).
+  function isRowClosed(e: Expense): boolean {
+    return lastClosedDate !== null && e.txnDate <= lastClosedDate;
+  }
+
+  // Open the Add Expense modal in EDIT mode, pre-filled from an operating row.
+  function openEditExpense(e: Expense) {
+    setEditingExpenseId(e.id);
+    setExTxnDate(e.txnDate);
+    setExAmount(String(e.amount));
+    setExCategoryId(e.categoryId);
+    if (e.employeeId) { setExPayeeMode("employee"); setExEmployeeId(e.employeeId); setExPayeeText(""); }
+    else              { setExPayeeMode("vendor");   setExPayeeText(e.payee ?? ""); setExEmployeeId(""); }
+    setExNote(e.note ?? "");
+    setCreateExpenseError(null);
+    setCreateExpenseFieldErrors({});
+    // Inventory seam is create-only — never re-applied on edit.
+    setExIsInventory(false);
+    setExInvItemId(""); setExInvItemSearch(""); setExInvQuantity(""); setExInvUnitPrice("");
+    setExInvUnit("pack"); setExInvCreateMode(false); setCreateInvItemError(null);
+    setExpenseModalOpen(true);
+  }
+
+  // Open the Add Remuneration modal in EDIT mode, pre-filled from a remuneration row.
+  function openEditRemun(e: Expense) {
+    setEditingRemunId(e.id);
+    setEditingRemunCategoryId(e.categoryId);
+    setRemunRecipientId(e.employeeId ?? "");
+    setRemunAmount(String(e.amount));
+    setRemunDate(e.txnDate);
+    setRemunNote(e.note ?? "");
+    setRemunError(null);
+    setRemunModalOpen(true);
   }
 
   // ── Reload helpers ─────────────────────────────────────────
@@ -494,6 +545,16 @@ export default function ExpenseClient() {
         payee:       exPayeeMode === "vendor"   ? exPayeeText.trim() : undefined,
         note:        exNote.trim() || undefined,
       };
+
+      // ── EDIT mode: in-place update, no inventory seam ──
+      if (editingExpenseId) {
+        const updated = await editExpense(editingExpenseId, input);
+        setSuccessMsg(`Expense ${updated.voucherNumber} updated.`);
+        closeExpenseModal();
+        await reloadExpenses();
+        return;
+      }
+
       const newExpense = await createExpense(input);
 
       // Inventory seam (Phase I-D): when toggle is ON, write the
@@ -526,6 +587,8 @@ export default function ExpenseClient() {
 
   // ── Group expenses by date for daybook layout ──────────────
   function openRemunModal() {
+    setEditingRemunId(null);
+    setEditingRemunCategoryId(null);
     setRemunRecipientId("");
     setRemunAmount("");
     setRemunDate(todayISO());
@@ -541,8 +604,29 @@ export default function ExpenseClient() {
     setRemunError(null);
     setSavingRemun(true);
     try {
-      const categoryId = await resolveRemunerationCategoryId();
       const recipient = remunRecipients.find(e => e.id === remunRecipientId);
+
+      // ── EDIT mode: in-place update, preserve the row's remuneration category ──
+      if (editingRemunId) {
+        await editExpense(editingRemunId, {
+          txnDate:    remunDate,
+          amount:     amt,
+          categoryId: editingRemunCategoryId ?? await resolveRemunerationCategoryId(),
+          payeeMode:  "employee",
+          employeeId: remunRecipientId,
+          note:       remunNote.trim() || undefined,
+        });
+        const [exps, cats] = await Promise.all([getExpenses(), getExpenseCategories()]);
+        setExpenses(exps);
+        setCategories(cats);
+        setSuccessMsg(`Remuneration to ${recipient?.fullName ?? "recipient"} updated.`);
+        setRemunModalOpen(false);
+        setEditingRemunId(null);
+        setEditingRemunCategoryId(null);
+        return;
+      }
+
+      const categoryId = await resolveRemunerationCategoryId();
       await createExpense({
         txnDate:    remunDate,
         amount:     amt,
@@ -767,6 +851,21 @@ export default function ExpenseClient() {
                       </div>
                       <div className="flex items-center gap-3 flex-shrink-0">
                         <span className="font-mono text-[11.5px] text-slate-400">{e.voucherNumber}</span>
+                        {(() => {
+                          const closed = isRowClosed(e);
+                          const rowKind = kindById.get(e.categoryId) ?? "operating";
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => rowKind === "remuneration" ? openEditRemun(e) : openEditExpense(e)}
+                              disabled={closed}
+                              title={closed ? "This day is closed — editing is locked" : "Edit"}
+                              className="px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11.5px] font-semibold uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              Edit
+                            </button>
+                          );
+                        })()}
                         <a
                           href={`/accounts/voucher/${e.id}`}
                           className="px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11.5px] font-semibold uppercase tracking-wider transition-colors"
@@ -924,7 +1023,7 @@ export default function ExpenseClient() {
 
             {/* Header */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
-              <h2 className="text-[15px] font-semibold text-slate-800">Add Expense</h2>
+              <h2 className="text-[15px] font-semibold text-slate-800">{editingExpenseId ? "Edit Expense" : "Add Expense"}</h2>
               <button
                 type="button"
                 onClick={closeExpenseModal}
@@ -1360,7 +1459,7 @@ export default function ExpenseClient() {
                 disabled={creatingExpense}
                 className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {creatingExpense ? "Saving…" : "Save Expense"}
+                {creatingExpense ? "Saving…" : editingExpenseId ? "Save Changes" : "Save Expense"}
               </button>
             </div>
 
@@ -1373,7 +1472,7 @@ export default function ExpenseClient() {
         <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={() => { if (!savingRemun) setRemunModalOpen(false); }}>
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
-              <h2 className="text-[15px] font-semibold text-slate-800">Add Remuneration</h2>
+              <h2 className="text-[15px] font-semibold text-slate-800">{editingRemunId ? "Edit Remuneration" : "Add Remuneration"}</h2>
               <button type="button" onClick={() => { if (!savingRemun) setRemunModalOpen(false); }} disabled={savingRemun} className="text-slate-400 hover:text-slate-700 disabled:opacity-40" aria-label="Close">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
               </button>
@@ -1417,7 +1516,7 @@ export default function ExpenseClient() {
             <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-200">
               <button type="button" onClick={() => setRemunModalOpen(false)} disabled={savingRemun} className="px-4 py-2 rounded-lg text-slate-600 text-[13px] font-medium hover:bg-slate-100 transition-colors disabled:opacity-40">Cancel</button>
               <button type="button" onClick={handleRecordRemuneration} disabled={savingRemun || !remunRecipientId || !remunAmount.trim()} className="px-4 py-2 rounded-lg bg-amber-500 text-white text-[13px] font-semibold hover:bg-amber-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-                {savingRemun ? "Recording…" : "Record Remuneration"}
+                {savingRemun ? "Saving…" : editingRemunId ? "Save Changes" : "Record Remuneration"}
               </button>
             </div>
           </div>
