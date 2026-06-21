@@ -36,7 +36,7 @@ import { supabase } from "@/lib/supabase";
 export type ExpenseCategory = {
   id:         string;
   name:       string;
-  kind:       "operating" | "owner_draw";
+  kind:       "operating" | "remuneration";
   isActive:   boolean;
   createdAt:  string;
   createdBy:  string | null;
@@ -57,7 +57,7 @@ function mapCategory(r: ExpenseCategoryRow): ExpenseCategory {
   return {
     id:        r.id,
     name:      r.name,
-    kind:      (r.kind as "operating" | "owner_draw") ?? "operating",
+    kind:      (r.kind as "operating" | "remuneration") ?? "operating",
     isActive:  r.is_active,
     createdAt: r.created_at,
     createdBy: r.created_by,
@@ -103,7 +103,7 @@ export async function getExpenseCategories(): Promise<ExpenseCategory[]> {
  */
 export async function createExpenseCategory(
   name: string,
-  kind: "operating" | "owner_draw" = "operating",
+  kind: "operating" | "remuneration" = "operating",
 ): Promise<ExpenseCategory> {
   const trimmed = name.trim();
   if (!trimmed) throw new Error("[createExpenseCategory] Name is required.");
@@ -174,12 +174,13 @@ export async function setExpenseCategoryActive(id: string, isActive: boolean): P
 }
 
 /**
- * Reclassify a category as operating vs owner_draw. owner_draw categories
- * record as cash-out but are excluded from operating-expense/profit totals.
+ * Reclassify a category as operating vs remuneration. remuneration categories
+ * record as cash-out but are excluded from operating-expense/profit totals
+ * (appropriation of profit — MD/Chairman/Director payments).
  */
 export async function updateExpenseCategoryKind(
   id: string,
-  kind: "operating" | "owner_draw",
+  kind: "operating" | "remuneration",
 ): Promise<ExpenseCategory> {
   const { data, error } = await supabase
     .from("expense_categories")
@@ -195,4 +196,20 @@ export async function updateExpenseCategoryKind(
   }
 
   return mapCategory(data as ExpenseCategoryRow);
+}
+
+/**
+ * Resolve the category id used for director remuneration. Modeled on payroll's
+ * salary-category resolution: prefer an existing kind='remuneration' category
+ * (preferring one literally named "Remuneration"); if none exists, create one
+ * named "Remuneration" with kind='remuneration'.
+ */
+export async function resolveRemunerationCategoryId(): Promise<string> {
+  const cats = await getExpenseCategories();
+  const remun = cats.filter(c => c.kind === "remuneration");
+  const byName = remun.find(c => c.name.trim().toLowerCase() === "remuneration");
+  if (byName) return byName.id;
+  if (remun.length > 0) return remun[0].id;
+  const created = await createExpenseCategory("Remuneration", "remuneration");
+  return created.id;
 }

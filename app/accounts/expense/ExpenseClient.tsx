@@ -29,6 +29,7 @@ import {
   updateExpenseCategoryName,
   updateExpenseCategoryKind,
   setExpenseCategoryActive,
+  resolveRemunerationCategoryId,
   type ExpenseCategory,
 } from "@/services/expenseCategoriesService";
 
@@ -131,12 +132,29 @@ export default function ExpenseClient() {
   const [editError, setEditError] = useState<string | null>(null);
 
   const [newCategoryName, setNewCategoryName] = useState("");
-  const [newCategoryKind, setNewCategoryKind] = useState<"operating" | "owner_draw">("operating");
+  const [newCategoryKind, setNewCategoryKind] = useState<"operating" | "remuneration">("operating");
   const [creatingCategory, setCreatingCategory] = useState(false);
   const [createCategoryError, setCreateCategoryError] = useState<string | null>(null);
 
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [kindUpdatingId, setKindUpdatingId] = useState<string | null>(null);
+
+  // ── View toggle: operating Expenses vs Remuneration ─────────
+  const [view, setView] = useState<"expenses" | "remuneration">("expenses");
+
+  // ── Add Remuneration modal ──────────────────────────────────
+  const [remunModalOpen, setRemunModalOpen] = useState(false);
+  const [remunRecipientId, setRemunRecipientId] = useState<string>("");
+  const [remunAmount, setRemunAmount] = useState<string>("");
+  const [remunDate, setRemunDate] = useState<string>(todayISO());
+  const [remunNote, setRemunNote] = useState<string>("");
+  const [savingRemun, setSavingRemun] = useState(false);
+  const [remunError, setRemunError] = useState<string | null>(null);
+
+  const REMUN_DESIGNATIONS = ["Chairman", "Managing Director", "Director"];
+  const remunRecipients = employees.filter(
+    e => e.isActive && REMUN_DESIGNATIONS.includes(e.designation),
+  );
 
   // ── Add Expense modal (Phase 4C, NEW) ──────────────────────
   const [expenseModalOpen, setExpenseModalOpen] = useState(false);
@@ -341,12 +359,12 @@ export default function ExpenseClient() {
       setCreatingCategory(false);
     }
   }
-  async function handleChangeKind(c: ExpenseCategory, kind: "operating" | "owner_draw") {
+  async function handleChangeKind(c: ExpenseCategory, kind: "operating" | "remuneration") {
     if (kind === c.kind) return;
     setKindUpdatingId(c.id);
     try {
       await updateExpenseCategoryKind(c.id, kind);
-      setSuccessMsg(`"${c.name}" set to ${kind === "owner_draw" ? "Owner drawing" : "Operating expense"}.`);
+      setSuccessMsg(`"${c.name}" set to ${kind === "remuneration" ? "Remuneration" : "Operating expense"}.`);
       await reloadCategories();
     } catch (err) {
       console.error("[ExpenseClient] kind change failed:", err);
@@ -507,6 +525,47 @@ export default function ExpenseClient() {
   }
 
   // ── Group expenses by date for daybook layout ──────────────
+  function openRemunModal() {
+    setRemunRecipientId("");
+    setRemunAmount("");
+    setRemunDate(todayISO());
+    setRemunNote("");
+    setRemunError(null);
+    setRemunModalOpen(true);
+  }
+
+  async function handleRecordRemuneration() {
+    const amt = parseFloat(remunAmount);
+    if (!remunRecipientId)              { setRemunError("Select a recipient."); return; }
+    if (!remunAmount.trim() || isNaN(amt) || amt <= 0) { setRemunError("Amount must be a positive number."); return; }
+    setRemunError(null);
+    setSavingRemun(true);
+    try {
+      const categoryId = await resolveRemunerationCategoryId();
+      const recipient = remunRecipients.find(e => e.id === remunRecipientId);
+      await createExpense({
+        txnDate:    remunDate,
+        amount:     amt,
+        categoryId,
+        payeeMode:  "employee",
+        employeeId: remunRecipientId,
+        note:       remunNote.trim() || undefined,
+      });
+      const [exps, cats] = await Promise.all([getExpenses(), getExpenseCategories()]);
+      setExpenses(exps);
+      setCategories(cats);
+      setSuccessMsg(`Remuneration of ৳${formatAmount(amt)} to ${recipient?.fullName ?? "recipient"} recorded.`);
+      setRemunModalOpen(false);
+    } catch (err) {
+      setRemunError(err instanceof Error ? err.message : "Failed to record remuneration.");
+    } finally {
+      setSavingRemun(false);
+    }
+  }
+
+  // Classify each expense row by its category kind so remuneration is never
+  // counted as an operating expense. Unknown/missing kind → operating.
+  const kindById = new Map(categories.map(c => [c.id, c.kind]));
   function groupByDate(list: Expense[]): Array<{ date: string; rows: Expense[]; total: number }> {
     const byDate = new Map<string, Expense[]>();
     for (const e of list) {
@@ -522,7 +581,11 @@ export default function ExpenseClient() {
         total: rows.reduce((sum, r) => sum + r.amount, 0),
       }));
   }
-  const groups = groupByDate(expenses);
+  const visibleExpenses = expenses.filter(e => {
+    const k = kindById.get(e.categoryId) ?? "operating";
+    return view === "remuneration" ? k === "remuneration" : k === "operating";
+  });
+  const groups = groupByDate(visibleExpenses);
 
   // ── Loading state ──────────────────────────────────────────
   if (fetching) {
@@ -584,7 +647,34 @@ export default function ExpenseClient() {
             </svg>
             Add Expense
           </button>
+          <button
+            type="button"
+            onClick={openRemunModal}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500 text-white text-[13px] font-semibold hover:bg-amber-600 transition-colors"
+            title="Record a director/MD/chairman remuneration (appropriation of profit)"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" className="w-4 h-4">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            Add Remuneration
+          </button>
         </div>
+      </div>
+
+      {/* ── View toggle: Expenses vs Remuneration ───────────── */}
+      <div className="inline-flex rounded-lg bg-slate-100 p-0.5">
+        {([["expenses", "Expenses"], ["remuneration", "Remuneration"]] as const).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setView(key)}
+            className={`px-4 py-1.5 rounded-md text-[12.5px] font-semibold transition-colors ${
+              view === key ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {/* ── Date filter ─────────────────────────────────────── */}
@@ -726,12 +816,12 @@ export default function ExpenseClient() {
                 />
                 <select
                   value={newCategoryKind}
-                  onChange={(e) => setNewCategoryKind(e.target.value as "operating" | "owner_draw")}
+                  onChange={(e) => setNewCategoryKind(e.target.value as "operating" | "remuneration")}
                   disabled={creatingCategory}
                   className="px-3 py-2.5 rounded-lg border border-slate-200 bg-white text-[13px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-40 whitespace-nowrap"
                 >
                   <option value="operating">Operating expense</option>
-                  <option value="owner_draw">Owner drawing</option>
+                  <option value="remuneration">Remuneration</option>
                 </select>
                 <button
                   type="button"
@@ -743,7 +833,7 @@ export default function ExpenseClient() {
                 </button>
               </div>
               {createCategoryError && (<p className="text-[12px] text-rose-600">{createCategoryError}</p>)}
-              <p className="text-[11.5px] text-slate-400">Owner drawings (director/MD/chairman withdrawals) record as cash out but are kept out of operating expenses and profit.</p>
+              <p className="text-[11.5px] text-slate-400">Remuneration (director/MD/chairman payments) records as cash out but is kept out of operating expenses and profit.</p>
             </div>
             <div className="flex-1 overflow-y-auto px-5 py-3">
               {categories.length === 0 ? (
@@ -783,21 +873,21 @@ export default function ExpenseClient() {
                             <button type="button" onClick={() => startEdit(c)} className="flex-1 text-left text-[13.5px] font-medium text-slate-800 hover:text-amber-700 transition-colors" title="Click to rename">
                               {c.name}
                             </button>
-                            {c.kind === "owner_draw" && (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 ring-1 ring-amber-200 text-[10.5px] font-semibold uppercase tracking-wider">Owner draw</span>
+                            {c.kind === "remuneration" && (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 ring-1 ring-amber-200 text-[10.5px] font-semibold uppercase tracking-wider">Remuneration</span>
                             )}
                             {!c.isActive && (
                               <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10.5px] font-semibold uppercase tracking-wider">Inactive</span>
                             )}
                             <select
                               value={c.kind}
-                              onChange={(e) => handleChangeKind(c, e.target.value as "operating" | "owner_draw")}
+                              onChange={(e) => handleChangeKind(c, e.target.value as "operating" | "remuneration")}
                               disabled={kindUpdatingId === c.id}
                               title="Classification"
                               className="px-2 py-1.5 rounded-md border border-slate-200 bg-white text-[11.5px] text-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-40"
                             >
                               <option value="operating">Operating</option>
-                              <option value="owner_draw">Owner draw</option>
+                              <option value="remuneration">Remuneration</option>
                             </select>
                             <button
                               type="button"
@@ -1274,6 +1364,62 @@ export default function ExpenseClient() {
               </button>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* ── ADD REMUNERATION MODAL ──────────────────────────── */}
+      {remunModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={() => { if (!savingRemun) setRemunModalOpen(false); }}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+              <h2 className="text-[15px] font-semibold text-slate-800">Add Remuneration</h2>
+              <button type="button" onClick={() => { if (!savingRemun) setRemunModalOpen(false); }} disabled={savingRemun} className="text-slate-400 hover:text-slate-700 disabled:opacity-40" aria-label="Close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div className="px-5 py-4 space-y-4">
+              <p className="text-[11.5px] text-slate-400">
+                Director/MD/Chairman payment — paid from <span className="font-semibold text-slate-600">Cash in Hand</span>, recorded as cash out but kept out of operating expenses and profit (appropriation of profit).
+              </p>
+
+              <div>
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Recipient</label>
+                <select value={remunRecipientId} onChange={(e) => setRemunRecipientId(e.target.value)} disabled={savingRemun} className={inputCls(false)}>
+                  <option value="">Select recipient…</option>
+                  {remunRecipients.map(e => (
+                    <option key={e.id} value={e.id}>{e.fullName} · {e.designation}</option>
+                  ))}
+                </select>
+                {remunRecipients.length === 0 && (
+                  <p className="mt-1 text-[11.5px] text-amber-700">No active Chairman / Managing Director / Director employees found.</p>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Amount (৳)</label>
+                  <input type="number" min={0} step="0.01" value={remunAmount} onChange={(e) => setRemunAmount(e.target.value)} onWheel={(e) => (e.target as HTMLInputElement).blur()} disabled={savingRemun} placeholder="0.00" className={inputCls(false)} />
+                </div>
+                <div>
+                  <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Date</label>
+                  <input type="date" value={remunDate} max={todayISO()} onChange={(e) => setRemunDate(e.target.value)} disabled={savingRemun} className={inputCls(false)} />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Note <span className="text-slate-400 normal-case font-normal">(optional)</span></label>
+                <input type="text" value={remunNote} onChange={(e) => setRemunNote(e.target.value)} disabled={savingRemun} placeholder="e.g. June remuneration" className={inputCls(false)} />
+              </div>
+
+              {remunError && <p className="text-[12px] text-rose-600">{remunError}</p>}
+            </div>
+            <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-200">
+              <button type="button" onClick={() => setRemunModalOpen(false)} disabled={savingRemun} className="px-4 py-2 rounded-lg text-slate-600 text-[13px] font-medium hover:bg-slate-100 transition-colors disabled:opacity-40">Cancel</button>
+              <button type="button" onClick={handleRecordRemuneration} disabled={savingRemun || !remunRecipientId || !remunAmount.trim()} className="px-4 py-2 rounded-lg bg-amber-500 text-white text-[13px] font-semibold hover:bg-amber-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                {savingRemun ? "Recording…" : "Record Remuneration"}
+              </button>
+            </div>
           </div>
         </div>
       )}
