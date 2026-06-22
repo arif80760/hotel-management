@@ -1092,9 +1092,7 @@ export default function CashbookClient({
         // ── Styling, label, copy ─────────────────────────────
         // catchup gets amber accent on border + header background. today/closed
         // stays neutral slate.
-        const cardCls = mode === "catchup"
-          ? "bg-white border border-amber-300 rounded-xl p-5 space-y-4"
-          : "bg-white border border-slate-200 rounded-xl p-5 space-y-4";
+        const dayCloseAccent = mode === "catchup" ? "#E89A3C" : mode === "closed" ? "#4F8B36" : "#3F3F3F";
 
         const headerLabel = mode === "catchup"
           ? `Day Close — Catch up (${displayDate})`
@@ -1118,20 +1116,18 @@ export default function CashbookClient({
         const backlogCount = dayCloseStatus.missedDays.length;
 
         return (
-          <div className={cardCls}>
+          <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: `3px solid ${dayCloseAccent}`, borderRadius: 12, padding: 20 }} className="space-y-4">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-[15px] font-semibold text-slate-800">
-                  {headerLabel}
-                </h2>
+                <h2 style={{ fontFamily: oswaldFamily, fontSize: 18, fontWeight: 600, color: "#3F3F3F" }}>{headerLabel}</h2>
                 {mode === "catchup" && (
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-amber-100 border border-amber-200 text-[11px] font-semibold text-amber-800 uppercase tracking-wide">
+                  <span style={{ fontFamily: archivoFamily, fontSize: 10.5, fontWeight: 700, letterSpacing: "0.06em", color: "#B36A1A", background: "#FBF1E3", border: "1px solid #F0DCBF" }} className="inline-flex items-center px-2 py-0.5 rounded-full uppercase">
                     {backlogCount} day{backlogCount === 1 ? "" : "s"} behind
                   </span>
                 )}
               </div>
               {mode === "closed" && (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-[12px] font-medium text-emerald-700 flex-shrink-0">
+                <span style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", color: "#3F7A2C", background: "#EAF3E4", border: "1px solid #CFE3C2" }} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full flex-shrink-0 uppercase">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
                     <path d="M20 6L9 17l-5-5" />
                   </svg>
@@ -1141,37 +1137,38 @@ export default function CashbookClient({
             </div>
 
             {mode === "catchup" && backlogCount >= 3 && (
-              <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-[12.5px] text-amber-800">
+              <div style={{ fontFamily: archivoFamily, fontSize: 12.5, color: "#A86A2C", background: "#FBF7EF", border: "1px solid #F0DCBF" }} className="rounded-lg px-4 py-3">
                 All missed days: {dayCloseStatus.missedDays.join(", ")}. Close oldest-first; today becomes closable after backlog clears.
               </div>
             )}
 
-            <div className="flex items-center justify-between text-[13.5px]">
-              <span className="text-slate-600">Opening balance</span>
-              <span className="font-medium text-slate-800 tabular-nums">{formatBdt(opening)}</span>
+            <div className="flex items-center justify-between">
+              <span style={{ fontFamily: archivoFamily, fontSize: 13, color: "#6B6B6B" }}>Opening balance</span>
+              <span style={{ fontFamily: oswaldFamily, fontSize: 18, fontWeight: 600, color: "#3F3F3F" }} className="tabular-nums">{formatBdt(opening)}</span>
             </div>
 
             <div className="space-y-1.5">
-              <div className="text-[13px] text-slate-600">{activityLabel}</div>
+              <div style={{ fontFamily: archivoFamily, fontSize: 12.5, color: "#8A8A8A" }}>{activityLabel}</div>
               {displayRows.length === 0 ? (
-                <div className="text-[13px] text-slate-400 italic pl-3">{emptyActivityLabel}</div>
+                <div style={{ fontFamily: archivoFamily, fontSize: 12.5, color: "#A8A8A8", fontStyle: "italic" }} className="pl-3">{emptyActivityLabel}</div>
               ) : (
                 <ul className="space-y-1 pl-3">
-                  {displayRows.map((r) => (
-                    <li key={r.id} className="flex items-center justify-between text-[13px]">
-                      <span className="text-slate-700 truncate pr-3">{r.note || r.type}</span>
-                      <span className={`font-medium tabular-nums ${r.color}`}>{r.sign}{formatBdt(r.amount)}</span>
-                    </li>
-                  ))}
+                  {displayRows.map((r) => {
+                    const label = r.note ? r.note : r.type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+                    return (
+                      <li key={r.id} className="flex items-center justify-between">
+                        <span style={{ fontFamily: archivoFamily, fontSize: 13, color: "#5F5F5F" }} className="truncate pr-3">{label}</span>
+                        <span style={{ fontFamily: oswaldFamily, fontSize: 15, fontWeight: 600 }} className={`tabular-nums ${r.color}`}>{r.sign}{formatBdt(r.amount)}</span>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
 
-            <div className="flex items-center justify-between text-[13.5px] pt-3 border-t border-slate-100">
-              <span className="text-slate-600 font-medium">
-                Closing balance{mode === "closed" ? "" : " (preview)"}
-              </span>
-              <span className="font-semibold text-slate-900 tabular-nums">{formatBdt(closingShown)}</span>
+            <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+              <span style={{ fontFamily: archivoFamily, fontSize: 13, fontWeight: 600, color: "#3F3F3F" }}>Closing balance{mode === "closed" ? "" : " (preview)"}</span>
+              <span style={{ fontFamily: oswaldFamily, fontSize: 19, fontWeight: 600, color: "#3F3F3F" }} className="tabular-nums">{formatBdt(closingShown)}</span>
             </div>
 
             {mode !== "closed" && (
@@ -1180,17 +1177,14 @@ export default function CashbookClient({
                   type="button"
                   onClick={handleClose}
                   disabled={isClosing}
-                  className={
-                    mode === "catchup"
-                      ? "w-full px-4 py-2.5 rounded-lg bg-amber-600 text-white text-[13px] font-semibold hover:bg-amber-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                      : "w-full px-4 py-2.5 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                  }
+                  style={{ fontFamily: archivoFamily, background: mode === "catchup" ? "#D9822B" : "#3F3F3F" }}
+                  className="w-full px-4 py-2.5 rounded-lg text-white text-[13px] font-semibold transition-opacity hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
                   title={isClosing ? "Closing..." : buttonLabel}
                 >
                   {buttonLabel}
                 </button>
                 {closeDayError && (
-                  <div className="mt-2 text-[12.5px] text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-3 py-2">
+                  <div style={{ fontFamily: archivoFamily }} className="mt-2 text-[12.5px] text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-3 py-2">
                     {closeDayError}
                   </div>
                 )}
