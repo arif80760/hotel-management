@@ -9,6 +9,29 @@ import type { MockBooking } from "@/lib/mockData";
 
 function todayISO(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 const taka=(n:number)=>`৳${Math.round(n).toLocaleString()}`;
+
+function playChime(){
+  try{
+    const Ctx = (window.AudioContext || (window as any).webkitAudioContext);
+    if(!Ctx) return;
+    const ctx = new Ctx();
+    if(ctx.state==="suspended") ctx.resume().catch(()=>{});
+    const now = ctx.currentTime;
+    [880, 1174.66].forEach((freq,i)=>{
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      const start = now + i*0.12;
+      gain.gain.setValueAtTime(0, start);
+      gain.gain.linearRampToValueAtTime(0.16, start+0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start+0.28);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(start); osc.stop(start+0.3);
+    });
+    setTimeout(()=>{ try{ ctx.close(); }catch{} }, 700);
+  }catch{/* ignore */}
+}
 type LowItem={ id:string; name:string; qty:number; threshold:number };
 
 export default function NotificationBell(){
@@ -46,6 +69,16 @@ export default function NotificationBell(){
   },[load]);
 
   useEffect(()=>{ if(!user?.id)return; const v=localStorage.getItem(`notif_seen_${user.id}`); setLastSeen(v?(parseInt(v,10)||0):0); },[user?.id]);
+
+  const seededRef = useRef(false);
+  const lastNewestRef = useRef(0);
+  useEffect(()=>{
+    if(bookings.length===0) return;
+    let newest=0;
+    for(const b of bookings){ if(b.createdAt){ const t=Date.parse(b.createdAt); if(t>newest) newest=t; } }
+    if(!seededRef.current){ seededRef.current=true; lastNewestRef.current=newest; return; } // first load = seed, no sound
+    if(newest>lastNewestRef.current){ lastNewestRef.current=newest; playChime(); }
+  },[bookings]);
 
   useEffect(()=>{ if(!open)return; const h=(e:MouseEvent)=>{ if(ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
     document.addEventListener("mousedown",h); return ()=>document.removeEventListener("mousedown",h); },[open]);
