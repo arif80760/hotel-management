@@ -56,6 +56,7 @@ export type UserProfile = {
   id:        string;
   full_name: string;
   role:      UserRole;
+  avatarUrl: string | null;
 };
 
 type AuthContextType = {
@@ -83,7 +84,7 @@ async function fetchProfile(userId: string): Promise<UserProfile | null> {
 
   const { data, error, status, statusText } = await supabase
     .from("profiles")
-    .select("id, full_name, role")
+    .select("id, full_name, role, avatar_url")
     .eq("id", userId)
     .single();
 
@@ -97,7 +98,17 @@ async function fetchProfile(userId: string): Promise<UserProfile | null> {
     return null;
   }
 
-  const prof = data as UserProfile;
+  const row = data as { id: string; full_name: string; role: UserRole; avatar_url: string | null };
+  const prof: UserProfile = {
+    id:        row.id,
+    full_name: row.full_name,
+    role:      row.role,
+    avatarUrl: row.avatar_url
+      ? (String(row.avatar_url).startsWith("http")
+          ? row.avatar_url
+          : supabase.storage.from("avatars").getPublicUrl(row.avatar_url).data.publicUrl)
+      : null,
+  };
   console.log("[AuthContext] fetchProfile — success:", {
     id:        prof.id,
     full_name: prof.full_name,

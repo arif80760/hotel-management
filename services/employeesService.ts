@@ -114,6 +114,7 @@ export type Employee = {
   notes:            string | null;
   isActive:         boolean;
   authUserId:       string | null;  // FK → auth.users(id); null if no login account
+  avatarUrl:        string | null;  // self-service avatar from profiles.avatar_url (via auth_user_id)
   createdAt:        string;
 };
 
@@ -201,6 +202,7 @@ function mapEmployee(row: EmployeeRow): Employee {
     notes:            row.notes,
     isActive:         row.is_active,
     authUserId:       row.auth_user_id ?? null,
+    avatarUrl:        null,   // enriched from profiles in getAllEmployees
     createdAt:        row.created_at,
   };
 }
@@ -290,7 +292,23 @@ export async function getAllEmployees(): Promise<Employee[]> {
     throw new Error(`[getAllEmployees] ${error.message}`);
   }
 
-  return signEmployeePhotos((data as EmployeeRow[]).map(mapEmployee));
+  const list = await signEmployeePhotos((data as EmployeeRow[]).map(mapEmployee));
+
+  // Attach the self-service avatar (profiles.avatar_url) via auth_user_id.
+  const ids = [...new Set(list.map(e => e.authUserId).filter((x): x is string => !!x))];
+  const avatarById = new Map<string, string>();
+  if (ids.length) {
+    const { data: profs } = await supabase.from("profiles").select("id, avatar_url").in("id", ids);
+    for (const p of profs ?? []) {
+      if (p.avatar_url) {
+        const url = String(p.avatar_url).startsWith("http")
+          ? p.avatar_url
+          : supabase.storage.from("avatars").getPublicUrl(p.avatar_url).data.publicUrl;
+        avatarById.set(p.id, url);
+      }
+    }
+  }
+  return list.map(e => ({ ...e, avatarUrl: e.authUserId ? (avatarById.get(e.authUserId) ?? null) : null }));
 }
 
 // ─────────────────────────────────────────────────────────────

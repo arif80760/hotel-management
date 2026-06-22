@@ -418,7 +418,10 @@ export default function Sidebar() {
         {/* User identity — hidden when collapsed */}
         {!isCollapsed && (
           <div className="flex items-center gap-3">
-            {/* Avatar — initials derived from full_name */}
+            {/* Avatar — self-service photo, else initials derived from full_name */}
+            {profile?.avatarUrl ? (
+              <img src={profile.avatarUrl} alt="" className="w-8 h-8 rounded-full object-cover flex-shrink-0" />
+            ) : (
             <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0">
               {profile ? (
                 <span className="text-[11px] font-bold text-slate-300 uppercase leading-none">
@@ -435,6 +438,7 @@ export default function Sidebar() {
                 </svg>
               )}
             </div>
+            )}
             <div className="min-w-0 flex-1">
               <p className="text-[12px] font-medium text-slate-300 truncate leading-tight">
                 {profile?.full_name ?? "Loading…"}
@@ -451,6 +455,9 @@ export default function Sidebar() {
         {/* Collapsed state: just avatar */}
         {isCollapsed && (
           <div className="flex justify-center">
+            {profile?.avatarUrl ? (
+              <img src={profile.avatarUrl} alt="" className="w-8 h-8 rounded-full object-cover flex-shrink-0" title={profile.full_name} />
+            ) : (
             <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0" title={profile?.full_name ?? "User"}>
               {profile ? (
                 <span className="text-[11px] font-bold text-slate-300 uppercase leading-none">
@@ -467,6 +474,7 @@ export default function Sidebar() {
                 </svg>
               )}
             </div>
+            )}
           </div>
         )}
 

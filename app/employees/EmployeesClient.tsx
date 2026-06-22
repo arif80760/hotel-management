@@ -789,6 +789,7 @@ export default function EmployeesClient() {
       notes:            form.notes.trim() || null,
       isActive:         form.isActive,
       authUserId:       null,
+      avatarUrl:        null,
     };
 
     try {
@@ -1163,9 +1164,13 @@ export default function EmployeesClient() {
                       {/* Employee name + ID + initials avatar */}
                       <td className="px-5 py-3.5">
                         <div className="flex items-center gap-3">
+                          {emp.avatarUrl || emp.photoUrl ? (
+                            <img src={emp.avatarUrl ?? emp.photoUrl ?? ""} alt="" className="w-8 h-8 rounded-full object-cover flex-shrink-0" />
+                          ) : (
                           <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-[11px] font-bold ${avatarColor(emp.fullName)}`}>
                             {initials(emp.fullName)}
                           </div>
+                          )}
                           <div>
                             <p className="font-semibold text-slate-800 leading-tight">{emp.fullName}</p>
                             <p className="text-[11.5px] text-slate-400 leading-tight">{emp.employeeId}</p>
