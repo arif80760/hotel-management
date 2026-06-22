@@ -1152,17 +1152,27 @@ export default function CashbookClient({
               {displayRows.length === 0 ? (
                 <div style={{ fontFamily: archivoFamily, fontSize: 12.5, color: "#A8A8A8", fontStyle: "italic" }} className="pl-3">{emptyActivityLabel}</div>
               ) : (
-                <ul className="space-y-1 pl-3">
-                  {displayRows.map((r) => {
-                    const label = r.note ? r.note : r.type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-                    return (
-                      <li key={r.id} className="flex items-center justify-between">
-                        <span style={{ fontFamily: archivoFamily, fontSize: 13, color: "#5F5F5F" }} className="truncate pr-3">{label}</span>
-                        <span style={{ fontFamily: oswaldFamily, fontSize: 15, fontWeight: 600 }} className={`tabular-nums ${r.color}`}>{r.sign}{formatBdt(r.amount)}</span>
-                      </li>
-                    );
-                  })}
-                </ul>
+                (() => {
+                  const grouped = Object.values(
+                    displayRows.reduce((acc, r) => {
+                      const label = r.note ? r.note : r.type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+                      const key = `${label}__${r.sign}`;
+                      if (!acc[key]) acc[key] = { key, label, sign: r.sign, color: r.color, amount: 0 };
+                      acc[key].amount += r.amount;
+                      return acc;
+                    }, {} as Record<string, { key: string; label: string; sign: string; color: string; amount: number }>)
+                  );
+                  return (
+                    <ul className="space-y-1 pl-3">
+                      {grouped.map((g) => (
+                        <li key={g.key} className="flex items-center justify-between">
+                          <span style={{ fontFamily: archivoFamily, fontSize: 13, color: "#5F5F5F" }} className="truncate pr-3">{g.label}</span>
+                          <span style={{ fontFamily: oswaldFamily, fontSize: 15, fontWeight: 600 }} className={`tabular-nums ${g.color}`}>{g.sign}{formatBdt(g.amount)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  );
+                })()
               )}
             </div>
 
