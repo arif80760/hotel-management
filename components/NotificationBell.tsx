@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { getAllBookings } from "@/services/bookingsService";
 import { getInventoryItems, getStockForAllItems } from "@/services/inventoryService";
@@ -22,24 +22,29 @@ export default function NotificationBell(){
   const ref=useRef<HTMLDivElement>(null);
   const today=todayISO();
 
-  useEffect(()=>{ let c=false; (async()=>{ try{ const bk=await getAllBookings(); if(!c) setBookings(bk); }catch{/* ignore */} })(); return ()=>{c=true;}; },[]);
-
-  useEffect(()=>{ if(!user?.id)return; const v=localStorage.getItem(`notif_seen_${user.id}`); setLastSeen(v?(parseInt(v,10)||0):0); },[user?.id]);
-
-  useEffect(()=>{ if(!isAdmin)return; let c=false;
-    (async()=>{
+  const load=useCallback(async ()=>{
+    try{ const bk=await getAllBookings(); setBookings(bk); }catch{/* ignore */}
+    if(isAdmin){
       try{
         const [items,stock]=await Promise.all([getInventoryItems({activeOnly:true}),getStockForAllItems()]);
-        if(!c){
-          const low=items.filter(i=>i.lowStockThreshold!=null && (stock.get(i.id)??0)<=(i.lowStockThreshold as number))
-            .map(i=>({id:i.id,name:i.name,qty:stock.get(i.id)??0,threshold:i.lowStockThreshold as number}));
-          setLowStock(low);
-        }
+        const low=items.filter(i=>i.lowStockThreshold!=null && (stock.get(i.id)??0)<=(i.lowStockThreshold as number))
+          .map(i=>({id:i.id,name:i.name,qty:stock.get(i.id)??0,threshold:i.lowStockThreshold as number}));
+        setLowStock(low);
       }catch{/* ignore */}
-      try{ const s=await getDayCloseStatus(); if(!c) setDayClose({lastClosedDate:s.lastClosedDate,missed:s.missedDays.length}); }catch{/* ignore */}
-    })();
-    return ()=>{c=true;};
+      try{ const s=await getDayCloseStatus(); setDayClose({lastClosedDate:s.lastClosedDate,missed:s.missedDays.length}); }catch{/* ignore */}
+    }
   },[isAdmin]);
+
+  useEffect(()=>{
+    load();
+    const id=setInterval(load,30000);
+    const onVis=()=>{ if(document.visibilityState==="visible") load(); };
+    document.addEventListener("visibilitychange",onVis);
+    window.addEventListener("focus",onVis);
+    return ()=>{ clearInterval(id); document.removeEventListener("visibilitychange",onVis); window.removeEventListener("focus",onVis); };
+  },[load]);
+
+  useEffect(()=>{ if(!user?.id)return; const v=localStorage.getItem(`notif_seen_${user.id}`); setLastSeen(v?(parseInt(v,10)||0):0); },[user?.id]);
 
   useEffect(()=>{ if(!open)return; const h=(e:MouseEvent)=>{ if(ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
     document.addEventListener("mousedown",h); return ()=>document.removeEventListener("mousedown",h); },[open]);
@@ -54,15 +59,14 @@ export default function NotificationBell(){
   },[bookings,today]);
 
   const dayNotClosed = isAdmin && dayClose ? dayClose.lastClosedDate<today : false;
-  const newestBookingTs=useMemo(()=>{ let m=0; for(const b of bookings){ if(b.createdAt){ const t=Date.parse(b.createdAt); if(t>m)m=t; } } return m; },[bookings]);
   const startOfToday=useMemo(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d.getTime(); },[]);
+  const newBookingsCount=useMemo(()=>bookings.filter(b=>b.createdAt && Date.parse(b.createdAt)>lastSeen).length,[bookings,lastSeen]);
   const actionableCount=cat.arrivals.length+cat.departures.length+cat.overdue.length+cat.balanceDue.length+(isAdmin?lowStock.length:0)+(dayNotClosed?1:0);
-  const latestEvent=Math.max(newestBookingTs, actionableCount>0?startOfToday:0);
-  const showDot=latestEvent>lastSeen;
-  const badge=showDot?actionableCount:0;
+  const showDot=newBookingsCount>0 || (actionableCount>0 && startOfToday>lastSeen);
+  const badge=showDot?Math.min(99,newBookingsCount+actionableCount):0;
   const totalItems=actionableCount+cat.latest.length;
 
-  function toggle(){ const next=!open; setOpen(next); if(next && user?.id){ const now=Date.now(); localStorage.setItem(`notif_seen_${user.id}`,String(now)); setLastSeen(now); } }
+  function toggle(){ const next=!open; setOpen(next); if(next){ load(); if(user?.id){ const now=Date.now(); localStorage.setItem(`notif_seen_${user.id}`,String(now)); setLastSeen(now); } } }
 
   const bookingRow=(b:MockBooking,detail:string,tone:string)=>(
     <a key={b.id} href={`/bookings/${b.id}/reservation`} className="block px-4 py-2.5 hover:bg-slate-50 transition-colors">
