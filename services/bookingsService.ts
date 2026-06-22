@@ -477,49 +477,61 @@ async function findOrCreateGuest(
   email?: string,
 ): Promise<string> {
   const trimmedPhone = phone.trim();
+  const trimmedName  = name.trim();
   const trimmedEmail = email?.trim() || undefined;
 
-  // ── 1. Look up by phone ───────────────────────────────────────
-  const { data: existing } = await supabase
-    .from("guests")
-    .select("id, email")
-    .eq("phone", trimmedPhone)
-    .maybeSingle();
+  // ── 1. Look up by phone — but only reuse a guest when the NAME also agrees.
+  //    A phone-only match silently mis-attributed bookings to whoever owned
+  //    that phone first. A blank/placeholder phone ("" or "—") must never match.
+  const realPhone = trimmedPhone !== "" && trimmedPhone !== "—";
+  if (realPhone) {
+    const { data: matches } = await supabase
+      .from("guests")
+      .select("id, name, email")
+      .eq("phone", trimmedPhone);
 
-  if (existing) {
-    console.log("[createBooking] Step 1 — found existing guest:", existing.id);
+    const wantName = trimmedName.toLowerCase();
+    const existing = wantName
+      ? (matches ?? []).find(g => (g.name ?? "").trim().toLowerCase() === wantName)
+      : undefined;
 
-    // ── 1a. Upgrade placeholder email if caller supplied a real one ──
-    if (trimmedEmail && isPlaceholderEmail(existing.email)) {
-      try {
-        const { error: upErr, status: upStatus, statusText: upST } = await supabase
-          .from("guests")
-          .update({ email: trimmedEmail })
-          .eq("id", existing.id);
+    if (existing) {
+      console.log("[createBooking] Step 1 — found existing guest:", existing.id);
 
-        if (upErr) {
-          if (upErr.code === "23505") {
-            // Another guest already owns this email — skip silently
-            console.warn(
-              "[createBooking] Step 1 — email already in use, skipping upgrade:",
-              trimmedEmail,
-            );
+      // ── 1a. Upgrade placeholder email if caller supplied a real one ──
+      if (trimmedEmail && isPlaceholderEmail(existing.email)) {
+        try {
+          const { error: upErr, status: upStatus, statusText: upST } = await supabase
+            .from("guests")
+            .update({ email: trimmedEmail })
+            .eq("id", existing.id);
+
+          if (upErr) {
+            if (upErr.code === "23505") {
+              // Another guest already owns this email — skip silently
+              console.warn(
+                "[createBooking] Step 1 — email already in use, skipping upgrade:",
+                trimmedEmail,
+              );
+            } else {
+              logSupabaseError("Step 1 — UPDATE guests email", upErr, upStatus, upST, { id: existing.id, email: trimmedEmail });
+              throw upErr;
+            }
           } else {
-            logSupabaseError("Step 1 — UPDATE guests email", upErr, upStatus, upST, { id: existing.id, email: trimmedEmail });
-            throw upErr;
+            console.log("[createBooking] Step 1 — upgraded placeholder email for guest:", existing.id);
           }
-        } else {
-          console.log("[createBooking] Step 1 — upgraded placeholder email for guest:", existing.id);
+        } catch (err: unknown) {
+          // Re-throw unless it was already handled above (23505 unique violation)
+          const pgErr = err as { code?: string };
+          if (pgErr?.code !== "23505") throw err;
         }
-      } catch (err: unknown) {
-        // Re-throw unless it was already handled above (23505 unique violation)
-        const pgErr = err as { code?: string };
-        if (pgErr?.code !== "23505") throw err;
       }
-    }
 
-    return existing.id;
+      return existing.id;
+    }
+    // phone matched a different person (or nobody) → fall through to create a new guest (duplicate phones allowed)
   }
+  // blank phone → never match; fall through to create a new guest
 
   // ── 2. Not found — create a minimal profile ───────────────────
   //    Email: use the real email if provided; otherwise placeholder.
