@@ -41,7 +41,8 @@ export default function NotificationBell(){
     const onVis=()=>{ if(document.visibilityState==="visible") load(); };
     document.addEventListener("visibilitychange",onVis);
     window.addEventListener("focus",onVis);
-    return ()=>{ clearInterval(id); document.removeEventListener("visibilitychange",onVis); window.removeEventListener("focus",onVis); };
+    window.addEventListener("albatross:bookings-changed",load);
+    return ()=>{ clearInterval(id); document.removeEventListener("visibilitychange",onVis); window.removeEventListener("focus",onVis); window.removeEventListener("albatross:bookings-changed",load); };
   },[load]);
 
   useEffect(()=>{ if(!user?.id)return; const v=localStorage.getItem(`notif_seen_${user.id}`); setLastSeen(v?(parseInt(v,10)||0):0); },[user?.id]);
@@ -106,6 +107,7 @@ export default function NotificationBell(){
             <div className="px-4 py-12 text-center text-[13px] text-slate-400">You’re all caught up.</div>
           ) : (
             <div>
+              {cat.latest.length>0 && (<><Header label="Recent bookings" count={cat.latest.length}/>{cat.latest.map(b=>bookingRow(b,`${b.status}${b.checkInISO?` · ${b.checkInISO}`:""}${b.checkOutISO?` → ${b.checkOutISO}`:""}`,"text-slate-400"))}</>)}
               {cat.overdue.length>0 && (<><Header label="Overdue checkout" count={cat.overdue.length}/>{cat.overdue.map(b=>bookingRow(b,`Was due to leave ${b.checkOutISO}`,"text-red-600"))}</>)}
               {cat.departures.length>0 && (<><Header label="Departures today" count={cat.departures.length}/>{cat.departures.map(b=>bookingRow(b,(b.payment!=="Paid"&&b.amountPaid<b.totalAmount)?`Balance due ${taka(b.totalAmount-b.amountPaid)}`:"Checking out today","text-amber-600"))}</>)}
               {cat.arrivals.length>0 && (<><Header label="Arrivals today" count={cat.arrivals.length}/>{cat.arrivals.map(b=>bookingRow(b,`Arriving today · ${b.totalGuests} guest${b.totalGuests===1?"":"s"}`,"text-emerald-600"))}</>)}
@@ -120,7 +122,6 @@ export default function NotificationBell(){
                   <div className="text-[12.5px] font-medium text-slate-800">Day not closed</div>
                   <div className="text-[11.5px] text-slate-500">{dayClose && dayClose.missed>0?`${dayClose.missed} day${dayClose.missed===1?"":"s"} unclosed · last ${dayClose.lastClosedDate}`:`Last closed ${dayClose?.lastClosedDate}`}</div>
                 </a></>)}
-              {cat.latest.length>0 && (<><Header label="Latest bookings" count={cat.latest.length}/>{cat.latest.map(b=>bookingRow(b,`${b.status}${b.checkInISO?` · ${b.checkInISO}`:""}${b.checkOutISO?` → ${b.checkOutISO}`:""}`,"text-slate-400"))}</>)}
             </div>
           )}
         </div>

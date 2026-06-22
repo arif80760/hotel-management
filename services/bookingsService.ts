@@ -807,6 +807,7 @@ export async function createBooking(
   }
 
   console.log("[createBooking] Step 5 — complete. Booking ref:", (full as BookingRow).booking_ref);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("albatross:bookings-changed"));
   return mapBooking(full as BookingRow);
 }
 
@@ -1384,6 +1385,7 @@ export async function updateBookingStatus(
       );
     }
 
+    if (typeof window !== "undefined") window.dispatchEvent(new Event("albatross:bookings-changed"));
     return;
   }
 
@@ -1711,6 +1713,7 @@ export async function checkoutNormal(
   }
 
   console.log("[checkoutNormal] complete for booking_ref:", id);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("albatross:bookings-changed"));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1909,6 +1912,7 @@ export async function checkoutWithOverride(
   }
 
   console.log("[checkoutWithOverride] complete for booking_ref:", id);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("albatross:bookings-changed"));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2210,6 +2214,8 @@ export async function checkinBookingRoom(
       (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
     );
   }
+
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("albatross:bookings-changed"));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2247,6 +2253,8 @@ export async function bulkCheckinBookingRooms(
       (error.code ? ` (code: ${error.code})` : ""),
     );
   }
+
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("albatross:bookings-changed"));
 
   return {
     success:   data.success,
