@@ -13,7 +13,7 @@
 // Manual entry is limited to 'transfer' and 'injection' — the other
 // four transaction types get dedicated feature stages later.
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
   getBalances,
   getAccounts,
@@ -39,6 +39,8 @@ import {
 } from "@/services/dayCloseService";
 
 import LoanEntryActions from "@/app/accounts/loans/LoanEntryActions";
+import { getAllBookings } from "@/services/bookingsService";
+import type { MockBooking } from "@/lib/mockData";
 
 // ─────────────────────────────────────────────────────────────
 // COPIED FROM app/employees/EmployeesClient.tsx
@@ -475,11 +477,20 @@ function groupByDay(txns: AccountTransaction[]): [string, AccountTransaction[]][
 
 type FormErrors = Partial<Record<"fromAccountId" | "toAccountId" | "amount" | "txnDate" | "form", string>>;
 
-export default function CashbookClient() {
+export default function CashbookClient({
+  oswaldFamily,
+  archivoFamily,
+}: {
+  oswaldFamily: string;
+  archivoFamily: string;
+}) {
   // ── Data ───────────────────────────────────────────────────
   const [balances,     setBalances]     = useState<AccountBalance[]>([]);
   const [accounts,     setAccounts]     = useState<Account[]>([]);
   const [transactions, setTransactions] = useState<AccountTransaction[]>([]);
+  // bookings: live snapshot for the outstanding-dues tile. Loaded ONCE on
+  // mount (period-independent) — NOT part of the date-range refetch.
+  const [bookings,     setBookings]     = useState<MockBooking[]>([]);
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching,   setFetching]   = useState(true);
@@ -564,15 +575,17 @@ export default function CashbookClient() {
     let cancelled = false;
     async function load() {
       try {
-        const [bal, accts, txns] = await Promise.all([
+        const [bal, accts, txns, bks] = await Promise.all([
           getBalances(),
           getAccounts(),
           getTransactions({ fromDate: filterFromDate || undefined, toDate: filterToDate || undefined, includeDeleted: showDeleted }),
+          getAllBookings(),
         ]);
         if (!cancelled) {
           setBalances(bal);
           setAccounts(accts);
           setTransactions(txns);
+          setBookings(bks);
           // Fire-and-forget the day-close status load. Non-fatal: if it
           // fails the card just stays hidden.
           loadDayCloseStatus();
@@ -845,6 +858,26 @@ export default function CashbookClient() {
     }
   }
 
+  // ── P&L-style summary totals ───────────────────────────────
+  // revenue/expense follow the current date-range (transactions are already
+  // filtered to [filterFromDate, filterToDate]); dues are a live snapshot.
+  const summary = useMemo(() => {
+    let revenueIn = 0, expenseOut = 0;
+    for (const t of transactions) {
+      if (t.deletedAt !== null) continue;   // same guard the ledger uses to grey out deleted rows
+      if (t.type === "revenue_in") revenueIn += t.amount;
+      else if (t.type === "expense_out") expenseOut += t.amount;
+    }
+    const outstandingDues = bookings.reduce(
+      (s, b) =>
+        (b.status === "Confirmed" || b.status === "Checked In") && b.amountPaid < b.totalAmount
+          ? s + (b.totalAmount - b.amountPaid)
+          : s,
+      0,
+    );
+    return { revenueIn, expenseOut, netCash: revenueIn - expenseOut, outstandingDues };
+  }, [transactions, bookings]);
+
   // ── Loading state ──────────────────────────────────────────
   if (fetching) {
     return (
@@ -901,6 +934,30 @@ export default function CashbookClient() {
             </svg>
             Add Transaction
           </button>
+        </div>
+      </div>
+
+      {/* ── P&L-style cash summary strip ── */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #4F8B36", borderRadius: 10, padding: "15px 18px" }}>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#4F8B36" }}>Revenue received</div>
+          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>৳{Math.round(summary.revenueIn).toLocaleString()}</div>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Cash in · room bookings &amp; revenue</div>
+        </div>
+        <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #C5302A", borderRadius: 10, padding: "15px 18px" }}>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#C5302A" }}>Expense paid</div>
+          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>৳{Math.round(summary.expenseOut).toLocaleString()}</div>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Cash out · expenses</div>
+        </div>
+        <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #3F3F3F", borderRadius: 10, padding: "15px 18px" }}>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#3F3F3F" }}>Net cash</div>
+          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: summary.netCash >= 0 ? "#4F8B36" : "#C5302A", lineHeight: 1.05, marginTop: 6 }}>৳{Math.round(summary.netCash).toLocaleString()}</div>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Revenue − expense for this range</div>
+        </div>
+        <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #E89A3C", borderRadius: 10, padding: "15px 18px" }}>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#E89A3C" }}>Outstanding dues</div>
+          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>৳{Math.round(summary.outstandingDues).toLocaleString()}</div>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Room bookings still owing · live</div>
         </div>
       </div>
 

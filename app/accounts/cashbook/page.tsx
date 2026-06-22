@@ -10,8 +10,12 @@
 // Auto-generated rows from booking payments appear here read-only.
 
 import { redirect }                   from "next/navigation";
+import { Oswald, Archivo }            from "next/font/google";
 import { createSupabaseServerClient } from "@/lib/supabaseServer";
 import CashbookClient                 from "./CashbookClient";
+
+const oswald = Oswald({ subsets: ["latin"], weight: ["400", "500", "600", "700"] });
+const archivo = Archivo({ subsets: ["latin"], weight: ["400", "500", "600"] });
 
 export const dynamic = "force-dynamic";
 
@@ -28,5 +32,10 @@ export default async function CashbookPage() {
 
   if (profile?.role !== "admin") redirect("/");
 
-  return <CashbookClient />;
+  return (
+    <CashbookClient
+      oswaldFamily={oswald.style.fontFamily}
+      archivoFamily={archivo.style.fontFamily}
+    />
+  );
 }
