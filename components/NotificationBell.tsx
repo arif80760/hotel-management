@@ -70,14 +70,20 @@ export default function NotificationBell(){
 
   useEffect(()=>{ if(!user?.id)return; const v=localStorage.getItem(`notif_seen_${user.id}`); setLastSeen(v?(parseInt(v,10)||0):0); },[user?.id]);
 
-  const seededRef = useRef(false);
-  const lastNewestRef = useRef(0);
+  const prevStatusRef = useRef<Map<string,string> | null>(null);
+  const lastChimeRef = useRef(0);
   useEffect(()=>{
     if(bookings.length===0) return;
-    let newest=0;
-    for(const b of bookings){ if(b.createdAt){ const t=Date.parse(b.createdAt); if(t>newest) newest=t; } }
-    if(!seededRef.current){ seededRef.current=true; lastNewestRef.current=newest; return; } // first load = seed, no sound
-    if(newest>lastNewestRef.current){ lastNewestRef.current=newest; playChime(); }
+    const cur = new Map(bookings.map(b=>[b.id, b.status]));
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = cur;
+    if(prev===null) return;                       // seed silently on first load
+    let changed=false;
+    for(const [id, st] of cur){ const old=prev.get(id); if(old===undefined || old!==st){ changed=true; break; } }
+    if(changed){                                  // new booking OR a status change (check-in/out/cancel)
+      const now=Date.now();
+      if(now - lastChimeRef.current >= 1200){ lastChimeRef.current=now; playChime(); }  // debounce double-fires
+    }
   },[bookings]);
 
   useEffect(()=>{ if(!open)return; const h=(e:MouseEvent)=>{ if(ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
