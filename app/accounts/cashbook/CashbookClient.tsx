@@ -941,24 +941,48 @@ export default function CashbookClient({
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #4F8B36", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#4F8B36" }}>Revenue received</div>
-          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>৳{Math.round(summary.revenueIn).toLocaleString()}</div>
+          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.revenueIn)}</div>
           <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Cash in · room bookings &amp; revenue</div>
         </div>
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #C5302A", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#C5302A" }}>Expense paid</div>
-          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>৳{Math.round(summary.expenseOut).toLocaleString()}</div>
+          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.expenseOut)}</div>
           <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Cash out · expenses</div>
         </div>
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #3F3F3F", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#3F3F3F" }}>Net cash</div>
-          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: summary.netCash >= 0 ? "#4F8B36" : "#C5302A", lineHeight: 1.05, marginTop: 6 }}>৳{Math.round(summary.netCash).toLocaleString()}</div>
+          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: summary.netCash >= 0 ? "#4F8B36" : "#C5302A", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.netCash)}</div>
           <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Revenue − expense for this range</div>
         </div>
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #E89A3C", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#E89A3C" }}>Outstanding dues</div>
-          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>৳{Math.round(summary.outstandingDues).toLocaleString()}</div>
+          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.outstandingDues)}</div>
           <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Room bookings still owing · live</div>
         </div>
+      </div>
+
+      {/* ── Balance cards — Cash in Hand first, then alphabetical ────── */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        {[...balances]
+          .sort((a, b) => {
+            if (a.isSpendable && !b.isSpendable) return -1;
+            if (!a.isSpendable && b.isSpendable) return 1;
+            return a.name.localeCompare(b.name);
+          })
+          .map(b => {
+            const negative = b.balance < 0;
+            return (
+              <div key={b.accountId} style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #3F3F3F", borderRadius: 10, padding: "15px 18px" }}>
+                <div className="flex items-center justify-between gap-2">
+                  <span style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#6B6B6B" }}>{b.name}</span>
+                  {b.isSpendable && (
+                    <span style={{ fontFamily: archivoFamily, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "#E89A3C", background: "#FBF1E3", padding: "2px 7px", borderRadius: 999 }}>Spendable</span>
+                  )}
+                </div>
+                <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: negative ? "#C5302A" : "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(b.balance)}</div>
+              </div>
+            );
+          })}
       </div>
 
       {/* ── Close Day card ──────────────────────────────────── */}
@@ -1187,41 +1211,6 @@ export default function CashbookClient({
         </div>
       )}
 
-      {/* ── Balance cards — Cash in Hand first, then alphabetical ────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {[...balances]
-          .sort((a, b) => {
-            if (a.isSpendable && !b.isSpendable) return -1;
-            if (!a.isSpendable && b.isSpendable) return 1;
-            return a.name.localeCompare(b.name);
-          })
-          .map(b => {
-            const negative = b.balance < 0;
-            return (
-              <div
-                key={b.accountId}
-                className="rounded-xl border border-slate-200 bg-white p-5"
-              >
-                <div className="flex items-center justify-between">
-                  <p className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">
-                    {b.name}
-                  </p>
-                  {b.isSpendable && (
-                    <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full uppercase tracking-wider">
-                      Spendable
-                    </span>
-                  )}
-                </div>
-                <p className={`mt-2 text-[22px] font-semibold tabular-nums ${
-                  negative ? "text-rose-600" : "text-slate-800"
-                }`}>
-                  {formatBdt(b.balance)}
-                </p>
-              </div>
-            );
-          })}
-      </div>
-
       {/* ══════════════════════════════════════════════════════
           TRANSACTIONS — grouped by day, newest first
           The section header (title + filter pickers) renders
@@ -1241,39 +1230,20 @@ export default function CashbookClient({
 
             {/* ── Section header: title + date range filter ─────── */}
             <div className="flex items-end justify-between gap-4 flex-wrap">
-              <p className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">
-                Transactions
-              </p>
+              <p style={{ fontFamily: archivoFamily, fontSize: 13, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#3F3F3F" }}>Transactions</p>
               <div className="flex items-end gap-3 flex-wrap">
                 <div className="w-[200px]">
-                  <label className="block text-[10.5px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">From</label>
+                  <label className="block mb-1.5" style={{ fontFamily: archivoFamily, fontSize: 10.5, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#8A8A8A" }}>From</label>
                   <DatePickerField value={filterFromDate} onChange={setFilterFromDate} />
                 </div>
                 <div className="w-[200px]">
-                  <label className="block text-[10.5px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">To</label>
+                  <label className="block mb-1.5" style={{ fontFamily: archivoFamily, fontSize: 10.5, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#8A8A8A" }}>To</label>
                   <DatePickerField value={filterToDate} onChange={setFilterToDate} />
                 </div>
                 {hasFilter && (
-                  <button
-                    type="button"
-                    onClick={() => { setFilterFromDate(""); setFilterToDate(""); }}
-                    className="h-[42px] px-3 text-[12.5px] font-semibold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
-                  >
-                    Clear
-                  </button>
+                  <button type="button" onClick={() => { setFilterFromDate(""); setFilterToDate(""); }} style={{ fontFamily: archivoFamily }} className="h-[42px] px-3 text-[12.5px] font-semibold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors">Clear</button>
                 )}
-                <button
-                  type="button"
-                  onClick={() => setShowDeleted(v => !v)}
-                  className={`h-[42px] px-3 text-[12.5px] font-semibold rounded-lg transition-colors ${
-                    showDeleted
-                      ? "bg-rose-50 text-rose-600 hover:bg-rose-100"
-                      : "text-slate-500 hover:text-slate-800 hover:bg-slate-100"
-                  }`}
-                  title={showDeleted ? "Hide deleted transactions" : "Show deleted transactions"}
-                >
-                  {showDeleted ? "Hide Deleted" : "Show Deleted"}
-                </button>
+                <button type="button" onClick={() => setShowDeleted(v => !v)} style={{ fontFamily: archivoFamily }} className={`h-[42px] px-3 text-[12.5px] font-semibold rounded-lg transition-colors ${showDeleted ? "bg-rose-50 text-rose-600 hover:bg-rose-100" : "text-slate-500 hover:text-slate-800 hover:bg-slate-100"}`} title={showDeleted ? "Hide deleted transactions" : "Show deleted transactions"}>{showDeleted ? "Hide Deleted" : "Show Deleted"}</button>
               </div>
             </div>
 
@@ -1295,9 +1265,7 @@ export default function CashbookClient({
             ) : (
               groupByDay(transactions).map(([day, dayTxns]) => (
                 <div key={day} className="space-y-2">
-                  <p className="text-[12.5px] font-semibold text-slate-700">
-                    {formatDayHeader(day)}
-                  </p>
+                  <p style={{ fontFamily: archivoFamily, fontSize: 12.5, fontWeight: 600, color: "#3F3F3F" }}>{formatDayHeader(day)}</p>
 
                   <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
                     {dayTxns.map(t => {
@@ -1345,7 +1313,7 @@ export default function CashbookClient({
                         <div key={t.id} className={`px-5 py-3.5 flex items-start gap-4 ${isDeleted ? "opacity-50 bg-rose-50/40" : ""}`}>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
-                              <span className={`text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full ${meta.badgeCls}`}>
+                              <span style={{ fontFamily: archivoFamily }} className={`text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full ${meta.badgeCls}`}>
                                 {meta.label}
                               </span>
                               {isDeleted && (
@@ -1422,9 +1390,7 @@ export default function CashbookClient({
                             </>
                           )}
 
-                          <p className={`text-[14px] font-semibold tabular-nums whitespace-nowrap ${amountCls} ${isDeleted ? "line-through decoration-current" : ""}`}>
-                            {amountSign}{formatBdt(t.amount)}
-                          </p>
+                          <p style={{ fontFamily: oswaldFamily, fontSize: 16, fontWeight: 600 }} className={`tabular-nums whitespace-nowrap ${amountCls} ${isDeleted ? "line-through decoration-current" : ""}`}>{amountSign}{formatBdt(t.amount)}</p>
                         </div>
                       );
                     })}
