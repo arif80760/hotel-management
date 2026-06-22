@@ -55,6 +55,7 @@ export default function RevenueReportClient({ oswaldFamily, archivoFamily }:{ os
   const [fetching,setFetching]=useState(true);
   const [fetchError,setFetchError]=useState<string|null>(null);
   const [Y,setY]=useState({ booking:Array(12).fill(0) as number[], other:Array(12).fill(0) as number[], ready:false });
+  const [page,setPage]=useState(1);
 
   useEffect(()=>{ let cancelled=false;
     (async()=>{
@@ -92,6 +93,8 @@ export default function RevenueReportClient({ oswaldFamily, archivoFamily }:{ os
     return ()=>{ cancelled=true; };
   },[]);
 
+  useEffect(()=>{ setPage(1); },[fromDate,toDate]);
+
   function applyPreset(p:Preset){
     setPreset(p); const now=new Date();
     if(p==="this_month"){ setFromDate(firstOfMonthISO(now)); setToDate(todayISO()); }
@@ -110,6 +113,11 @@ export default function RevenueReportClient({ oswaldFamily, archivoFamily }:{ os
   const otherTotal=total-bookingTotal;
   const avgPerDay=useMemo(()=>{ let f=fromDate,t=toDate; if(!f||!t){ const dates=revenueTxns.map(x=>x.txnDate).sort(); if(dates.length===0)return 0; f=f||dates[0]; t=t||dates[dates.length-1]; } const d=daysInclusive(f,t); return d>0?total/d:0; },[fromDate,toDate,revenueTxns,total]);
   const pct=(a:number)=>(total>0?Math.round((a/total)*100):0);
+  const PAGE_SIZE=25;
+  const pageCount=Math.max(1,Math.ceil(revenueTxns.length/PAGE_SIZE));
+  const safePage=Math.min(page,pageCount);
+  const pageStart=(safePage-1)*PAGE_SIZE;
+  const pageRows=revenueTxns.slice(pageStart,pageStart+PAGE_SIZE);
 
   const bySource=useMemo(()=>{ const rows:{label:string;amount:number}[]=[]; if(bookingTotal>0)rows.push({label:BOOKING_LABEL,amount:bookingTotal}); const byCat=new Map<string,number>(); for(const r of manual){ const name=categoryName(r.revenueCategoryId); byCat.set(name,(byCat.get(name)??0)+r.amount); } for(const [label,amount] of byCat)rows.push({label,amount}); return rows.sort((a,b)=>b.amount-a.amount); },[bookingTotal,manual,categoryName]);
   const byBucket=useMemo(()=>{ const m=new Map<string,number>(); for(const t of revenueTxns){ const name=accountName(t.toAccountId); m.set(name,(m.get(name)??0)+t.amount); } return Array.from(m.entries()).map(([label,amount])=>({label,amount})).sort((a,b)=>b.amount-a.amount); },[revenueTxns,accountName]);
@@ -151,6 +159,7 @@ export default function RevenueReportClient({ oswaldFamily, archivoFamily }:{ os
   const selStyle:CSSProperties={fontFamily:archivoFamily,fontSize:12,fontWeight:600,letterSpacing:".03em",color:C.ink,border:`1.5px solid ${C.ink}`,borderRadius:8,padding:"8px 14px",background:"#fff"};
   const dateStyle:CSSProperties={fontFamily:archivoFamily,fontSize:12,border:`1px solid ${C.hair}`,borderRadius:6,padding:"6px 10px"};
   const badge=(bg:string,col:string):CSSProperties=>({fontFamily:archivoFamily,fontSize:11,fontWeight:600,letterSpacing:".06em",textTransform:"uppercase",padding:"2px 8px",borderRadius:999,background:bg,color:col});
+  const pageBtn=(disabled:boolean):CSSProperties=>({fontFamily:archivoFamily,fontSize:12,fontWeight:600,color:disabled?C.mut:C.ink,background:"#fff",border:`1px solid ${disabled?C.hair:C.ink}`,borderRadius:6,padding:"6px 12px",cursor:disabled?"default":"pointer",opacity:disabled?0.5:1});
 
   return (
     <div style={{fontFamily:archivoFamily,maxWidth:1040,margin:"0 auto",padding:"22px 8px 30px",color:C.ink}}>
@@ -238,8 +247,9 @@ export default function RevenueReportClient({ oswaldFamily, archivoFamily }:{ os
         {revenueTxns.length===0 ? (
           <div style={{padding:"40px",textAlign:"center",color:C.mut,fontSize:13}}>No revenue in this range.</div>
         ) : (
+          <>
           <ul style={{listStyle:"none",margin:0,padding:0}}>
-            {revenueTxns.map(t=>{
+            {pageRows.map(t=>{
               const isBooking=t.bookingPaymentId!==null;
               if(!isBooking){
                 const m=manualById.get(t.id); const cat=m?.category??"Revenue"; const payee=m?.payee??"";
@@ -278,6 +288,17 @@ export default function RevenueReportClient({ oswaldFamily, archivoFamily }:{ os
               );
             })}
           </ul>
+          {pageCount>1 && (
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 18px",borderTop:`1px solid ${C.hair}`}}>
+              <span style={{fontSize:12,color:C.mut}}>Showing {pageStart+1}–{Math.min(pageStart+PAGE_SIZE,revenueTxns.length)} of {revenueTxns.length}</span>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <button type="button" onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={safePage<=1} style={pageBtn(safePage<=1)}>← Prev</button>
+                <span style={osw({fontSize:12,color:C.ink})}>{safePage} / {pageCount}</span>
+                <button type="button" onClick={()=>setPage(p=>Math.min(pageCount,p+1))} disabled={safePage>=pageCount} style={pageBtn(safePage>=pageCount)}>Next →</button>
+              </div>
+            </div>
+          )}
+          </>
         )}
       </div>
     </div>
