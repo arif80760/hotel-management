@@ -390,12 +390,15 @@ export type PastDayActivity = {
   netDelta:        number;
   closingPreview:  number;
   transactions:    Array<{
-    id:             string;
-    type:           string;
-    amount:         number;
-    fromAccountId:  string | null;
-    toAccountId:    string | null;
-    note:           string | null;
+    id:                 string;
+    type:               string;
+    amount:             number;
+    fromAccountId:      string | null;
+    toAccountId:        string | null;
+    note:               string | null;
+    categoryId:         string | null;
+    revenueCategoryId:  string | null;
+    bookingPaymentId:   string | null;
   }>;
 };
 
@@ -441,7 +444,7 @@ export async function getPastDayActivity(closeDate: string): Promise<PastDayActi
   const cashId = ACCOUNT_IDS.cash;
   const { data: txnRows, error: txnError } = await supabase
     .from("account_transactions")
-    .select("id, type, amount, from_account_id, to_account_id, note")
+    .select("id, type, amount, from_account_id, to_account_id, note, category_id, revenue_category_id, booking_payment_id")
     .eq("txn_date", closeDate)
     .or(`from_account_id.eq.${cashId},to_account_id.eq.${cashId}`)
     .is("deleted_at", null)
@@ -452,17 +455,20 @@ export async function getPastDayActivity(closeDate: string): Promise<PastDayActi
   }
 
   let netDelta = 0;
-  const transactions = (txnRows ?? []).map((r: { id: string; type: string; amount: string | number; from_account_id: string | null; to_account_id: string | null; note: string | null }) => {
+  const transactions = (txnRows ?? []).map((r: { id: string; type: string; amount: string | number; from_account_id: string | null; to_account_id: string | null; note: string | null; category_id: string | null; revenue_category_id: string | null; booking_payment_id: string | null }) => {
     const amt = typeof r.amount === "string" ? parseFloat(r.amount) : r.amount;
     if (r.to_account_id   === cashId) netDelta += amt;
     if (r.from_account_id === cashId) netDelta -= amt;
     return {
-      id:            r.id,
-      type:          r.type,
-      amount:        amt,
-      fromAccountId: r.from_account_id,
-      toAccountId:   r.to_account_id,
-      note:          r.note,
+      id:                r.id,
+      type:              r.type,
+      amount:            amt,
+      fromAccountId:     r.from_account_id,
+      toAccountId:       r.to_account_id,
+      note:              r.note,
+      categoryId:        r.category_id ?? null,
+      revenueCategoryId: r.revenue_category_id ?? null,
+      bookingPaymentId:  r.booking_payment_id ?? null,
     };
   });
 

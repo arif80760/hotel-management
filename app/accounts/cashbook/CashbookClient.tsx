@@ -41,6 +41,8 @@ import {
 import LoanEntryActions from "@/app/accounts/loans/LoanEntryActions";
 import { getAllBookings } from "@/services/bookingsService";
 import type { MockBooking } from "@/lib/mockData";
+import { getExpenseCategories } from "@/services/expenseCategoriesService";
+import { getRevenueCategories } from "@/services/revenueCategoriesService";
 
 // ─────────────────────────────────────────────────────────────
 // COPIED FROM app/employees/EmployeesClient.tsx
@@ -491,6 +493,10 @@ export default function CashbookClient({
   // bookings: live snapshot for the outstanding-dues tile. Loaded ONCE on
   // mount (period-independent) — NOT part of the date-range refetch.
   const [bookings,     setBookings]     = useState<MockBooking[]>([]);
+  // Category reference maps — loaded once on mount, used to label Day Close
+  // activity rows by their true category (and detect remuneration via kind).
+  const [expenseCatMap, setExpenseCatMap] = useState<Map<string, { name: string; kind: string }>>(new Map());
+  const [revenueCatMap, setRevenueCatMap] = useState<Map<string, string>>(new Map());
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching,   setFetching]   = useState(true);
@@ -575,17 +581,21 @@ export default function CashbookClient({
     let cancelled = false;
     async function load() {
       try {
-        const [bal, accts, txns, bks] = await Promise.all([
+        const [bal, accts, txns, bks, expCats, revCats] = await Promise.all([
           getBalances(),
           getAccounts(),
           getTransactions({ fromDate: filterFromDate || undefined, toDate: filterToDate || undefined, includeDeleted: showDeleted }),
           getAllBookings(),
+          getExpenseCategories(),
+          getRevenueCategories(),
         ]);
         if (!cancelled) {
           setBalances(bal);
           setAccounts(accts);
           setTransactions(txns);
           setBookings(bks);
+          setExpenseCatMap(new Map(expCats.map((c) => [c.id, { name: c.name, kind: c.kind }])));
+          setRevenueCatMap(new Map(revCats.map((c) => [c.id, c.name])));
           // Fire-and-forget the day-close status load. Non-fatal: if it
           // fails the card just stays hidden.
           loadDayCloseStatus();
@@ -1010,7 +1020,24 @@ export default function CashbookClient({
         // For "today" mode: pull from the already-loaded transactions state.
         // For "catchup" mode: use pastActivity (a separate service fetch).
         // For "closed" mode: show today's opening, no activity list.
-        type DerivedRow = { id: string; note: string | null; type: string; amount: number; sign: "+" | "−"; color: string };
+        type DerivedRow = { id: string; label: string; note: string | null; amount: number; sign: "+" | "−"; color: string };
+
+        const deriveLabel = (t: { type: string; note: string | null; bookingPaymentId?: string | null; revenueCategoryId?: string | null; categoryId?: string | null }): string => {
+          switch (t.type) {
+            case "loan_received":  return "Loan received";
+            case "loan_repayment": return "Loan repayment";
+            case "injection":      return "Cash injection";
+            case "transfer":       return "Transfer";
+            case "revenue_in":
+              if (t.bookingPaymentId) return "Room revenue";
+              return (t.revenueCategoryId && revenueCatMap.get(t.revenueCategoryId)) || "Other revenue";
+            case "expense_out": {
+              const cat = t.categoryId ? expenseCatMap.get(t.categoryId) : undefined;
+              return cat?.name || "Expense";
+            }
+            default: return t.type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+          }
+        };
 
         let displayDate:        string;
         let opening:            number;
@@ -1026,7 +1053,7 @@ export default function CashbookClient({
           displayRows  = pa.transactions.map((t) => ({
             id:     t.id,
             note:   t.note,
-            type:   t.type,
+            label:  deriveLabel(t),
             amount: t.amount,
             sign:   t.toAccountId === cashId ? "+" : "−",
             color:  t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700",
@@ -1053,7 +1080,7 @@ export default function CashbookClient({
           displayRows = todaysCashTxns.map((t) => ({
             id:     t.id,
             note:   t.note,
-            type:   t.type,
+            label:  deriveLabel(t),
             amount: t.amount,
             sign:   t.toAccountId === cashId ? "+" : "−",
             color:  t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700",
@@ -1152,27 +1179,14 @@ export default function CashbookClient({
               {displayRows.length === 0 ? (
                 <div style={{ fontFamily: archivoFamily, fontSize: 12.5, color: "#A8A8A8", fontStyle: "italic" }} className="pl-3">{emptyActivityLabel}</div>
               ) : (
-                (() => {
-                  const grouped = Object.values(
-                    displayRows.reduce((acc, r) => {
-                      const label = r.note ? r.note : r.type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-                      const key = `${label}__${r.sign}`;
-                      if (!acc[key]) acc[key] = { key, label, sign: r.sign, color: r.color, amount: 0 };
-                      acc[key].amount += r.amount;
-                      return acc;
-                    }, {} as Record<string, { key: string; label: string; sign: string; color: string; amount: number }>)
-                  );
-                  return (
-                    <ul className="space-y-1 pl-3">
-                      {grouped.map((g) => (
-                        <li key={g.key} className="flex items-center justify-between">
-                          <span style={{ fontFamily: archivoFamily, fontSize: 13, color: "#5F5F5F" }} className="truncate pr-3">{g.label}</span>
-                          <span style={{ fontFamily: oswaldFamily, fontSize: 15, fontWeight: 600 }} className={`tabular-nums ${g.color}`}>{g.sign}{formatBdt(g.amount)}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  );
-                })()
+                <ul className="space-y-1 pl-3">
+                  {displayRows.map((r) => (
+                    <li key={r.id} className="flex items-center justify-between">
+                      <span style={{ fontFamily: archivoFamily, fontSize: 13, color: "#5F5F5F" }} className="truncate pr-3">{r.label}{r.note && r.note !== r.label ? ` · ${r.note}` : ""}</span>
+                      <span style={{ fontFamily: oswaldFamily, fontSize: 15, fontWeight: 600 }} className={`tabular-nums ${r.color}`}>{r.sign}{formatBdt(r.amount)}</span>
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
 

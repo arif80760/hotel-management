@@ -82,6 +82,8 @@ export type AccountTransaction = {
   toAccountId:       string | null;
   note:              string | null;
   bookingPaymentId:  string | null;   // FK to payments.id; non-null means auto-generated
+  categoryId:        string | null;   // FK to expense_categories; set on user expense_out rows
+  revenueCategoryId: string | null;   // FK to revenue_categories; set on user revenue_in rows
   createdBy:         string | null;   // auth.users(id) of the recorder
   createdAt:         string;
   editedAt:          string | null;   // ISO timestamp of most recent edit; null if never edited
@@ -136,6 +138,9 @@ type AccountTransactionRow = {
   to_account_id:      string | null;
   note:               string | null;
   booking_payment_id: string | null;
+  // Present only in getTransactions (select extended to include category cols).
+  category_id?:         string | null;
+  revenue_category_id?: string | null;
   created_by:         string | null;
   created_at:         string;
   edited_at:          string | null;
@@ -178,6 +183,8 @@ function mapTransaction(row: AccountTransactionRow): AccountTransaction {
     toAccountId:       row.to_account_id,
     note:              row.note,
     bookingPaymentId:  row.booking_payment_id,
+    categoryId:        row.category_id ?? null,
+    revenueCategoryId: row.revenue_category_id ?? null,
     createdBy:         row.created_by,
     createdAt:         row.created_at,
     editedAt:          row.edited_at,
@@ -236,7 +243,7 @@ export async function getTransactions(
 ): Promise<AccountTransaction[]> {
   let query = supabase
     .from("account_transactions")
-    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, created_by, created_at, edited_at, edited_by, deleted_at, deleted_by, loans(lender_name)")
+    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, category_id, revenue_category_id, created_by, created_at, edited_at, edited_by, deleted_at, deleted_by, loans(lender_name)")
     .order("txn_date", { ascending: false })
     .order("created_at", { ascending: false });
 
