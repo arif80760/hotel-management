@@ -8,6 +8,19 @@
 
 import type { BookingRoom } from "@/lib/mockData";
 
+/** Floored early nights for a single room — mirrors the server RPC exactly.
+ *  min( max(0, whole-day diff scheduled→actual), max(0, nights − 1) ).
+ *  Always keeps at least the check-in night billable. */
+export function earlyNights(scheduledISO: string, actualISO: string, nights: number): number {
+  if (!scheduledISO || !actualISO) return 0;
+  const MS = 86_400_000;
+  const sched = new Date(`${scheduledISO}T00:00:00`).getTime();
+  const actual = new Date(`${actualISO}T00:00:00`).getTime();
+  if (Number.isNaN(sched) || Number.isNaN(actual)) return 0;
+  const rawDays = Math.max(0, Math.round((sched - actual) / MS));
+  return Math.min(rawDays, Math.max(0, nights - 1));
+}
+
 /** Per-room contribution to the early-checkout deduction total. */
 export interface RoomDeduction {
   roomNumber: string;
@@ -50,8 +63,11 @@ export function calcBookingLevelDeductions(
   rooms:    BookingRoom[],
   actualAt: Date,
 ): BookingLevelDeductions {
+  // Local YYYY-MM-DD for the actual checkout moment, computed once.
   const actualMidnight = new Date(actualAt);
   actualMidnight.setHours(0, 0, 0, 0);
+  const actualISO =
+    `${actualMidnight.getFullYear()}-${String(actualMidnight.getMonth() + 1).padStart(2, "0")}-${String(actualMidnight.getDate()).padStart(2, "0")}`;
 
   let totalDays = 0;
   let totalAmt  = 0;
@@ -60,20 +76,9 @@ export function calcBookingLevelDeductions(
   for (const room of rooms) {
     if (room.status !== "Checked In" && room.status !== "Confirmed") continue;
 
-    // Use ISO date string directly — avoids display-string parsing ambiguity.
-    const plannedMidnight = new Date(`${room.checkOutISO}T00:00:00`);
-    plannedMidnight.setHours(0, 0, 0, 0);
-
-    const rawDays = Math.max(0, Math.round(
-      (plannedMidnight.getTime() - actualMidnight.getTime()) / 86_400_000
-    ));
-
-    // Min-one-night floor: cap the deduction at (booked nights − 1) so a
-    // checked-in room is always charged for at least the check-in day.
-    // Mirrors the DB floor in checkout_booking / cancel_booking_room.
-    const earlyDays = Math.min(rawDays, Math.max(0, room.nights - 1));
-
-    const earlyAmt = earlyDays * room.bookingRate;
+    // Single floored implementation — see earlyNights().
+    const earlyDays = earlyNights(room.checkOutISO ?? "", actualISO, room.nights);
+    const earlyAmt  = earlyDays * room.bookingRate;
 
     totalDays += earlyDays;
     totalAmt  += earlyAmt;

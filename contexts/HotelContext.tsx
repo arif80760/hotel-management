@@ -40,6 +40,7 @@ import * as roomsService    from "@/services/roomsService";
 import * as bookingsService from "@/services/bookingsService";
 import type { UpdateBookingPayload, BulkCheckinResult } from "@/services/bookingsService";
 import { deriveBookingSpan } from "@/lib/bookingSpan";
+import { earlyNights } from "@/lib/checkoutUtils";
 import { getRoomCategories, type RoomCategory } from "@/services/roomCategoriesService";
 import { buildCategoryNameMap, displayCategory } from "@/lib/categoryNames";
 
@@ -811,15 +812,12 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       if (r.id !== bookingRoomId) return r;
       const patch: Partial<BookingRoom> = { status };
       if (actualCheckOut) {
-        const earlyNights = Math.max(
-          0,
-          Math.floor((new Date(r.checkOutISO ?? "").getTime() - new Date(actualCheckOut).getTime()) / 86_400_000),
-        );
+        const earlyNightsCount = earlyNights(r.checkOutISO ?? "", actualCheckOut, r.nights);
         patch.checkOutISO  = actualCheckOut;
         patch.checkOut     = formatDateDisplay(actualCheckOut);
-        patch.nights       = r.nights - earlyNights;
-        patch.earlyNightsDeducted  = earlyNights;
-        patch.earlyDeductionAmount = earlyNights * r.bookingRate;
+        patch.nights       = r.nights - earlyNightsCount;
+        patch.earlyNightsDeducted  = earlyNightsCount;
+        patch.earlyDeductionAmount = earlyNightsCount * r.bookingRate;
       }
       return { ...r, ...patch };
     });

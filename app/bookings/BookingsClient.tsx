@@ -49,7 +49,7 @@ import {
 } from "@/services/documentsService";
 import { getRoomCategories, type RoomCategory } from "@/services/roomCategoriesService";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
-import { calcBookingLevelDeductions } from "@/lib/checkoutUtils";
+import { calcBookingLevelDeductions, earlyNights } from "@/lib/checkoutUtils";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { Refund } from "@/lib/mockData";
 import * as bookingsService from "@/services/bookingsService";
@@ -1581,12 +1581,8 @@ export default function BookingsClient({ initialRoom }: Props) {
     } else {
       // Early departure: default actualCheckOut to today, compute unstayed nights
       defaultActualCheckOut = TODAY;
-      const earlyNights = scheduled
-        ? Math.max(0, Math.floor(
-            (new Date(scheduled).getTime() - new Date(TODAY).getTime()) / 86_400_000
-          ))
-        : 0;
-      removedAmount = rate * earlyNights;
+      const earlyNightsCount = earlyNights(scheduled, TODAY, nights);
+      removedAmount = rate * earlyNightsCount;
     }
 
     // Detect scenario at open time so we can pre-fill the refund input correctly.
@@ -1778,14 +1774,11 @@ export default function BookingsClient({ initialRoom }: Props) {
 
     // Re-compute overpayment at submit time (same formula as render; guards against
     // state drift if the user navigated away and back while the modal was open).
-    const earlyNights = m.currentStatus === "Checked In" && m.actualCheckOut && m.scheduledCheckOut
-      ? Math.max(0, Math.floor(
-          (new Date(m.scheduledCheckOut).getTime() - new Date(m.actualCheckOut).getTime()) / 86_400_000
-        ))
-      : 0;
+    const earlyNightsCount = m.currentStatus === "Checked In"
+      ? earlyNights(m.scheduledCheckOut, m.actualCheckOut, m.nights) : 0;
     const removedAmount = m.currentStatus === "Confirmed"
       ? m.bookingRate * m.nights
-      : earlyNights * m.bookingRate;
+      : earlyNightsCount * m.bookingRate;
     const newTotal     = booking.totalAmount - removedAmount;
     const overpayment  = Math.max(0, booking.amountPaid - newTotal);
     const isAdjustment = overpayment === 0;
@@ -6809,12 +6802,8 @@ export default function BookingsClient({ initialRoom }: Props) {
         const m = cancelRoomModal;
         const isEarly = m.currentStatus === "Checked In";
 
-        const earlyNights = isEarly && m.actualCheckOut && m.scheduledCheckOut
-          ? Math.max(0, Math.floor(
-              (new Date(m.scheduledCheckOut).getTime() - new Date(m.actualCheckOut).getTime()) / 86_400_000
-            ))
-          : 0;
-        const earlyDeduction = earlyNights * m.bookingRate;
+        const earlyNightsCount = isEarly ? earlyNights(m.scheduledCheckOut, m.actualCheckOut, m.nights) : 0;
+        const earlyDeduction = earlyNightsCount * m.bookingRate;
         const refundAmt = parseFloat(m.refundAmount) || 0;
 
         // ── Scenario detection (render-time) ────────────────────────────
@@ -6824,8 +6813,8 @@ export default function BookingsClient({ initialRoom }: Props) {
         //                 Phase 8.6: method picker + Cancel & Disburse Now button.
         const liveBooking   = bookings.find(b => b.id === m.bookingRef);
         const removedAmount = isEarly
-          ? earlyNights * m.bookingRate   // only deducted nights
-          : m.bookingRate * m.nights;     // full room contribution
+          ? earlyNightsCount * m.bookingRate   // only deducted nights
+          : m.bookingRate * m.nights;          // full room contribution
         const currentTotal  = liveBooking?.totalAmount ?? 0;
         const currentPaid   = liveBooking?.amountPaid  ?? m.paidAmount;
         const newTotal      = currentTotal - removedAmount;
@@ -6893,7 +6882,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                         />
                         {m.actualCheckOut && m.scheduledCheckOut && m.actualCheckOut < m.scheduledCheckOut && (
                           <p className="text-[11.5px] text-orange-600 mt-1">
-                            {earlyNights} early night{earlyNights !== 1 ? "s" : ""} deducted · ৳{earlyDeduction.toLocaleString()} reduction
+                            {earlyNightsCount} early night{earlyNightsCount !== 1 ? "s" : ""} deducted · ৳{earlyDeduction.toLocaleString()} reduction
                           </p>
                         )}
                       </div>
@@ -6970,7 +6959,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                         />
                         {m.actualCheckOut && m.scheduledCheckOut && m.actualCheckOut < m.scheduledCheckOut && (
                           <p className="text-[11.5px] text-orange-600 mt-1">
-                            {earlyNights} early night{earlyNights !== 1 ? "s" : ""} deducted · ৳{earlyDeduction.toLocaleString()} reduction
+                            {earlyNightsCount} early night{earlyNightsCount !== 1 ? "s" : ""} deducted · ৳{earlyDeduction.toLocaleString()} reduction
                           </p>
                         )}
                       </div>
