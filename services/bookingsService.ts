@@ -2162,6 +2162,40 @@ export async function cancelBookingRoom(
 }
 
 /**
+ * Per-room NORMAL checkout (status → checked_out, or checked_out_early when the
+ * actual date is before the scheduled date). Unlike cancelBookingRoom, this is
+ * the on-time/late path: the checkout_booking_room RPC computes the early-nights
+ * deduction server-side from check_out_date vs p_actual_checkout_date, so we only
+ * pass the room id + the actual checkout date and leave the legacy deduction
+ * params (p_early_nights_deducted / p_deduction_amount) at their RPC defaults.
+ *
+ * @param bookingRoomId       booking_rooms.id UUID
+ * @param actualCheckoutDate  ISO date "YYYY-MM-DD" the guest actually left
+ */
+export async function checkoutBookingRoomNormal(
+  bookingRoomId: string,
+  actualCheckoutDate: string,
+): Promise<void> {
+  const { error: rpcErr } = await supabase.rpc("checkout_booking_room", {
+    p_booking_room_id:      bookingRoomId,
+    p_actual_checkout_date: actualCheckoutDate || null,
+    // p_early_nights_deducted / p_deduction_amount: omitted — function computes server-side
+  });
+
+  if (rpcErr) {
+    console.error("[checkoutBookingRoomNormal] RPC failed:");
+    console.error("  bookingRoomId:", bookingRoomId);
+    console.error("  actualCheckout:", actualCheckoutDate);
+    console.error("  message      :", rpcErr.message);
+    console.error("  code         :", rpcErr.code);
+    throw new Error(
+      `[checkoutBookingRoomNormal] ${rpcErr.message}` +
+      (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
+    );
+  }
+}
+
+/**
  * Extends a booking_rooms row's check_out_date to p_new_check_out.
  * The server-side RPC validates that the extension window is conflict-free
  * and that p_new_check_out > current check_out_date.

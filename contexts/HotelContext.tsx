@@ -132,6 +132,11 @@ type HotelContextType = {
     disbursementNotes?:  string,
     disbursedBy?:        string,
   ) => Promise<void>;
+  /** Per-room NORMAL checkout — writes Checked Out (or Checked Out Early if the actual date is before schedule). */
+  checkoutBookingRoom: (
+    bookingRoomId:      string,
+    actualCheckoutDate: string,
+  ) => Promise<void>;
   /** Extend a room's check-out date past its current scheduled date. */
   extendBookingRoom: (
     bookingRoomId: string,
@@ -868,6 +873,53 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       });
   }
 
+  /**
+   * Per-room NORMAL checkout. Optimistically sets the room's status (early only
+   * when the actual date is before its scheduled checkout, else normal), then
+   * calls the RPC. Resyncs the single booking from source-of-truth on success,
+   * rolls back to the prior snapshot on failure — mirrors cancelBookingRoom.
+   */
+  function checkoutBookingRoom(
+    bookingRoomId:      string,
+    actualCheckoutDate: string,
+  ): Promise<void> {
+    const target = bookings.find(b => b.rooms.some(r => r.id === bookingRoomId));
+    if (!target) return Promise.resolve();
+    const prevBookings = bookings;
+
+    // Optimistic: patch the matching room. Early vs normal decided by date —
+    // same rule the checkout_booking_room RPC applies server-side.
+    const updatedRooms = target.rooms.map(r => {
+      if (r.id !== bookingRoomId) return r;
+      const scheduled = r.checkOutISO ?? "";
+      const isEarly   = !!scheduled && !!actualCheckoutDate && actualCheckoutDate < scheduled;
+      const newStatus: BookingRoomStatus = isEarly ? "Checked Out Early" : "Checked Out";
+      return { ...r, status: newStatus };
+    });
+
+    // Booking-level rollup: keep current status while any room is still active,
+    // otherwise collapse to "Checked Out" (the badge merges early + normal).
+    const anyActive = updatedRooms.some(r => r.status === "Confirmed" || r.status === "Checked In");
+    const newBookingStatus: BookingStatus = anyActive ? target.status : "Checked Out";
+
+    setBookings(prev =>
+      prev.map(b => b.id !== target.id ? b : { ...b, rooms: updatedRooms, status: newBookingStatus })
+    );
+
+    return bookingsService.checkoutBookingRoomNormal(bookingRoomId, actualCheckoutDate)
+      .then(() => bookingsService.getBookingByRef(target.id))
+      .then(updated => {
+        if (!updated) return;
+        setBookings(prev => prev.map(b => b.id === target.id ? updated : b));
+      })
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[HotelContext checkoutBookingRoom] failed — rolling back:", msg);
+        setBookings(prevBookings);
+        throw err;
+      });
+  }
+
   function extendBookingRoom(
     bookingRoomId: string,
     newCheckOut:   string,
@@ -1224,6 +1276,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       updateBooking,
       addRoomToBooking,
       cancelBookingRoom,
+      checkoutBookingRoom,
       extendBookingRoom,
       checkinBookingRoom,
       bulkCheckinBookingRooms,

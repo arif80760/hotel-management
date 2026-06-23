@@ -651,6 +651,7 @@ export default function BookingsClient({ initialRoom }: Props) {
     updateBooking,
     addRoomToBooking:    ctxAddRoomToBooking,
     cancelBookingRoom:   ctxCancelBookingRoom,
+    checkoutBookingRoom: ctxCheckoutBookingRoom,
     extendBookingRoom:   ctxExtendBookingRoom,
     checkinBookingRoom:       ctxCheckinBookingRoom,
     bulkCheckinBookingRooms:  ctxBulkCheckinBookingRooms,
@@ -837,6 +838,15 @@ export default function BookingsClient({ initialRoom }: Props) {
   // ── Mid-stay operation modals (Phase 7) ────────────────────
   const [cancelRoomModal, setCancelRoomModal] = useState<CancelRoomModalState | null>(null);
   const [extendRoomModal, setExtendRoomModal] = useState<ExtendRoomModalState | null>(null);
+
+  // ── Per-room NORMAL checkout modal (on-time / late departure) ──
+  const [checkoutRoomModal, setCheckoutRoomModal] = useState<null | {
+    bookingId: string; bookingRoomId: string; guestName: string; roomLabel: string;
+    scheduledCheckOut: string; currentStatus: string;
+  }>(null);
+  const [checkoutRoomBusy, setCheckoutRoomBusy] = useState(false);
+  const [checkoutRoomOpenedAt, setCheckoutRoomOpenedAt] = useState<Date | null>(null);
+  const [checkoutRoomError, setCheckoutRoomError] = useState<string | null>(null);
 
   // ── Phase 7.6: bulk check-in preflight modal ───────────────
   const [bulkCheckinModal, setBulkCheckinModal] = useState<BulkCheckinModalState>({
@@ -1527,6 +1537,35 @@ export default function BookingsClient({ initialRoom }: Props) {
   }
 
   // ── Mid-stay modal handlers (Phase 7) ──────────────────────
+
+  // ── Per-room NORMAL checkout (on-time / late) ───────────────
+  function openCheckoutRoomModal(b: Booking, r: BookingRoom) {
+    setCheckoutRoomError(null);
+    setCheckoutRoomOpenedAt(new Date());
+    setCheckoutRoomModal({
+      bookingId:         b.id,
+      bookingRoomId:     r.id,
+      guestName:         b.guestName,
+      roomLabel:         `Room ${r.roomNumber} · ${catDisplay(r.roomCategory)}`,
+      scheduledCheckOut: r.checkOutISO ?? "",
+      currentStatus:     r.status,
+    });
+  }
+
+  async function submitCheckoutRoom() {
+    if (!checkoutRoomModal) return;
+    setCheckoutRoomBusy(true);
+    setCheckoutRoomError(null);
+    try {
+      const actualISO = new Date().toISOString().split("T")[0];   // stamp "now", like booking-level checkout
+      await ctxCheckoutBookingRoom(checkoutRoomModal.bookingRoomId, actualISO);
+      setCheckoutRoomModal(null);
+    } catch (e) {
+      setCheckoutRoomError(e instanceof Error ? e.message : "Check-out failed — please try again.");
+    } finally {
+      setCheckoutRoomBusy(false);
+    }
+  }
 
   function openCancelRoomModal(booking: Booking, room: BookingRoom) {
     const rate      = room.bookingRate;
@@ -4138,13 +4177,22 @@ export default function BookingsClient({ initialRoom }: Props) {
                                           className="text-[10.5px] font-semibold text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
                                         >Cancel</button>
                                       )}
-                                      {r.status === "Checked In" && (
-                                        <button
-                                          type="button"
-                                          onClick={() => openCancelRoomModal(b, r)}
-                                          className="text-[10.5px] font-semibold text-orange-600 hover:text-orange-800 bg-orange-50 hover:bg-orange-100 border border-orange-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
-                                        >Early Out</button>
-                                      )}
+                                      {r.status === "Checked In" && (() => {
+                                        const t = calcCheckoutTiming(r.checkOutISO ?? "", new Date());
+                                        return t.status === "early" ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => openCancelRoomModal(b, r)}
+                                            className="text-[10.5px] font-semibold text-orange-600 hover:text-orange-800 bg-orange-50 hover:bg-orange-100 border border-orange-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                          >Early Out</button>
+                                        ) : (
+                                          <button
+                                            type="button"
+                                            onClick={() => openCheckoutRoomModal(b, r)}
+                                            className="text-[10.5px] font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                          >Check Out</button>
+                                        );
+                                      })()}
                                       <button
                                         type="button"
                                         onClick={() => openExtendRoomModal(b, r)}
@@ -4642,13 +4690,22 @@ export default function BookingsClient({ initialRoom }: Props) {
                                               className="text-[10.5px] font-semibold text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
                                             >Cancel</button>
                                           )}
-                                          {r.status === "Checked In" && (
-                                            <button
-                                              type="button"
-                                              onClick={() => openCancelRoomModal(b, r)}
-                                              className="text-[10.5px] font-semibold text-orange-600 hover:text-orange-800 bg-orange-50 hover:bg-orange-100 border border-orange-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
-                                            >Early Out</button>
-                                          )}
+                                          {r.status === "Checked In" && (() => {
+                                            const t = calcCheckoutTiming(r.checkOutISO ?? "", new Date());
+                                            return t.status === "early" ? (
+                                              <button
+                                                type="button"
+                                                onClick={() => openCancelRoomModal(b, r)}
+                                                className="text-[10.5px] font-semibold text-orange-600 hover:text-orange-800 bg-orange-50 hover:bg-orange-100 border border-orange-200 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                              >Early Out</button>
+                                            ) : (
+                                              <button
+                                                type="button"
+                                                onClick={() => openCheckoutRoomModal(b, r)}
+                                                className="text-[10.5px] font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                                              >Check Out</button>
+                                            );
+                                          })()}
                                           <button
                                             type="button"
                                             onClick={() => openExtendRoomModal(b, r)}
@@ -5255,6 +5312,125 @@ export default function BookingsClient({ initialRoom }: Props) {
                     </div>
                   </div>
                 )}
+
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ══════════════════════════════════════════════════════
+          PER-ROOM NORMAL CHECK-OUT MODAL
+          Opened by the per-room "Check Out" button (on-time / late).
+          No refund / early-deduction — a normal checkout deducts nothing.
+      ══════════════════════════════════════════════════════ */}
+      {checkoutRoomModal && (() => {
+        const t = calcCheckoutTiming(checkoutRoomModal.scheduledCheckOut, checkoutRoomOpenedAt ?? new Date());
+        const isOnTime = t.status === "on_time";
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+            onClick={e => { if (e.target === e.currentTarget && !checkoutRoomBusy) setCheckoutRoomModal(null); }}
+          >
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col">
+
+              {/* ── Header ───────────────────────────────────────── */}
+              <div className="flex items-center justify-between px-6 py-4 border-b bg-slate-50 border-slate-200 flex-shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 bg-emerald-600">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-white">
+                      <path d="M19 12H5M12 5l7 7-7 7"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <h2 className="text-[14px] font-bold leading-none text-slate-800">Confirm Check-out</h2>
+                    <p className="text-[11.5px] mt-0.5 font-mono text-slate-400">{checkoutRoomModal.bookingId}</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => { if (!checkoutRoomBusy) setCheckoutRoomModal(null); }}
+                  className="p-1.5 rounded-lg transition-colors text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
+                    <path d="M18 6L6 18M6 6l12 12"/>
+                  </svg>
+                </button>
+              </div>
+
+              {/* ── Body ─────────────────────────────────────────── */}
+              <div className="px-6 py-5 space-y-5">
+
+                {/* Guest + room */}
+                <div className="flex items-start gap-3">
+                  <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 text-[11px] font-bold mt-0.5 ${avatarColor(checkoutRoomModal.guestName)}`}>
+                    {initials(checkoutRoomModal.guestName)}
+                  </div>
+                  <div>
+                    <p className="text-[13.5px] font-semibold text-slate-800">{checkoutRoomModal.guestName}</p>
+                    <p className="text-[12px] text-slate-500">{checkoutRoomModal.roomLabel}</p>
+                  </div>
+                  <span className={`ml-auto flex-shrink-0 text-[11.5px] font-semibold px-2.5 py-0.5 rounded-full ${statusBadge(checkoutRoomModal.currentStatus as BookingStatus)}`}>
+                    {checkoutRoomModal.currentStatus}
+                  </span>
+                </div>
+
+                {/* ── Stay timing (mirrors booking-level modal) ────── */}
+                <div>
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Stay Timing</p>
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl overflow-hidden">
+                    <div className="divide-y divide-slate-100">
+                      <div className="flex items-center justify-between px-4 py-2">
+                        <span className="text-[12.5px] text-slate-500">Scheduled checkout</span>
+                        <span className="text-[12.5px] font-medium text-slate-700">{checkoutRoomModal.scheduledCheckOut} · 11:59 AM</span>
+                      </div>
+                      <div className="flex items-center justify-between px-4 py-2">
+                        <span className="text-[12.5px] text-slate-500">Grace period until</span>
+                        <span className="text-[12.5px] text-slate-500">{fmtTime(t.graceDeadlineAt)}</span>
+                      </div>
+                      <div className="flex items-center justify-between px-4 py-2">
+                        <span className="text-[12.5px] text-slate-500">Actual checkout</span>
+                        <span className="text-[12.5px] font-semibold text-slate-800">{fmtShortDate(t.actualAt)} · {fmtTime(t.actualAt)}</span>
+                      </div>
+                    </div>
+                    <div className={`flex items-center justify-between px-4 py-2.5 border-t ${isOnTime ? "bg-sky-50 border-sky-100" : "bg-amber-50 border-amber-100"}`}>
+                      <span className={`text-[12.5px] font-semibold flex items-center gap-1.5 ${isOnTime ? "text-sky-700" : "text-amber-700"}`}>
+                        {isOnTime ? <><span>✓</span> On time <span className="font-normal text-[11.5px]">(within grace)</span></> : <><span>⚠</span> Late checkout</>}
+                      </span>
+                      <span className={`text-[12px] ${isOnTime ? "text-sky-600" : "text-amber-600"}`}>
+                        {t.minutesDiff > 0 && `+${t.minutesDiff} min past checkout`}
+                        {t.minutesDiff === 0 && "Exactly on time"}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="mt-1.5 px-0.5 text-[11px] text-slate-400">Normal checkout — no early-departure deduction applies.</p>
+                </div>
+
+                {checkoutRoomError && (
+                  <p className="text-[12px] text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">{checkoutRoomError}</p>
+                )}
+
+                {/* ── Footer ─────────────────────────────────────── */}
+                <div className="flex items-center justify-end gap-3 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setCheckoutRoomModal(null)}
+                    disabled={checkoutRoomBusy}
+                    className="px-4 py-2.5 text-[13px] font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Keep Room
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => submitCheckoutRoom()}
+                    disabled={checkoutRoomBusy}
+                    className="flex items-center gap-2 px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-colors shadow-sm text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
+                      <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
+                    </svg>
+                    {checkoutRoomBusy ? "Checking out…" : "Confirm Check-out"}
+                  </button>
+                </div>
 
               </div>
             </div>
