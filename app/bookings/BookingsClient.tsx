@@ -762,8 +762,6 @@ export default function BookingsClient({ initialRoom }: Props) {
   // ── Timeline modal ───────────────────────────────────────────
   // null = closed; set to a booking to show that booking's full timeline.
   const [timelineModal, setTimelineModal] = useState<Booking | null>(null);
-  // What-if room-value percentage (Timeline analysis panel, checked-out only).
-  const [comparablePct, setComparablePct] = useState<number>(70);
 
   // Timeline modal — lazily-fetched payment + refund data.
   // Fetched when timelineModal opens; cleared when it closes.
@@ -6287,49 +6285,6 @@ export default function BookingsClient({ initialRoom }: Props) {
 
               </div>
 
-              {/* ── What-if room-value analysis panel (checked-out only) ──────── */}
-              {b.status === "Checked Out" && (() => {
-                const frac = comparablePct / 100;
-                // Real room basis: non-cancelled rooms, bookingRate × nights (matches how totals are computed)
-                const activeRooms = (b.rooms ?? []).filter((r) => r.status !== "Cancelled");
-                const realRooms = activeRooms.reduce((s, r) => s + r.bookingRate * r.nights, 0);
-                const scaledRooms = Math.round(realRooms * frac);
-                const diff = realRooms - scaledRooms;
-                return (
-                  <div className="px-6 pb-4">
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                      <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-2">What-if room value</div>
-                      <div className="flex items-center gap-2 flex-wrap mb-3">
-                        {[60, 70, 80, 90].map((p) => (
-                          <button key={p} type="button" onClick={() => setComparablePct(p)}
-                            className={`px-2.5 py-1 text-[12px] font-semibold rounded-lg border transition-colors ${comparablePct === p ? "bg-slate-800 border-slate-800 text-white" : "bg-white border-slate-300 text-slate-600 hover:border-slate-400"}`}>{p}%</button>
-                        ))}
-                        <div className="flex items-center gap-1">
-                          <input type="number" min={1} max={100} value={comparablePct}
-                            onChange={(e) => { const v = Number(e.target.value); if (Number.isFinite(v)) setComparablePct(Math.min(100, Math.max(1, Math.round(v)))); }}
-                            className="w-16 px-2 py-1 text-[12px] text-slate-700 border border-slate-300 rounded-lg" />
-                          <span className="text-[12px] text-slate-500">%</span>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-3 gap-2 text-center">
-                        <div className="rounded-lg bg-white border border-slate-200 p-2">
-                          <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-0.5">Actual</div>
-                          <div className="text-[15px] font-semibold text-slate-800 tabular-nums">৳{realRooms.toLocaleString()}</div>
-                        </div>
-                        <div className="rounded-lg bg-white border border-slate-200 p-2">
-                          <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-0.5">At {comparablePct}%</div>
-                          <div className="text-[15px] font-semibold text-slate-800 tabular-nums">৳{scaledRooms.toLocaleString()}</div>
-                        </div>
-                        <div className="rounded-lg bg-white border border-slate-200 p-2">
-                          <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-0.5">Difference</div>
-                          <div className="text-[15px] font-semibold text-rose-600 tabular-nums">−৳{diff.toLocaleString()}</div>
-                        </div>
-                      </div>
-                      <div className="mt-2 text-[11px] text-slate-400">Room value only · for your reference, not shown to guests.</div>
-                    </div>
-                  </div>
-                );
-              })()}
 
               {/* Footer */}
               <div className="px-6 pb-5">
@@ -6371,25 +6326,6 @@ export default function BookingsClient({ initialRoom }: Props) {
                         <polyline points="10 9 9 9 8 9"/>
                       </svg>
                       Invoice
-                    </button>
-                  )}
-
-                  {/* Compact Invoice — Checked In or Checked Out */}
-                  {showInvoice && (
-                    <button
-                      onClick={() => window.open(`/bookings/${b.id}/invoice-compact`, "_blank")}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 text-[12.5px] font-semibold
-                        text-slate-700 bg-white border border-slate-300 rounded-xl
-                        hover:border-amber-400 hover:text-amber-700 hover:bg-amber-50
-                        transition-colors"
-                    >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-                        strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
-                        <rect x="4" y="3" width="16" height="18" rx="2"/>
-                        <line x1="8" y1="9" x2="16" y2="9"/>
-                        <line x1="8" y1="13" x2="16" y2="13"/>
-                      </svg>
-                      Compact
                     </button>
                   )}
 
