@@ -762,6 +762,8 @@ export default function BookingsClient({ initialRoom }: Props) {
   // ── Timeline modal ───────────────────────────────────────────
   // null = closed; set to a booking to show that booking's full timeline.
   const [timelineModal, setTimelineModal] = useState<Booking | null>(null);
+  // Comparable-estimate percentage picker (Timeline modal, checked-out only).
+  const [comparablePct, setComparablePct] = useState<number>(70);
 
   // Timeline modal — lazily-fetched payment + refund data.
   // Fetched when timelineModal opens; cleared when it closes.
@@ -6284,6 +6286,30 @@ export default function BookingsClient({ initialRoom }: Props) {
                 )}
 
               </div>
+
+              {/* ── Comparable estimate % box (checked-out only) ──────── */}
+              {b.status === "Checked Out" && (
+                <div className="px-6 pb-4">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Comparable estimate</div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {[60, 70, 90].map((p) => (
+                        <button key={p} type="button" onClick={() => setComparablePct(p)}
+                          className={`px-2.5 py-1 text-[12px] font-semibold rounded-lg border transition-colors ${comparablePct === p ? "bg-amber-100 border-amber-300 text-amber-800" : "bg-white border-slate-300 text-slate-600 hover:border-amber-300"}`}>{p}%</button>
+                      ))}
+                      <div className="flex items-center gap-1">
+                        <input type="number" min={1} max={100} value={comparablePct}
+                          onChange={(e) => { const v = Number(e.target.value); if (Number.isFinite(v)) setComparablePct(Math.min(100, Math.max(1, Math.round(v)))); }}
+                          className="w-16 px-2 py-1 text-[12px] text-slate-700 border border-slate-300 rounded-lg" />
+                        <span className="text-[12px] text-slate-500">%</span>
+                      </div>
+                      <button type="button" onClick={() => window.open(`/bookings/${b.id}/comparable?pct=${comparablePct}`, "_blank")}
+                        className="ml-auto inline-flex items-center gap-1.5 px-3 py-2 text-[12.5px] font-semibold text-white bg-amber-600 hover:bg-amber-700 rounded-xl transition-colors">Comparable Invoice</button>
+                    </div>
+                    <div className="mt-2 text-[11px] text-slate-400">Room value scaled to {comparablePct}% — cross-check only, not a real invoice.</div>
+                  </div>
+                </div>
+              )}
 
               {/* Footer */}
               <div className="px-6 pb-5">
