@@ -6374,6 +6374,25 @@ export default function BookingsClient({ initialRoom }: Props) {
                     </button>
                   )}
 
+                  {/* Compact Invoice — Checked In or Checked Out */}
+                  {showInvoice && (
+                    <button
+                      onClick={() => window.open(`/bookings/${b.id}/invoice-compact`, "_blank")}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-[12.5px] font-semibold
+                        text-slate-700 bg-white border border-slate-300 rounded-xl
+                        hover:border-amber-400 hover:text-amber-700 hover:bg-amber-50
+                        transition-colors"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                        strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
+                        <rect x="4" y="3" width="16" height="18" rx="2"/>
+                        <line x1="8" y1="9" x2="16" y2="9"/>
+                        <line x1="8" y1="13" x2="16" y2="13"/>
+                      </svg>
+                      Compact
+                    </button>
+                  )}
+
                   {/* Edit Booking — Confirmed or Checked In */}
                   {showEdit && (
                     <button
