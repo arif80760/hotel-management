@@ -20,7 +20,6 @@ import { useHotel } from "@/contexts/HotelContext";
 import { useAuth }  from "@/contexts/AuthContext";
 import type { MockRoom, RoomStatus } from "@/lib/mockData";
 import {
-  getRoomCategories,
   createRoomCategory,
   updateRoomCategoryName,
   updateRoomCategoryPrice,
@@ -111,21 +110,18 @@ export default function RoomsClient() {
     addRoom,
     updateRoom,
     deleteRoom,
+    categories,
+    refreshCategories,
+    loading: hotelLoading,
   } = useHotel();
 
   const { role } = useAuth();
   const isAdmin = role === "admin";   // only admins may add / edit / delete rooms
 
-  // ── Room categories (dynamic from DB) ───────────────────────
-  const [categories,    setCategories]    = useState<RoomCategory[]>([]);
-  const [catsLoading,   setCatsLoading]   = useState(true);
-
-  useEffect(() => {
-    getRoomCategories()
-      .then(setCategories)
-      .catch(() => { /* fallback list stays in place */ })
-      .finally(() => setCatsLoading(false));
-  }, []);
+  // ── Room categories (from the session-level cache in HotelContext) ──
+  // Loaded once at sign-in; mutations below call refreshCategories() so new
+  // or renamed categories appear here without a full reload.
+  const catsLoading = hotelLoading;
 
   // Active categories for the dropdown; falls back to hardcoded list while loading
   const activeCategories = useMemo(
@@ -158,8 +154,8 @@ export default function RoomsClient() {
     try {
       const price = newCatPrice.trim() ? parseInt(newCatPrice) : 0;
       if (price < 0) throw new Error("Price cannot be negative.");
-      const created = await createRoomCategory(newCatName, price);
-      setCategories(prev => [...prev, created]);
+      await createRoomCategory(newCatName, price);
+      await refreshCategories();
       setNewCatName("");
       setNewCatPrice("");
     } catch (err) {
@@ -172,8 +168,8 @@ export default function RoomsClient() {
   async function handleRenameCategory(id: string) {
     if (!renameValue.trim()) { setRenamingId(null); return; }
     try {
-      const updated = await updateRoomCategoryName(id, renameValue);
-      setCategories(prev => prev.map(c => c.id === id ? updated : c));
+      await updateRoomCategoryName(id, renameValue);
+      await refreshCategories();
     } catch (err) {
       setCatError(err instanceof Error ? err.message : "Rename failed.");
     } finally {
@@ -185,8 +181,8 @@ export default function RoomsClient() {
   async function handleToggleActive(cat: RoomCategory) {
     setTogglingId(cat.id);
     try {
-      const updated = await setRoomCategoryActive(cat.id, !cat.isActive);
-      setCategories(prev => prev.map(c => c.id === cat.id ? updated : c));
+      await setRoomCategoryActive(cat.id, !cat.isActive);
+      await refreshCategories();
     } catch (err) {
       setCatError(err instanceof Error ? err.message : "Toggle failed.");
     } finally {
@@ -200,8 +196,8 @@ export default function RoomsClient() {
       return;
     }
     try {
-      const updated = await updateRoomCategoryPrice(id, price);
-      setCategories(prev => prev.map(c => c.id === id ? updated : c));
+      await updateRoomCategoryPrice(id, price);
+      await refreshCategories();
       setCatError("");
     } catch (err) {
       setCatError(err instanceof Error ? err.message : "Price update failed.");

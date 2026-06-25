@@ -16,7 +16,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import {
   getBalances,
-  getAccounts,
   getTransactions,
   createTransaction,
   updateTransaction,
@@ -41,8 +40,7 @@ import {
 import LoanEntryActions from "@/app/accounts/loans/LoanEntryActions";
 import { getAllBookings } from "@/services/bookingsService";
 import type { MockBooking } from "@/lib/mockData";
-import { getExpenseCategories } from "@/services/expenseCategoriesService";
-import { getRevenueCategories } from "@/services/revenueCategoriesService";
+import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 // ─────────────────────────────────────────────────────────────
 // COPIED FROM app/employees/EmployeesClient.tsx
@@ -493,10 +491,22 @@ export default function CashbookClient({
   // bookings: live snapshot for the outstanding-dues tile. Loaded ONCE on
   // mount (period-independent) — NOT part of the date-range refetch.
   const [bookings,     setBookings]     = useState<MockBooking[]>([]);
-  // Category reference maps — loaded once on mount, used to label Day Close
-  // activity rows by their true category (and detect remuneration via kind).
+  // Category reference maps — used to label Day Close activity rows by their
+  // true category (and detect remuneration via kind). Sourced from the
+  // session-level reference cache, not refetched on mount.
   const [expenseCatMap, setExpenseCatMap] = useState<Map<string, { name: string; kind: string }>>(new Map());
   const [revenueCatMap, setRevenueCatMap] = useState<Map<string, string>>(new Map());
+
+  // ── Reference data (cached once per session) ───────────────
+  // accounts (definitions) + expense/revenue categories come from the shared
+  // cache; mirror them into the existing local state so downstream code is
+  // unchanged. No per-mount fetch for these three.
+  const { accountDefs, expenseCategories, revenueCategories } = useReferenceData();
+  useEffect(() => {
+    setAccounts(accountDefs);
+    setExpenseCatMap(new Map(expenseCategories.map((c) => [c.id, { name: c.name, kind: c.kind }])));
+    setRevenueCatMap(new Map(revenueCategories.map((c) => [c.id, c.name])));
+  }, [accountDefs, expenseCategories, revenueCategories]);
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching,   setFetching]   = useState(true);
@@ -581,21 +591,16 @@ export default function CashbookClient({
     let cancelled = false;
     async function load() {
       try {
-        const [bal, accts, txns, bks, expCats, revCats] = await Promise.all([
+        const [bal, txns, bks] = await Promise.all([
           getBalances(),
-          getAccounts(),
           getTransactions({ fromDate: filterFromDate || undefined, toDate: filterToDate || undefined, includeDeleted: showDeleted }),
           getAllBookings(),
-          getExpenseCategories(),
-          getRevenueCategories(),
         ]);
         if (!cancelled) {
           setBalances(bal);
-          setAccounts(accts);
           setTransactions(txns);
           setBookings(bks);
-          setExpenseCatMap(new Map(expCats.map((c) => [c.id, { name: c.name, kind: c.kind }])));
-          setRevenueCatMap(new Map(revCats.map((c) => [c.id, c.name])));
+          // accounts + category maps are populated from the reference cache effect.
           // Fire-and-forget the day-close status load. Non-fatal: if it
           // fails the card just stays hidden.
           loadDayCloseStatus();

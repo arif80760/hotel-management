@@ -22,7 +22,6 @@
 import { useState, useEffect } from "react";
 
 import {
-  getRevenueCategories,
   createRevenueCategory,
   updateRevenueCategoryName,
   setRevenueCategoryActive,
@@ -37,10 +36,8 @@ import {
   type NewRevenue,
 } from "@/services/revenueService";
 
-import {
-  getAccounts,
-  type Account,
-} from "@/services/accountsService";
+import { type Account } from "@/services/accountsService";
+import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 
 // ── Input styling helper ───────────────────────────────────
@@ -85,9 +82,11 @@ function formatAmount(n: number): string {
 
 export default function RevenueManagementClient() {
   // ── Data ───────────────────────────────────────────────────
+  // Revenue categories + account definitions come from the session-level
+  // reference cache. `categories` is aliased so existing reads are unchanged;
+  // category mutations call refreshRevenueCategories() to propagate edits.
+  const { revenueCategories: categories, accountDefs: accounts, refreshRevenueCategories } = useReferenceData();
   const [revenues,       setRevenues]       = useState<Revenue[]>([]);
-  const [categories,     setCategories]     = useState<RevenueCategory[]>([]);
-  const [accounts,       setAccounts]       = useState<Account[]>([]);
   const [payeesHistory,  setPayeesHistory]  = useState<string[]>([]);
 
   // ── Load state ─────────────────────────────────────────────
@@ -138,16 +137,13 @@ export default function RevenueManagementClient() {
     let cancelled = false;
     async function load() {
       try {
-        const [revs, cats, accts, payeesH] = await Promise.all([
+        const [revs, payeesH] = await Promise.all([
           getRevenues({}),
-          getRevenueCategories(),
-          getAccounts(),
           getDistinctRevenuePayees(),
         ]);
         if (cancelled) return;
         setRevenues(revs);
-        setCategories(cats);
-        setAccounts(accts);
+        // categories + accounts come from the reference cache (no per-mount fetch).
         setPayeesHistory(payeesH);
       } catch (err) {
         if (!cancelled) {
@@ -241,13 +237,10 @@ export default function RevenueManagementClient() {
   }
 
   // ── Reload helpers ─────────────────────────────────────────
+  // Re-pull the shared revenue-category cache (read-only). The aliased
+  // `categories` updates from the cache, propagating the edit to every page.
   async function reloadCategories() {
-    try {
-      const cats = await getRevenueCategories();
-      setCategories(cats);
-    } catch (err) {
-      console.error("[RevenueManagementClient] reloadCategories failed:", err);
-    }
+    await refreshRevenueCategories();
   }
   async function reloadRevenues() {
     try {

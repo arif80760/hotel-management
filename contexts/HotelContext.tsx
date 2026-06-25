@@ -191,6 +191,12 @@ type HotelContextType = {
    * (e.g. before categories load, or a deleted category).
    */
   categoryName: (c: string) => string;
+  /** Room categories loaded once at session start. Read-only; consumers
+   *  should read this instead of refetching getRoomCategories(). */
+  categories: RoomCategory[];
+  /** Re-fetch room categories (read-only) after a category mutation so the
+   *  shared `categories` array reflects the change without a full reload. */
+  refreshCategories: () => Promise<void>;
 };
 
 const HotelContext = createContext<HotelContextType | null>(null);
@@ -216,6 +222,15 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     (c: string) => displayCategory(c, categoryNameMap),
     [categoryNameMap],
   );
+
+  // Read-only re-fetch of room categories — re-runs getRoomCategories() and
+  // replaces the exposed `categories` array. Called by RoomsClient after it
+  // adds/renames/toggles a category so the new value appears without a reload.
+  // Performs no writes.
+  const refreshCategories = useCallback(async () => {
+    try { setCategories(await getRoomCategories()); }
+    catch (err) { console.error("[HotelContext] refreshCategories failed:", err); }
+  }, []);
 
   // ── Initial data load ──────────────────────────────────────
   // Fetches rooms and bookings from Supabase once when the app starts.
@@ -1288,6 +1303,8 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       markRoomAvailable,
       recordPayment,
       categoryName,
+      categories,
+      refreshCategories,
     }}>
       {children}
     </HotelContext.Provider>

@@ -4,12 +4,12 @@ import { useState, useEffect, useMemo, type CSSProperties } from "react";
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, BarElement, Filler, Tooltip, Legend } from "chart.js";
 import ChartDataLabels from "chartjs-plugin-datalabels";
 import { Line, Bar } from "react-chartjs-2";
-import { getTransactions, getAccounts, type AccountTransaction } from "@/services/accountsService";
+import { getTransactions, type AccountTransaction } from "@/services/accountsService";
 import { getRevenues, type Revenue } from "@/services/revenueService";
-import { getRevenueCategories } from "@/services/revenueCategoriesService";
 import { getAllBookings, getBookingPaymentMap } from "@/services/bookingsService";
 import type { MockBooking } from "@/lib/mockData";
 import { useHotel } from "@/contexts/HotelContext";
+import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Filler, Tooltip, Legend, ChartDataLabels);
 
@@ -46,10 +46,13 @@ export default function RevenueReportClient({ oswaldFamily, archivoFamily }:{ os
   const [toDate,setToDate]=useState<string>(todayISO());
   const [preset,setPreset]=useState<Preset>("this_month");
 
+  // accounts + revenue categories from the session-level reference cache.
+  const { accountDefs, revenueCategories } = useReferenceData();
+  const accounts   = useMemo(()=>accountDefs.map(a=>({id:a.id,name:a.name})),[accountDefs]);
+  const categories = useMemo(()=>revenueCategories.map(c=>({id:c.id,name:c.name})),[revenueCategories]);
+
   const [txns,setTxns]=useState<AccountTransaction[]>([]);
   const [manual,setManual]=useState<Revenue[]>([]);
-  const [accounts,setAccounts]=useState<{id:string;name:string}[]>([]);
-  const [categories,setCategories]=useState<{id:string;name:string}[]>([]);
   const [bookingsByRef,setBookingsByRef]=useState<Map<string,MockBooking>>(new Map());
   const [paymentMap,setPaymentMap]=useState<Awaited<ReturnType<typeof getBookingPaymentMap>>>(new Map());
   const [fetching,setFetching]=useState(true);
@@ -60,11 +63,9 @@ export default function RevenueReportClient({ oswaldFamily, archivoFamily }:{ os
   useEffect(()=>{ let cancelled=false;
     (async()=>{
       try{
-        const [{tx,rv,pm},accs,cats,bks]=await Promise.all([loadTxns(fromDate,toDate),getAccounts(),getRevenueCategories(),getAllBookings()]);
+        const [{tx,rv,pm},bks]=await Promise.all([loadTxns(fromDate,toDate),getAllBookings()]);
         if(cancelled)return;
         setTxns(tx); setManual(rv); setPaymentMap(pm);
-        setAccounts(accs.map(a=>({id:a.id,name:a.name})));
-        setCategories(cats.map(c=>({id:c.id,name:c.name})));
         setBookingsByRef(new Map(bks.map(b=>[b.id,b])));
       }catch(err){ if(!cancelled) setFetchError(err instanceof Error?err.message:"Failed to load."); }
       finally{ if(!cancelled) setFetching(false); }

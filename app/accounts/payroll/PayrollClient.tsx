@@ -33,6 +33,7 @@ import {
   getExpenseCategories,
   createExpenseCategory,
 } from "@/services/expenseCategoriesService";
+import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 // ── Payment kinds ──────────────────────────────────────────
 type PayKind = "Salary" | "Advance" | "Bonus";
@@ -99,6 +100,7 @@ function kindBadgeCls(kind: PayKind): string {
 
 
 export default function PayrollClient() {
+  const { expenseCategories } = useReferenceData();
   // ── Data ───────────────────────────────────────────────────
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -132,16 +134,14 @@ export default function PayrollClient() {
     let cancelled = false;
     async function load() {
       try {
-        const [emps, exps, cats] = await Promise.all([
+        const [emps, exps] = await Promise.all([
           getAllEmployees(),
           getExpenses(),
-          getExpenseCategories(),
         ]);
         if (cancelled) return;
-        const salaryCat = cats.find((c) => c.name.trim().toLowerCase() === "salary") ?? null;
         setEmployees(emps);
         setExpenses(exps);
-        setSalaryCategoryId(salaryCat ? salaryCat.id : null);
+        // salaryCategoryId is derived from the cached expense categories (effect below).
       } catch (err) {
         if (!cancelled) setFetchError(err instanceof Error ? err.message : "Failed to load.");
       } finally {
@@ -152,6 +152,14 @@ export default function PayrollClient() {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Resolve the "Salary" category id from the session cache ──
+  // Reacts when the reference cache finishes loading. The write flow
+  // (resolveSalaryCategoryId) still creates/refetches it on demand.
+  useEffect(() => {
+    const salaryCat = expenseCategories.find((c) => c.name.trim().toLowerCase() === "salary") ?? null;
+    setSalaryCategoryId(salaryCat ? salaryCat.id : null);
+  }, [expenseCategories]);
 
   // ── Auto-clear success banner ──────────────────────────────
   useEffect(() => {

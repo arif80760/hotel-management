@@ -24,7 +24,6 @@
 import { useState, useEffect } from "react";
 
 import {
-  getExpenseCategories,
   createExpenseCategory,
   updateExpenseCategoryName,
   updateExpenseCategoryKind,
@@ -32,6 +31,7 @@ import {
   resolveRemunerationCategoryId,
   type ExpenseCategory,
 } from "@/services/expenseCategoriesService";
+import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 import {
   getExpenses,
@@ -113,8 +113,11 @@ function formatAmount(n: number): string {
 
 export default function ExpenseClient() {
   // ── Data ───────────────────────────────────────────────────
+  // Expense categories come from the session-level reference cache; aliased to
+  // `categories` so existing reads are unchanged. Category mutations below call
+  // refreshExpenseCategories() so edits propagate here and to other pages.
+  const { expenseCategories: categories, refreshExpenseCategories } = useReferenceData();
   const [expenses,        setExpenses]        = useState<Expense[]>([]);
-  const [categories,      setCategories]      = useState<ExpenseCategory[]>([]);
   const [employees,       setEmployees]       = useState<Employee[]>([]);
   const [payeesHistory,   setPayeesHistory]   = useState<string[]>([]);
   const [inventoryItems,  setInventoryItems]  = useState<InventoryItem[]>([]);
@@ -215,9 +218,8 @@ export default function ExpenseClient() {
     let cancelled = false;
     async function load() {
       try {
-        const [exps, cats, emps, payeesH, invItems, invCats, dayClose] = await Promise.all([
+        const [exps, emps, payeesH, invItems, invCats, dayClose] = await Promise.all([
           getExpenses({ fromDate: filterFromDate, toDate: filterToDate }),
-          getExpenseCategories(),
           getAllEmployees(),
           getDistinctPayees(),
           getInventoryItems({ activeOnly: false }),
@@ -226,7 +228,7 @@ export default function ExpenseClient() {
         ]);
         if (cancelled) return;
         setExpenses(exps);
-        setCategories(cats);
+        // categories come from the reference cache (no per-mount fetch here).
         setEmployees(emps);
         setPayeesHistory(payeesH);
         setInventoryItems(invItems);
@@ -371,13 +373,10 @@ export default function ExpenseClient() {
   }
 
   // ── Reload helpers ─────────────────────────────────────────
+  // Re-pull the shared expense-category cache (read-only). The aliased
+  // `categories` updates from the cache, propagating the edit to every page.
   async function reloadCategories() {
-    try {
-      const cats = await getExpenseCategories();
-      setCategories(cats);
-    } catch (err) {
-      console.error("[ExpenseClient] reloadCategories failed:", err);
-    }
+    await refreshExpenseCategories();
   }
   async function reloadExpenses() {
     try {
@@ -616,9 +615,9 @@ export default function ExpenseClient() {
           employeeId: remunRecipientId,
           note:       remunNote.trim() || undefined,
         });
-        const [exps, cats] = await Promise.all([getExpenses(), getExpenseCategories()]);
+        const exps = await getExpenses();
         setExpenses(exps);
-        setCategories(cats);
+        await refreshExpenseCategories();   // remuneration may auto-create its category
         setSuccessMsg(`Remuneration to ${recipient?.fullName ?? "recipient"} updated.`);
         setRemunModalOpen(false);
         setEditingRemunId(null);
@@ -635,9 +634,9 @@ export default function ExpenseClient() {
         employeeId: remunRecipientId,
         note:       remunNote.trim() || undefined,
       });
-      const [exps, cats] = await Promise.all([getExpenses(), getExpenseCategories()]);
+      const exps = await getExpenses();
       setExpenses(exps);
-      setCategories(cats);
+      await refreshExpenseCategories();   // remuneration may auto-create its category
       setSuccessMsg(`Remuneration of ৳${formatAmount(amt)} to ${recipient?.fullName ?? "recipient"} recorded.`);
       setRemunModalOpen(false);
     } catch (err) {

@@ -47,7 +47,7 @@ import {
   uploadDocument,
   deleteDocument,
 } from "@/services/documentsService";
-import { getRoomCategories, type RoomCategory } from "@/services/roomCategoriesService";
+import { type RoomCategory } from "@/services/roomCategoriesService";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
 import { calcBookingLevelDeductions, earlyNights } from "@/lib/checkoutUtils";
 import ConfirmDialog from "@/components/ConfirmDialog";
@@ -645,7 +645,7 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   // ── Shared context ─────────────────────────────────────────
   const {
-    rooms, bookings, nextBookingId,
+    rooms, bookings, nextBookingId, categories,
     createBooking, changeBookingStatus,
     checkoutNormal, checkoutWithOverride, recordPayment,
     updateBooking,
@@ -664,20 +664,8 @@ export default function BookingsClient({ initialRoom }: Props) {
   const { user, role } = useAuth();
   const isAdmin = role === "admin";
 
-  // ── Load room categories from database ──────────────────────
-  const [categories, setCategories] = useState<RoomCategory[]>([]);
-
-  useEffect(() => {
-    async function loadCategories() {
-      try {
-        const cats = await getRoomCategories();
-        setCategories(cats);
-      } catch (err) {
-        console.error("[BookingsClient] Failed to load categories:", err);
-      }
-    }
-    loadCategories();
-  }, []);
+  // Room categories come from the session-level cache in HotelContext —
+  // loaded once at sign-in, no per-mount refetch here.
 
   // slug → display name map: rooms store the slug ("deluxe"); the category's
   // editable display name ("Couple Delux Suit") lives in room_categories.name.

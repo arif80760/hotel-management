@@ -6,7 +6,7 @@ import ChartDataLabels from "chartjs-plugin-datalabels";
 import { Line, Bar } from "react-chartjs-2";
 import { getTransactions } from "@/services/accountsService";
 import { getExpenses } from "@/services/expensesService";
-import { getExpenseCategories } from "@/services/expenseCategoriesService";
+import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Filler, Tooltip, Legend, ChartDataLabels);
 
@@ -36,6 +36,7 @@ const taka = (n:number)=>`৳${Math.round(Math.abs(n)).toLocaleString()}`;
 const k = (v:number)=> (v ? `৳${Math.round(v/1000)}k` : "");
 
 export default function ProfitLossClient({ oswaldFamily, archivoFamily }:{ oswaldFamily:string; archivoFamily:string }){
+  const { expenseCategories } = useReferenceData();
   const [preset,setPreset]=useState<Preset>("this_month");
   const [cFrom,setCFrom]=useState(firstOfMonthISO());
   const [cTo,setCTo]=useState(todayISO());
@@ -48,9 +49,9 @@ export default function ProfitLossClient({ oswaldFamily, archivoFamily }:{ oswal
     try{
       const { from,to }=presetRange(preset,cFrom,cTo);
       const f:{fromDate?:string;toDate?:string}={}; if(from)f.fromDate=from; if(to)f.toDate=to;
-      const [txns,expenses,cats]=await Promise.all([getTransactions(f),getExpenses(f),getExpenseCategories()]);
+      const [txns,expenses]=await Promise.all([getTransactions(f),getExpenses(f)]);
       if(cancelled)return;
-      const kindById=new Map(cats.map(c=>[c.id,c.kind])); const nameById=new Map(cats.map(c=>[c.id,c.name]));
+      const kindById=new Map(expenseCategories.map(c=>[c.id,c.kind])); const nameById=new Map(expenseCategories.map(c=>[c.id,c.name]));
       const revenue=txns.filter(t=>t.type==="revenue_in").reduce((s,t)=>s+t.amount,0);
       const refunds=txns.filter(t=>t.type==="expense_out"&&t.bookingPaymentId!==null).reduce((s,t)=>s+t.amount,0);
       let operating=0, remuneration=0; const cm=new Map<string,number>();
@@ -60,15 +61,15 @@ export default function ProfitLossClient({ oswaldFamily, archivoFamily }:{ oswal
       const opByCat=[...cm.entries()].map(([name,total])=>({name,total})).sort((a,b)=>b.total-a.total);
       setP({ revenue, refunds, operating, remuneration, opByCat });
     }catch(err){ if(!cancelled) setError((err as Error).message||"Failed to load."); }
-  })(); return ()=>{ cancelled=true; }; },[preset,cFrom,cTo]);
+  })(); return ()=>{ cancelled=true; }; },[preset,cFrom,cTo,expenseCategories]);
 
   useEffect(()=>{ let cancelled=false; (async()=>{
     try{
       const y=new Date().getFullYear();
       const f={ fromDate:`${y}-01-01`, toDate:todayISO() };
-      const [txns,expenses,cats]=await Promise.all([getTransactions(f),getExpenses(f),getExpenseCategories()]);
+      const [txns,expenses]=await Promise.all([getTransactions(f),getExpenses(f)]);
       if(cancelled)return;
-      const kindById=new Map(cats.map(c=>[c.id,c.kind]));
+      const kindById=new Map(expenseCategories.map(c=>[c.id,c.kind]));
       const rev=Array(12).fill(0), op=Array(12).fill(0), refund=Array(12).fill(0);
       for(const t of txns){ const mi=parseInt(String(t.txnDate).slice(5,7),10)-1; if(mi<0||mi>11)continue;
         if(t.type==="revenue_in") rev[mi]+=t.amount;
@@ -80,7 +81,7 @@ export default function ProfitLossClient({ oswaldFamily, archivoFamily }:{ oswal
       const avg=active?rev.reduce((s,v)=>s+v,0)/active:0;
       setY({ rev, op, ebt, avg, ready:true });
     }catch{ if(!cancelled) setY(s=>({...s,ready:true})); }
-  })(); return ()=>{ cancelled=true; }; },[]);
+  })(); return ()=>{ cancelled=true; }; },[expenseCategories]);
 
   const { revenue,refunds,operating,remuneration,opByCat }=P;
   const netRevenue=revenue-refunds; const netProfit=netRevenue-operating; const retained=netProfit-remuneration;

@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useState, useCallback, Fragment } from "react";
+import { useEffect, useState, useCallback, useMemo, Fragment } from "react";
 import {
   listLoans,
   getLoanRepayments,
   type LoanWithStatus,
   type LoanRepayment,
 } from "@/services/loansService";
-import { getAccounts } from "@/services/accountsService";
+import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
@@ -20,8 +20,13 @@ export default function LoansClient() {
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState<string | null>(null);
 
-  // account id -> display name (Cash / Bank / bKash / Nagad)
-  const [accountNames, setAccountNames] = useState<Record<string, string>>({});
+  // account id -> display name (Cash / Bank / bKash / Nagad) — from session cache
+  const { accountDefs } = useReferenceData();
+  const accountNames = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const a of accountDefs) map[a.id] = a.name;
+    return map;
+  }, [accountDefs]);
 
   // repayment-history drill-down
   const [expandedId, setExpandedId]           = useState<string | null>(null);
@@ -33,12 +38,9 @@ export default function LoansClient() {
     let cancelled = false;
     (async () => {
       try {
-        const [loanData, accts] = await Promise.all([listLoans(), getAccounts()]);
+        const loanData = await listLoans();
         if (cancelled) return;
         setLoans(loanData);
-        const map: Record<string, string> = {};
-        for (const a of accts) map[a.id] = a.name;
-        setAccountNames(map);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load loans.");
       } finally {

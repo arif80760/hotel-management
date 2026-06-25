@@ -30,6 +30,7 @@ import { useEffect, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { HotelProvider } from "@/contexts/HotelContext";
+import { ReferenceDataProvider } from "@/contexts/ReferenceDataContext";
 import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
 
@@ -87,15 +88,17 @@ export default function AppShell({ children }: { children: ReactNode }) {
   // unauthenticated would trigger Supabase fetches that RLS would block.
   return (
     <HotelProvider>
-      <div className="flex w-full h-screen overflow-hidden">
-        <Sidebar />
-        <div className="flex-1 flex flex-col min-w-0 h-screen">
-          <TopBar />
-          <main className="flex-1 overflow-auto min-w-0 bg-slate-50">
-            {children}
-          </main>
+      <ReferenceDataProvider>
+        <div className="flex w-full h-screen overflow-hidden">
+          <Sidebar />
+          <div className="flex-1 flex flex-col min-w-0 h-screen">
+            <TopBar />
+            <main className="flex-1 overflow-auto min-w-0 bg-slate-50">
+              {children}
+            </main>
+          </div>
         </div>
-      </div>
+      </ReferenceDataProvider>
     </HotelProvider>
   );
 }
