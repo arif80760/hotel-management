@@ -3769,12 +3769,16 @@ export default function BookingsClient({ initialRoom }: Props) {
           BOOKINGS TABLE
       ══════════════════════════════════════════════════════ */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
+        {/* Bounded scroll viewport — caps the table at roughly one screen so the
+            horizontal scrollbar stays on screen instead of sitting below the fold
+            on large monitors. Rows scroll vertically inside; the pagination bar
+            below stays put. Uncapped below md: so phones keep normal page flow. */}
+        <div className="overflow-auto overscroll-x-contain md:max-h-[calc(100vh-22rem)]">
           <table className="w-full text-[13px]">
-            <thead>
+            <thead className="sticky top-0 z-20">
               <tr className="bg-slate-50 border-b border-slate-200">
                 {["ID", "Primary Guest", "Room", "Guests", "Check-in", "Check-out", "Nights", "Status", "Total", "Paid", "Due", "Payment", "Action"].map((h) => (
-                  <th key={h} className="text-left px-5 py-3 text-[11px] font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap">
+                  <th key={h} className="text-left px-5 py-3 text-[11px] font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]">
                     {h}
                   </th>
                 ))}
@@ -4380,12 +4384,13 @@ export default function BookingsClient({ initialRoom }: Props) {
 
           {/* ── Outstanding Dues Table ─────────────────────────── */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="overflow-x-auto">
+            {/* Same bounded viewport + sticky header as the main bookings table. */}
+            <div className="overflow-auto overscroll-x-contain md:max-h-[calc(100vh-22rem)]">
               <table className="w-full text-[13px]">
-                <thead>
+                <thead className="sticky top-0 z-20">
                   <tr className="bg-rose-50 border-b border-rose-100">
                     {["ID", "Primary Guest", "Room", "Check-in", "Check-out", "Booking Status", "Total", "Paid", "Method", "Due", "Payment", "Override", "Action"].map(h => (
-                      <th key={h} className="text-left px-5 py-3 text-[11px] font-semibold text-rose-400 uppercase tracking-wider whitespace-nowrap">
+                      <th key={h} className="text-left px-5 py-3 text-[11px] font-semibold text-rose-400 uppercase tracking-wider whitespace-nowrap bg-rose-50 shadow-[0_1px_0_0_#ffe4e6]">
                         {h}
                       </th>
                     ))}
