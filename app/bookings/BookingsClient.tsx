@@ -622,6 +622,70 @@ function getCategoryPrice(categorySlug: string, categories: RoomCategory[]): num
   return cat?.price ?? 0;
 }
 
+// ─────────────────────────────────────────────────────────────
+// CATEGORY MINIMUM RATE (floor price)
+// ─────────────────────────────────────────────────────────────
+
+/** One room whose entered rate is below its category's minimum. */
+type FloorViolation = {
+  rowId:        string;
+  roomNumber:   string;
+  categoryName: string;
+  rate:         number;
+  minRate:      number;
+};
+
+/**
+ * Shared floor rule used by BOTH the create and the edit path so the two can't
+ * drift. Each caller resolves its own rate first — using whatever fallback its
+ * own save payload uses — so the check always matches what will be written.
+ * Rows with an unknown room, or whose category has no minRate, are skipped
+ * (minRate === null means "no floor", the default for every category).
+ */
+function findFloorViolations(
+  entries: { rowId: string; roomNumber: string; rate: number }[],
+  roomCatalog: MockRoom[],
+  cats: RoomCategory[],
+): FloorViolation[] {
+  const out: FloorViolation[] = [];
+  for (const en of entries) {
+    if (!en.roomNumber) continue;
+    const info = roomCatalog.find(x => x.roomNumber === en.roomNumber);
+    const slug = info?.category?.toLowerCase() ?? "";
+    const cat  = cats.find(c => c.slug === slug);
+    if (!cat || cat.minRate == null) continue;
+    if (en.rate < cat.minRate) {
+      out.push({
+        rowId:        en.rowId,
+        roomNumber:   en.roomNumber,
+        categoryName: cat.name,
+        rate:         en.rate,
+        minRate:      cat.minRate,
+      });
+    }
+  }
+  return out;
+}
+
+/** Inline per-row message shown to a receptionist who is blocked. */
+function floorErrorMessage(v: FloorViolation): string {
+  return `Room ${v.roomNumber} (${v.categoryName}) can't be booked below its minimum rate of ` +
+         `৳${v.minRate.toLocaleString()}. Enter ৳${v.minRate.toLocaleString()} or higher, ` +
+         `or ask an admin to override.`;
+}
+
+/** Confirm-dialog title for the admin warn-and-allow prompt. */
+function floorConfirmTitle(vs: FloorViolation[]): string {
+  return vs.length === 1 ? "Rate below minimum" : `${vs.length} rates below minimum`;
+}
+
+/** Confirm-dialog body listing every violating room. */
+function floorConfirmDetail(vs: FloorViolation[]): string {
+  return vs
+    .map(v => `Rate ৳${v.rate.toLocaleString()} for Room ${v.roomNumber} is below the ৳${v.minRate.toLocaleString()} minimum.`)
+    .join(" ");
+}
+
 function calcDiscount(published: number, rate: number, nights: number) {
   const perNight = published > 0 && rate < published ? published - rate : 0;
   const pct = published > 0 && perNight > 0 ? Math.round((perNight / published) * 100) : 0;
@@ -1970,49 +2034,33 @@ export default function BookingsClient({ initialRoom }: Props) {
     // Staff are blocked; admins get a confirm and may proceed (warn-and-allow,
     // nothing is recorded). Every violating room is collected so the operator
     // sees all of them at once rather than fixing one per attempt.
-    const floorViolations: {
-      rowId: string; roomNumber: string; categoryName: string; rate: number; minRate: number;
-    }[] = [];
-    for (const r of form.rooms) {
-      const roomNo = r.room.trim();
-      if (!roomNo) continue;
-      const info = rooms.find(x => x.roomNumber === roomNo);
-      const slug = info?.category?.toLowerCase() ?? "";
-      const cat  = categories.find(c => c.slug === slug);
-      if (!cat || cat.minRate == null) continue;   // unknown room/category, or no floor set
-      // Mirror the same rate fallback the submit payload uses below.
-      const fixed = parseFloat(r.fixedRate)   || getCategoryPrice(slug, categories) || 0;
-      const rate  = parseFloat(r.bookingRate) || fixed;
-      if (rate < cat.minRate) {
-        floorViolations.push({
-          rowId: r.id, roomNumber: roomNo, categoryName: cat.name, rate, minRate: cat.minRate,
-        });
-      }
-    }
+    const floorViolations = findFloorViolations(
+      form.rooms.map(r => {
+        const roomNo = r.room.trim();
+        // Mirror the same rate fallback the create payload uses below.
+        const fixed  = parseFloat(r.fixedRate)   || getCategoryPrice(
+          rooms.find(x => x.roomNumber === roomNo)?.category?.toLowerCase() ?? "", categories) || 0;
+        return { rowId: r.id, roomNumber: roomNo, rate: parseFloat(r.bookingRate) || fixed };
+      }),
+      rooms,
+      categories,
+    );
 
     if (floorViolations.length > 0) {
       if (!isAdmin) {
         const floorErrors: NonNullable<FormErrors["rooms"]> = {};
         for (const v of floorViolations) {
-          floorErrors[v.rowId] = {
-            bookingRate:
-              `Room ${v.roomNumber} (${v.categoryName}) can't be booked below its minimum rate of ` +
-              `৳${v.minRate.toLocaleString()}. Enter ৳${v.minRate.toLocaleString()} or higher, ` +
-              `or ask an admin to override.`,
-          };
+          floorErrors[v.rowId] = { bookingRate: floorErrorMessage(v) };
         }
         setErrors(prev => ({ ...prev, rooms: { ...prev.rooms, ...floorErrors } }));
         return;
       }
       if (!floorConfirmed) {
-        const detail = floorViolations
-          .map(v => `Rate ৳${v.rate.toLocaleString()} for Room ${v.roomNumber} is below the ৳${v.minRate.toLocaleString()} minimum.`)
-          .join(" ");
         setConfirm({
-          title: floorViolations.length === 1 ? "Rate below minimum" : `${floorViolations.length} rates below minimum`,
-          message: `${detail} Book below minimum?`,
+          title:        floorConfirmTitle(floorViolations),
+          message:      `${floorConfirmDetail(floorViolations)} Book below minimum?`,
           confirmLabel: "Book anyway",
-          tone: "warning",
+          tone:         "warning",
           // Return the promise so the dialog stays busy until creation finishes;
           // the ConfirmDialog wrapper clears `confirm` in its finally block.
           onConfirm: () => handleSubmit(null, true),
@@ -2640,10 +2688,47 @@ export default function BookingsClient({ initialRoom }: Props) {
     return !e.guestName && !e.email && !e.rooms;
   }
 
-  function handleEditSubmit() {
+  // floorConfirmed: set only when an admin has confirmed the below-minimum-rate
+  // prompt. The Save button calls this as handleEditSubmit() with no args, so a
+  // click event can never be read as the flag.
+  function handleEditSubmit(floorConfirmed = false) {
     if (!editTarget) return;
     if (!validateEdit()) return;
     if (!editHasChanges) { handleEditCancel(); return; }
+
+    // ── Minimum-rate floor guard (same rule as create) ────────
+    // Locked rows are display-only and never submitted, so they're excluded.
+    // validateEdit() has already rejected NaN / rate <= 0 above, and the edit
+    // payload writes parseFloat(r.bookingRate) — so that's the rate we check.
+    const editFloorViolations = findFloorViolations(
+      editForm.rooms
+        .filter(r => !r.locked)
+        .map(r => ({ rowId: r.id, roomNumber: r.room.trim(), rate: parseFloat(r.bookingRate) })),
+      rooms,
+      categories,
+    );
+
+    if (editFloorViolations.length > 0) {
+      if (!isAdmin) {
+        const floorErrors: NonNullable<EditFormErrors["rooms"]> = {};
+        for (const v of editFloorViolations) {
+          floorErrors[v.rowId] = { bookingRate: floorErrorMessage(v) };
+        }
+        setEditErrors(prev => ({ ...prev, rooms: { ...prev.rooms, ...floorErrors } }));
+        return;
+      }
+      if (!floorConfirmed) {
+        setConfirm({
+          title:        floorConfirmTitle(editFloorViolations),
+          message:      `${floorConfirmDetail(editFloorViolations)} Save below minimum?`,
+          confirmLabel: "Save anyway",
+          tone:         "warning",
+          onConfirm: () => { handleEditSubmit(true); },
+        });
+        return;
+      }
+    }
+    // ─────────────────────────────────────────────────────────
 
     const changes: import("@/services/bookingsService").UpdateBookingPayload = {};
 
@@ -6835,7 +6920,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 </button>
                 <button
                   type="button"
-                  onClick={handleEditSubmit}
+                  onClick={() => handleEditSubmit()}
                   disabled={!editHasChanges || editSaving || editHasConflicts}
                   className="px-5 py-2 text-[13px] font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
