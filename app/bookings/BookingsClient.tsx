@@ -1913,8 +1913,11 @@ export default function BookingsClient({ initialRoom }: Props) {
   }
 
   // ── Submit ─────────────────────────────────────────────────
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  // floorConfirmed: set only when an admin has confirmed the below-minimum-rate
+  // prompt, so the re-entry skips the guard. The form passes only the event, so
+  // it always starts false.
+  async function handleSubmit(e: React.FormEvent | null, floorConfirmed = false) {
+    e?.preventDefault();
     if (!validate()) return;
 
     // Validate pending documents — each must have both type and file, or be empty
@@ -1959,6 +1962,63 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (layerBConflict) {
       setErrors(prev => ({ ...prev, rooms: { ...prev.rooms, ...layerBErrors } }));
       return;
+    }
+    // ─────────────────────────────────────────────────────────
+
+    // ── Minimum-rate floor guard (per category) ───────────────
+    // A category with minRate === null has no floor (existing behaviour).
+    // Staff are blocked; admins get a confirm and may proceed (warn-and-allow,
+    // nothing is recorded). Every violating room is collected so the operator
+    // sees all of them at once rather than fixing one per attempt.
+    const floorViolations: {
+      rowId: string; roomNumber: string; categoryName: string; rate: number; minRate: number;
+    }[] = [];
+    for (const r of form.rooms) {
+      const roomNo = r.room.trim();
+      if (!roomNo) continue;
+      const info = rooms.find(x => x.roomNumber === roomNo);
+      const slug = info?.category?.toLowerCase() ?? "";
+      const cat  = categories.find(c => c.slug === slug);
+      if (!cat || cat.minRate == null) continue;   // unknown room/category, or no floor set
+      // Mirror the same rate fallback the submit payload uses below.
+      const fixed = parseFloat(r.fixedRate)   || getCategoryPrice(slug, categories) || 0;
+      const rate  = parseFloat(r.bookingRate) || fixed;
+      if (rate < cat.minRate) {
+        floorViolations.push({
+          rowId: r.id, roomNumber: roomNo, categoryName: cat.name, rate, minRate: cat.minRate,
+        });
+      }
+    }
+
+    if (floorViolations.length > 0) {
+      if (!isAdmin) {
+        const floorErrors: NonNullable<FormErrors["rooms"]> = {};
+        for (const v of floorViolations) {
+          floorErrors[v.rowId] = {
+            bookingRate:
+              `Room ${v.roomNumber} (${v.categoryName}) can't be booked below its minimum rate of ` +
+              `৳${v.minRate.toLocaleString()}. Enter ৳${v.minRate.toLocaleString()} or higher, ` +
+              `or ask an admin to override.`,
+          };
+        }
+        setErrors(prev => ({ ...prev, rooms: { ...prev.rooms, ...floorErrors } }));
+        return;
+      }
+      if (!floorConfirmed) {
+        const detail = floorViolations
+          .map(v => `Rate ৳${v.rate.toLocaleString()} for Room ${v.roomNumber} is below the ৳${v.minRate.toLocaleString()} minimum.`)
+          .join(" ");
+        setConfirm({
+          title: floorViolations.length === 1 ? "Rate below minimum" : `${floorViolations.length} rates below minimum`,
+          message: `${detail} Book below minimum?`,
+          confirmLabel: "Book anyway",
+          tone: "warning",
+          // Return the promise so the dialog stays busy until creation finishes;
+          // the ConfirmDialog wrapper clears `confirm` in its finally block.
+          onConfirm: () => handleSubmit(null, true),
+        });
+        return;
+      }
     }
     // ─────────────────────────────────────────────────────────
 

@@ -23,6 +23,7 @@ import {
   createRoomCategory,
   updateRoomCategoryName,
   updateRoomCategoryPrice,
+  updateRoomCategoryMinRate,
   setRoomCategoryActive,
   type RoomCategory,
 } from "@/services/roomCategoriesService";
@@ -144,6 +145,9 @@ export default function RoomsClient() {
   const [renameValue,   setRenameValue]   = useState("");
   const [editingPriceId, setEditingPriceId] = useState<string | null>(null);
   const [priceValue,    setPriceValue]    = useState("");
+  const [newCatMinRate, setNewCatMinRate] = useState("");
+  const [editingMinRateId, setEditingMinRateId] = useState<string | null>(null);
+  const [minRateValue,  setMinRateValue]  = useState("");
   const [togglingId,    setTogglingId]    = useState<string | null>(null);
   const [catError,      setCatError]      = useState("");
 
@@ -154,10 +158,15 @@ export default function RoomsClient() {
     try {
       const price = newCatPrice.trim() ? parseInt(newCatPrice) : 0;
       if (price < 0) throw new Error("Price cannot be negative.");
-      await createRoomCategory(newCatName, price);
+      // Empty minimum rate = no floor (null). Only validated when provided.
+      const minRate = newCatMinRate.trim() ? parseInt(newCatMinRate) : null;
+      if (minRate !== null && (isNaN(minRate) || minRate < 0))
+        throw new Error("Minimum rate cannot be negative.");
+      await createRoomCategory(newCatName, price, minRate);
       await refreshCategories();
       setNewCatName("");
       setNewCatPrice("");
+      setNewCatMinRate("");
     } catch (err) {
       setCatError(err instanceof Error ? err.message : "Failed to create category.");
     } finally {
@@ -204,6 +213,24 @@ export default function RoomsClient() {
     } finally {
       setEditingPriceId(null);
       setPriceValue("");
+    }
+  }
+
+  /** Save a category's minimum booking rate. Pass null to clear the floor. */
+  async function handleUpdateMinRate(id: string, minRate: number | null) {
+    if (minRate !== null && (isNaN(minRate) || minRate < 0)) {
+      setCatError("Minimum rate cannot be negative.");
+      return;
+    }
+    try {
+      await updateRoomCategoryMinRate(id, minRate);
+      await refreshCategories();
+      setCatError("");
+    } catch (err) {
+      setCatError(err instanceof Error ? err.message : "Minimum rate update failed.");
+    } finally {
+      setEditingMinRateId(null);
+      setMinRateValue("");
     }
   }
 
@@ -763,8 +790,19 @@ export default function RoomsClient() {
                   className="w-full px-3.5 py-2 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
                     placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
                 />
+                {/* Minimum booking rate (floor) for new category — optional */}
+                <input
+                  type="number"
+                  placeholder="Minimum rate (৳) - optional"
+                  value={newCatMinRate}
+                  onChange={e => { setNewCatMinRate(e.target.value); setCatError(""); }}
+                  min="0"
+                  className="mt-2 w-full px-3.5 py-2 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
+                    placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
+                />
                 <p className="mt-1 text-[11px] text-slate-400">
-                  A stable slug is derived automatically from the name.
+                  A stable slug is derived automatically from the name. Minimum booking rate —
+                  receptionists can&apos;t book below this; admins can override. Leave blank for no minimum.
                 </p>
               </div>
 
@@ -845,6 +883,37 @@ export default function RoomsClient() {
                           title="Click to edit price"
                         >
                           ৳ {cat.price.toLocaleString()}
+                        </button>
+                      )}
+
+                      {/* Minimum booking rate — click to edit, blank clears the floor */}
+                      {editingMinRateId === cat.id ? (
+                        <input
+                          autoFocus
+                          type="number"
+                          value={minRateValue}
+                          onChange={e => setMinRateValue(e.target.value)}
+                          onBlur={() => handleUpdateMinRate(cat.id, minRateValue.trim() ? parseInt(minRateValue) : null)}
+                          onKeyDown={e => {
+                            if (e.key === "Enter") handleUpdateMinRate(cat.id, minRateValue.trim() ? parseInt(minRateValue) : null);
+                            if (e.key === "Escape") { setEditingMinRateId(null); setMinRateValue(""); }
+                          }}
+                          min="0"
+                          className="w-16 px-2 py-1 text-[12px] text-slate-800 border border-amber-400 rounded-lg
+                            focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent"
+                          placeholder="Min"
+                        />
+                      ) : (
+                        <button
+                          onClick={() => { setEditingMinRateId(cat.id); setMinRateValue(cat.minRate != null ? String(cat.minRate) : ""); setCatError(""); }}
+                          className={`px-2.5 py-1 text-[12px] font-semibold rounded-lg transition-colors ${
+                            cat.minRate != null
+                              ? "text-amber-700 hover:text-amber-800 hover:bg-amber-50"
+                              : "text-slate-300 hover:text-slate-500 hover:bg-slate-50"
+                          }`}
+                          title="Minimum booking rate — staff can't book below this (admins can override). Blank = no minimum."
+                        >
+                          {cat.minRate != null ? `min ৳ ${cat.minRate.toLocaleString()}` : "min —"}
                         </button>
                       )}
 

@@ -33,6 +33,11 @@ export type RoomCategory = {
   slug:       string;   // stable FK key: "single", "junior-suite", …
   name:       string;   // display label: "Single", "Junior Suite", …
   price:      number;   // base price per night (BDT)
+  /**
+   * Optional floor price per night (BDT). null = no floor.
+   * Staff cannot book below it; admins can override with a confirm.
+   */
+  minRate:    number | null;
   sortOrder:  number;
   isActive:   boolean;
   createdAt:  string;
@@ -44,11 +49,17 @@ type RoomCategoryRow = {
   slug:       string;
   name:       string;
   price:      number;
+  min_rate:   number | null;
   sort_order: number;
   is_active:  boolean;
   created_at: string;
   updated_at: string;
 };
+
+/** Single source of truth for the selected columns — kept in one place so a
+ *  new column can't be added to some queries and missed by others. */
+const CATEGORY_COLUMNS =
+  "id, slug, name, price, min_rate, sort_order, is_active, created_at, updated_at";
 
 function mapCategory(r: RoomCategoryRow): RoomCategory {
   return {
@@ -56,6 +67,7 @@ function mapCategory(r: RoomCategoryRow): RoomCategory {
     slug:      r.slug,
     name:      r.name,
     price:     r.price,
+    minRate:   r.min_rate ?? null,
     sortOrder: r.sort_order,
     isActive:  r.is_active,
     createdAt: r.created_at,
@@ -92,7 +104,7 @@ export async function getRoomCategories(
 ): Promise<RoomCategory[]> {
   const { data, error } = await client
     .from("room_categories")
-    .select("id, slug, name, price, sort_order, is_active, created_at, updated_at")
+    .select(CATEGORY_COLUMNS)
     .order("sort_order", { ascending: true })
     .order("name",       { ascending: true });
 
@@ -114,7 +126,11 @@ export async function getRoomCategories(
  * slug is derived from name; throws on duplicate slug or empty name.
  * sort_order is set to max(existing) + 1 so new categories appear last.
  */
-export async function createRoomCategory(name: string, price: number = 0): Promise<RoomCategory> {
+export async function createRoomCategory(
+  name: string,
+  price: number = 0,
+  minRate: number | null = null,
+): Promise<RoomCategory> {
   const trimmed = name.trim();
   if (!trimmed) throw new Error("[createRoomCategory] Name is required.");
 
@@ -122,6 +138,8 @@ export async function createRoomCategory(name: string, price: number = 0): Promi
   if (!slug) throw new Error("[createRoomCategory] Could not derive a valid slug from the name.");
 
   if (price < 0) throw new Error("[createRoomCategory] Price cannot be negative.");
+  if (minRate !== null && minRate < 0)
+    throw new Error("[createRoomCategory] Minimum rate cannot be negative.");
 
   // Get current max sort_order
   const { data: maxRow } = await supabase
@@ -135,8 +153,8 @@ export async function createRoomCategory(name: string, price: number = 0): Promi
 
   const { data, error } = await supabase
     .from("room_categories")
-    .insert({ slug, name: trimmed, price, sort_order: nextOrder })
-    .select("id, slug, name, price, sort_order, is_active, created_at, updated_at")
+    .insert({ slug, name: trimmed, price, min_rate: minRate, sort_order: nextOrder })
+    .select(CATEGORY_COLUMNS)
     .single();
 
   if (error || !data) {
@@ -160,7 +178,7 @@ export async function updateRoomCategoryName(id: string, newName: string): Promi
     .from("room_categories")
     .update({ name: trimmed })
     .eq("id", id)
-    .select("id, slug, name, price, sort_order, is_active, created_at, updated_at")
+    .select(CATEGORY_COLUMNS)
     .single();
 
   if (error || !data) {
@@ -183,13 +201,41 @@ export async function updateRoomCategoryPrice(id: string, newPrice: number): Pro
     .from("room_categories")
     .update({ price: newPrice })
     .eq("id", id)
-    .select("id, slug, name, price, sort_order, is_active, created_at, updated_at")
+    .select(CATEGORY_COLUMNS)
     .single();
 
   if (error || !data) {
     console.error("──────────── [updateRoomCategoryPrice] FAILED ────────────");
     console.error("  message:", error?.message, "| code:", error?.code);
     throw new Error(`[updateRoomCategoryPrice] ${error?.message ?? "no row returned"}`);
+  }
+
+  return mapCategory(data as RoomCategoryRow);
+}
+
+/**
+ * Update a category's minimum booking rate (floor price).
+ * Pass null to clear the floor (no minimum). Only affects new bookings —
+ * existing bookings are never re-validated.
+ */
+export async function updateRoomCategoryMinRate(
+  id: string,
+  newMinRate: number | null,
+): Promise<RoomCategory> {
+  if (newMinRate !== null && newMinRate < 0)
+    throw new Error("[updateRoomCategoryMinRate] Minimum rate cannot be negative.");
+
+  const { data, error } = await supabase
+    .from("room_categories")
+    .update({ min_rate: newMinRate })
+    .eq("id", id)
+    .select(CATEGORY_COLUMNS)
+    .single();
+
+  if (error || !data) {
+    console.error("──────────── [updateRoomCategoryMinRate] FAILED ────────────");
+    console.error("  message:", error?.message, "| code:", error?.code);
+    throw new Error(`[updateRoomCategoryMinRate] ${error?.message ?? "no row returned"}`);
   }
 
   return mapCategory(data as RoomCategoryRow);
@@ -205,7 +251,7 @@ export async function setRoomCategoryActive(id: string, isActive: boolean): Prom
     .from("room_categories")
     .update({ is_active: isActive })
     .eq("id", id)
-    .select("id, slug, name, price, sort_order, is_active, created_at, updated_at")
+    .select(CATEGORY_COLUMNS)
     .single();
 
   if (error || !data) {
