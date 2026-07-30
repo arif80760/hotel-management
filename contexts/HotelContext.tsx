@@ -78,7 +78,9 @@ type HotelContextType = {
   loading:             boolean;           // true while initial data is being fetched
   nextBookingId:       number;
   nextRoomId:          number;
-  createBooking:       (input: CreateBookingInput)                                => void;
+  /** Resolves when the booking is persisted; rejects (after rolling back the
+   *  optimistic insert) when the DB refuses it — callers must surface that. */
+  createBooking:       (input: CreateBookingInput)                                => Promise<void>;
   changeBookingStatus: (id: string, status: BookingStatus)                        => void;
   addRoom:             (room: MockRoom)                                            => void;
   updateRoom:          (id: string, updates: Partial<Omit<MockRoom, "id"|"status">>) => void;
@@ -270,7 +272,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
 
   // ── Booking actions ─────────────────────────────────────────
 
-  function createBooking(input: CreateBookingInput) {
+  function createBooking(input: CreateBookingInput): Promise<void> {
     // Capture pre-update room statuses for rollback (supports N rooms).
     const prevRoomStatuses = new Map<string, RoomStatus | undefined>(
       input.rooms.map(r => [
@@ -343,12 +345,13 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       )
     );
 
-    // 2. Persist to Supabase.
-    //    .then() — replace optimistic booking with real once service resolves.
-    //              Gives subsequent actions (checkout, edit) the real booking_rooms.id.
+    // 2. Persist to Supabase — RETURNED so the caller can await the outcome.
+    //    .then()  — replace optimistic booking with real once service resolves.
+    //               Gives subsequent actions (checkout, edit) the real booking_rooms.id.
     //    .catch() — roll back all optimistic changes on any failure (overlap race,
-    //               network error, RPC failure, etc.).
-    bookingsService.createBooking(input)
+    //               network error, RPC failure, etc.), then RETHROW so the caller
+    //               can keep the form open and show the real error message.
+    return bookingsService.createBooking(input)
       .then(realBooking => {
         setBookings(prev => prev.map(b => b.id === input.id ? realBooking : b));
       })
@@ -365,6 +368,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
             );
           }
         }
+        throw err;
       });
   }
 

@@ -869,6 +869,14 @@ export default function BookingsClient({ initialRoom }: Props) {
   const [pendingDocs,      setPendingDocs]      = useState<PendingDoc[]>([]);
   const [pendingDocError,  setPendingDocError]  = useState<string>("");
 
+  // ── Create-submit outcome ────────────────────────────────────
+  // submitting: true while createBooking's DB write is in flight — disables
+  // the Confirm button so a double-click can't fire twice.
+  // submitError: the REAL rejection message from the DB/service (overlap,
+  // RPC raise, network). Shown in a form-level banner; the form stays open.
+  const [submitting,  setSubmitting]  = useState(false);
+  const [submitError, setSubmitError] = useState<string>("");
+
   // ── Timeline modal ───────────────────────────────────────────
   // null = closed; set to a booking to show that booking's full timeline.
   const [timelineModal, setTimelineModal] = useState<Booking | null>(null);
@@ -2040,6 +2048,7 @@ export default function BookingsClient({ initialRoom }: Props) {
   // it always starts false.
   async function handleSubmit(e: React.FormEvent | null, floorConfirmed = false) {
     e?.preventDefault();
+    if (submitting) return;   // re-entry guard — Enter key bypasses the disabled button
     if (!validate()) return;
 
     // Validate pending documents — each must have both type and file, or be empty
@@ -2164,7 +2173,20 @@ export default function BookingsClient({ initialRoom }: Props) {
       status:           form.status,
     };
 
-    createBooking(newInput);
+    // Persist — AWAIT the DB outcome. On rejection the context has already
+    // rolled back its optimistic insert; we keep the form open and show the
+    // real reason (e.g. "Room 306 is unavailable … covers 2026-08-03 – 2026-08-06")
+    // instead of a phantom success.
+    setSubmitting(true);
+    setSubmitError("");
+    try {
+      await createBooking(newInput);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Booking could not be created — please try again.");
+      setSubmitting(false);
+      return;
+    }
+    setSubmitting(false);
 
     const guestSummary = cleanedExtras.length > 0
       ? ` · ${newInput.totalGuests} guests total`
@@ -2248,6 +2270,8 @@ export default function BookingsClient({ initialRoom }: Props) {
     setErrors({});
     setPendingDocs([]);
     setPendingDocError("");
+    setSubmitError("");
+    setSubmitting(false);
     setFormOpen(false);
   }
 
@@ -3837,23 +3861,35 @@ export default function BookingsClient({ initialRoom }: Props) {
               </div>
             )}
 
+            {/* Create-failure banner — DB rejected the booking; form stays open */}
+            {submitError && (
+              <div className="mx-6 mb-3 flex items-start gap-2.5 text-[12.5px] text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-4 py-3">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 flex-shrink-0 mt-0.5">
+                  <circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>
+                </svg>
+                <p className="font-medium">{submitError}</p>
+              </div>
+            )}
+
             {/* Form actions */}
             <div className="flex items-center justify-end gap-3 px-6 pb-5">
               <button
                 type="button"
                 onClick={handleCancel}
-                className="px-4 py-2.5 text-[13px] font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors"
+                disabled={submitting}
+                className="px-4 py-2.5 text-[13px] font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                className="flex items-center gap-2 px-5 py-2.5 text-[13px] font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors shadow-sm"
+                disabled={submitting}
+                className="flex items-center gap-2 px-5 py-2.5 text-[13px] font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
                   <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
                 </svg>
-                Confirm Booking
+                {submitting ? "Creating…" : "Confirm Booking"}
               </button>
             </div>
           </form>
