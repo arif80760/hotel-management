@@ -82,23 +82,43 @@ type AuthContextType = {
 async function fetchProfile(userId: string): Promise<UserProfile | null> {
   console.log("[AuthContext] fetchProfile — start, userId:", userId);
 
-  const { data, error, status, statusText } = await supabase
-    .from("profiles")
-    .select("id, full_name, role, avatar_url")
-    .eq("id", userId)
-    .single();
+  // One retry with a short backoff: a transient network/RLS blip must not
+  // brand the user role-less (→ treated as staff) for the entire session.
+  type ProfileRow = { id: string; full_name: string; role: UserRole; avatar_url: string | null };
+  let data:           ProfileRow | null = null;
+  let lastError:      { message: string; details: string | null; hint: string | null; code: string } | null = null;
+  let lastStatus:     number | undefined;
+  let lastStatusText: string | undefined;
 
-  if (error) {
-    console.error("[AuthContext] fetchProfile — FAILED");
-    console.error("  message    :", error.message);
-    console.error("  details    :", error.details);
-    console.error("  hint       :", error.hint);
-    console.error("  code       :", error.code);
-    console.error("  HTTP status:", status, statusText);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const { data: rowData, error, status, statusText } = await supabase
+      .from("profiles")
+      .select("id, full_name, role, avatar_url")
+      .eq("id", userId)
+      .single();
+
+    if (!error && rowData) {
+      data = rowData as ProfileRow;
+      break;
+    }
+    lastError = error; lastStatus = status; lastStatusText = statusText;
+    if (attempt === 1) {
+      console.warn("[AuthContext] fetchProfile — attempt 1 failed, retrying in 500ms:", error?.message);
+      await new Promise(res => setTimeout(res, 500));
+    }
+  }
+
+  if (!data) {
+    console.error("[AuthContext] fetchProfile — FAILED after retry (role stays null; user treated as non-admin)");
+    console.error("  message    :", lastError?.message);
+    console.error("  details    :", lastError?.details);
+    console.error("  hint       :", lastError?.hint);
+    console.error("  code       :", lastError?.code);
+    console.error("  HTTP status:", lastStatus, lastStatusText);
     return null;
   }
 
-  const row = data as { id: string; full_name: string; role: UserRole; avatar_url: string | null };
+  const row = data;
   const prof: UserProfile = {
     id:        row.id,
     full_name: row.full_name,
@@ -130,7 +150,16 @@ const AuthContext = createContext<AuthContextType | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user,    setUser]    = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [loading, setLoading] = useState(true); // cleared after INITIAL_SESSION
+  // ── Three-state loading model (fixes the 258aa66 redirect loop) ──
+  //   (a) auth event NOT yet delivered → loading TRUE, no exceptions.
+  //   (b) settled, no session          → loading false (legitimately signed out).
+  //   (c) settled, session exists      → loading true until profile (role) settles.
+  // authEventReceived is the explicit (a)→(b|c) marker. user === null alone
+  // CANNOT distinguish (a) from (b) — conflating them was the 258aa66 bug:
+  // Effect 2 cleared loading in its !user branch on first mount, before the
+  // session arrived, so AppShell redirected to /login and looped.
+  const [loading,           setLoading]           = useState(true);
+  const [authEventReceived, setAuthEventReceived] = useState(false);
   const [canViewActivityLog, setCanViewActivityLog] = useState(false);
 
   // ── Effect 1: Auth subscription — SYNCHRONOUS, NO await ──────
@@ -139,10 +168,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Do NOT add await, supabase.from(), or any async call here.
   // Doing so re-enters the gotrue lock and causes a deadlock.
   useEffect(() => {
-    // This flag ensures setLoading(false) fires only once even if Strict Mode
-    // causes the effect to run twice (mount → cleanup → remount).
-    let initialised = false;
-
     console.log("[AuthContext] subscribing to auth state changes");
 
     const {
@@ -161,14 +186,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setProfile(null);
       }
 
-      // Clear loading on the very first event (INITIAL_SESSION).
-      // All subsequent events (SIGNED_IN, TOKEN_REFRESHED, etc.) leave
-      // loading untouched — it is already false by then.
-      if (!initialised) {
-        initialised = true;
-        console.log("[AuthContext] setLoading(false) — INITIAL_SESSION handled");
-        setLoading(false);
-      }
+      // Mark the auth state as DELIVERED. Effect 2 owns clearing `loading`:
+      //   no session      → it clears immediately (settled signed-out), state (b)
+      //   session exists  → it clears after the profile fetch settles, state (c)
+      // Effect 1 deliberately never touches `loading` — clearing it here (or
+      // anywhere before authEventReceived) is what caused the 258aa66 loop.
+      // Idempotent under Strict Mode remounts and later SIGNED_IN/TOKEN_REFRESHED.
+      setAuthEventReceived(true);
     });
 
     return () => {
@@ -188,6 +212,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!user) {
       setProfile(null);
+      // THREE-STATE RULE — the 258aa66 fix:
+      //   state (a) auth event not yet delivered: user is null only because we
+      //     don't know the session yet. Do NOTHING — loading must stay true,
+      //     or AppShell redirects to /login before the session arrives (loop).
+      //   state (b) settled signed-out (incl. sign-out mid-fetch — the cleanup
+      //     below cancelled the stale fetch): safe to release the app.
+      if (authEventReceived) {
+        console.log("[AuthContext] settled signed-out — setLoading(false)");
+        setLoading(false);
+      }
       return;
     }
 
@@ -195,19 +229,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     console.log("[AuthContext] profile fetch triggered for user:", user.id);
 
-    fetchProfile(user.id).then(prof => {
-      if (cancelled) {
-        console.log("[AuthContext] profile fetch cancelled (component unmounted or user changed)");
-        return;
-      }
-      console.log("[AuthContext] role resolved to:", prof?.role ?? null);
-      setProfile(prof);
-    });
+    fetchProfile(user.id)
+      .then(prof => {
+        if (cancelled) {
+          console.log("[AuthContext] profile fetch cancelled (component unmounted or user changed)");
+          return;
+        }
+        console.log("[AuthContext] role resolved to:", prof?.role ?? null);
+        setProfile(prof);
+        // State (c) settled: role known (or definitively unknown after the
+        // retry — prof null, treated as non-admin, NEVER defaulted to admin).
+        setLoading(false);
+      })
+      .catch(err => {
+        // fetchProfile resolves null on query errors; this net catches only
+        // unexpected throws so the spinner can never be stranded. Reachable
+        // only in state (c) — a session exists — so clearing is legal.
+        if (cancelled) return;
+        console.error("[AuthContext] profile fetch threw unexpectedly:", err);
+        setProfile(null);
+        setLoading(false);
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [user?.id]); // only re-run when the logged-in user actually changes
+  }, [user?.id, authEventReceived]); // re-run when the user changes OR auth settles
 
   // ── Effect 3: Activity-log visibility (admins + managers) ────────────
   useEffect(() => {
