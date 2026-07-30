@@ -653,36 +653,6 @@ function resolveFloorBySlug(
   return { minRate: cat.minRate, categoryName: cat.name };
 }
 
-/** [FLOOR][TEMP DIAGNOSTIC] Verbose resolution with a discriminated reason so
- *  runtime logs show exactly WHY a floor did or didn't resolve. Remove the
- *  logging (keep the logic) once the production floor bug is diagnosed. */
-function resolveCategoryFloorVerbose(
-  roomNumber: string,
-  roomCatalog: MockRoom[],
-  cats: RoomCategory[],
-): {
-  floor:  { minRate: number; categoryName: string } | null;
-  slug:   string;
-  reason: "ok" | "empty-room-number" | "room-not-in-catalog" | "category-not-found" | "no-floor-set";
-} {
-  if (!roomNumber) return { floor: null, slug: "", reason: "empty-room-number" };
-  const info = roomCatalog.find(x => x.roomNumber === roomNumber);
-  if (!info) {
-    console.log("[FLOOR] room lookup MISS", {
-      formValue: roomNumber,
-      formType:  typeof roomNumber,
-      catalogSize: roomCatalog.length,
-      catalogSample: roomCatalog.slice(0, 3).map(r => ({ roomNumber: r.roomNumber, type: typeof r.roomNumber })),
-    });
-    return { floor: null, slug: "", reason: "room-not-in-catalog" };
-  }
-  const slug = info.category?.trim().toLowerCase() ?? "";
-  const cat  = cats.find(c => c.slug.trim().toLowerCase() === slug);
-  if (!cat)                 return { floor: null, slug, reason: "category-not-found" };
-  if (cat.minRate == null)  return { floor: null, slug, reason: "no-floor-set" };
-  return { floor: { minRate: cat.minRate, categoryName: cat.name }, slug, reason: "ok" };
-}
-
 /**
  * Resolve a room's category floor by room number (room → category slug → floor).
  * Single resolution chain shared by the submit guards AND the rate-input hints,
@@ -712,28 +682,15 @@ function findFloorViolations(
 ): FloorViolation[] {
   const out: FloorViolation[] = [];
   for (const en of entries) {
-    // [FLOOR][TEMP DIAGNOSTIC] verbose resolution so prod logs show exactly
-    // what the guard sees per room row. Same logic as resolveCategoryFloor.
-    const res = resolveCategoryFloorVerbose(en.roomNumber, roomCatalog, cats);
-    const isViolation = res.floor !== null && en.rate < res.floor.minRate;
-    console.log("[FLOOR] entry", {
-      roomNumber:           en.roomNumber,
-      roomNumberType:       typeof en.roomNumber,
-      resolvedCategorySlug: res.slug,
-      reason:               res.reason,
-      categoryFound:        res.reason === "ok" || res.reason === "no-floor-set",
-      minRate:              res.floor?.minRate ?? null,
-      enteredRate:          en.rate,
-      isViolation,
-    });
-    if (!res.floor) continue;
-    if (isViolation) {
+    const floor = resolveCategoryFloor(en.roomNumber, roomCatalog, cats);
+    if (!floor) continue;
+    if (en.rate < floor.minRate) {
       out.push({
         rowId:        en.rowId,
         roomNumber:   en.roomNumber,
-        categoryName: res.floor.categoryName,
+        categoryName: floor.categoryName,
         rate:         en.rate,
-        minRate:      res.floor.minRate,
+        minRate:      floor.minRate,
       });
     }
   }
@@ -773,11 +730,30 @@ function FloorHint({ floor, rate }: {
   );
 }
 
-/** Inline per-row message shown to a receptionist who is blocked. */
+/** Short inline message under the offending rate input. The full, actionable
+ *  summary lives in the form-level banner (floorBannerMessage) next to the
+ *  submit button — where the user actually clicked. */
 function floorErrorMessage(v: FloorViolation): string {
-  return `Room ${v.roomNumber} (${v.categoryName}) can't be booked below its minimum rate of ` +
-         `৳${v.minRate.toLocaleString()}. Enter ৳${v.minRate.toLocaleString()} or higher, ` +
-         `or ask an admin to override.`;
+  return `Below the ৳${v.minRate.toLocaleString()} minimum for ${v.categoryName}.`;
+}
+
+/** Form-level banner listing EVERY violating room, rendered near the action
+ *  buttons so the block is visible at the click point. verb: "book" | "save". */
+function floorBannerMessage(vs: FloorViolation[], verb: "book" | "save"): string {
+  const lines = vs.map(v =>
+    `Room ${v.roomNumber} rate ৳${v.rate.toLocaleString()} is below the ` +
+    `৳${v.minRate.toLocaleString()} minimum for ${v.categoryName}.`
+  ).join(" ");
+  return `Cannot ${verb}: ${lines} Raise the rate to continue, or ask an admin to override.`;
+}
+
+/** Scroll the first violating rate input into view and focus it, so a blocked
+ *  submit takes the user straight to the problem field. */
+function focusRateInput(idPrefix: string, rowId: string) {
+  const el = document.getElementById(`${idPrefix}${rowId}`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  (el as HTMLInputElement).focus({ preventScroll: true });
 }
 
 /** Confirm-dialog title for the admin warn-and-allow prompt. */
@@ -2107,9 +2083,9 @@ export default function BookingsClient({ initialRoom }: Props) {
   // it always starts false.
   async function handleSubmit(e: React.FormEvent | null, floorConfirmed = false) {
     e?.preventDefault();
-    console.log("[FLOOR] handleSubmit entered", { floorConfirmed, submitting });
-    if (submitting) { console.log("[FLOOR] aborted: already submitting"); return; }
-    if (!validate()) { console.log("[FLOOR] aborted: validate() failed"); return; }
+    if (submitting) return;   // re-entry guard — Enter key bypasses the disabled button
+    setSubmitError("");       // each attempt starts clean; blocks below set their own banner
+    if (!validate()) return;
 
     // Validate pending documents — each must have both type and file, or be empty
     const incompleteDoc = pendingDocs.find(d => (d.docType && !d.file) || (!d.docType && d.file));
@@ -2161,13 +2137,6 @@ export default function BookingsClient({ initialRoom }: Props) {
     // Staff are blocked; admins get a confirm and may proceed (warn-and-allow,
     // nothing is recorded). Every violating room is collected so the operator
     // sees all of them at once rather than fixing one per attempt.
-    // [FLOOR][TEMP DIAGNOSTIC] prove the guard is reached + what data it holds.
-    console.log("[FLOOR] create guard reached", {
-      role,
-      isAdmin,
-      categoriesCount:  categories.length,
-      categoriesSample: categories.slice(0, 8).map(c => ({ slug: c.slug, minRate: c.minRate })),
-    });
     const floorViolations = findFloorViolations(
       form.rooms.map(r => {
         const roomNo = r.room.trim();
@@ -2180,15 +2149,19 @@ export default function BookingsClient({ initialRoom }: Props) {
       categories,
     );
 
-    console.log("[FLOOR] create guard result", { role, isAdmin, violationCount: floorViolations.length });
-
     if (floorViolations.length > 0) {
       if (!isAdmin) {
+        // Inline error under each offending rate input…
         const floorErrors: NonNullable<FormErrors["rooms"]> = {};
         for (const v of floorViolations) {
           floorErrors[v.rowId] = { bookingRate: floorErrorMessage(v) };
         }
         setErrors(prev => ({ ...prev, rooms: { ...prev.rooms, ...floorErrors } }));
+        // …plus a form-level banner at the click point listing every violation,
+        // and take the user to the first offending field. The button itself is
+        // never disabled by this block — submitting was not set yet.
+        setSubmitError(floorBannerMessage(floorViolations, "book"));
+        focusRateInput("rate-input-", floorViolations[0].rowId);
         return;
       }
       if (!floorConfirmed) {
@@ -2859,16 +2832,21 @@ export default function BookingsClient({ initialRoom }: Props) {
       categories,
     );
 
-    // [FLOOR][TEMP DIAGNOSTIC]
-    console.log("[FLOOR] edit guard result", { role, isAdmin, violationCount: editFloorViolations.length });
-
     if (editFloorViolations.length > 0) {
       if (!isAdmin) {
+        // Inline error per offending row + a modal-level _form banner near the
+        // Save button (same pattern the partial-paid guard uses), and focus
+        // the first offending rate input. Save button is never disabled here.
         const floorErrors: NonNullable<EditFormErrors["rooms"]> = {};
         for (const v of editFloorViolations) {
           floorErrors[v.rowId] = { bookingRate: floorErrorMessage(v) };
         }
-        setEditErrors(prev => ({ ...prev, rooms: { ...prev.rooms, ...floorErrors } }));
+        setEditErrors(prev => ({
+          ...prev,
+          rooms: { ...prev.rooms, ...floorErrors },
+          _form: floorBannerMessage(editFloorViolations, "save"),
+        }));
+        focusRateInput("edit-rate-input-", editFloorViolations[0].rowId);
         return;
       }
       if (!floorConfirmed) {
@@ -3366,6 +3344,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                                   min={0}
                                   step="0.01"
                                   placeholder={rowInfo ? String(getCategoryPrice(rowInfo.category?.toLowerCase() ?? "", categories)) : "0.00"}
+                                  id={`rate-input-${r.id}`}
                                   value={r.bookingRate}
                                   onChange={e => updateRoom(r.id, { bookingRate: e.target.value })}
                                   onWheel={e => (e.target as HTMLInputElement).blur()}
@@ -6907,6 +6886,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                                 <input
                                   type="number"
                                   min={0}
+                                  id={`edit-rate-input-${r.id}`}
                                   value={r.bookingRate}
                                   disabled={r.locked}
                                   onChange={e => {
