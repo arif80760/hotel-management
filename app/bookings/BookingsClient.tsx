@@ -643,7 +643,12 @@ function resolveFloorBySlug(
   slug: string,
   cats: RoomCategory[],
 ): { minRate: number; categoryName: string } | null {
-  const cat = cats.find(c => c.slug === slug);
+  // Normalize BOTH sides: slugs created via the app are canonical lowercase,
+  // but rows hand-inserted through the SQL editor bypass slugifyCategory and
+  // may carry stray case/whitespace. A floor must never be missed over that.
+  const want = slug.trim().toLowerCase();
+  if (!want) return null;
+  const cat = cats.find(c => c.slug.trim().toLowerCase() === want);
   if (!cat || cat.minRate == null) return null;
   return { minRate: cat.minRate, categoryName: cat.name };
 }
@@ -767,7 +772,7 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   // ── Shared context ─────────────────────────────────────────
   const {
-    rooms, bookings, nextBookingId, categories,
+    rooms, bookings, nextBookingId, categories, refreshCategories,
     createBooking, changeBookingStatus,
     checkoutNormal, checkoutWithOverride, recordPayment,
     updateBooking,
@@ -1220,6 +1225,17 @@ export default function BookingsClient({ initialRoom }: Props) {
       setFormOpen(true);
     }
   }, [initialRoom]);
+
+  // Re-pull room categories whenever the booking form opens, so a minimum
+  // rate (or price/name change) set by an admin mid-session reaches this
+  // session without a reload — the floor guard and the MINIMUM pill both
+  // read the shared `categories`. Fire-and-forget: refreshCategories catches
+  // its own errors and keeps the cached list, so the form opens instantly
+  // and never breaks on a failed refresh. Covers BOTH open paths (New
+  // Booking button and the ?room= deep-link) since both flip formOpen.
+  useEffect(() => {
+    if (formOpen) void refreshCategories();
+  }, [formOpen, refreshCategories]);
 
   useEffect(() => {
     if (!successMsg) return;
