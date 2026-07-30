@@ -82,19 +82,39 @@ type AuthContextType = {
 async function fetchProfile(userId: string): Promise<UserProfile | null> {
   console.log("[AuthContext] fetchProfile — start, userId:", userId);
 
-  const { data, error, status, statusText } = await supabase
-    .from("profiles")
-    .select("id, full_name, role, avatar_url")
-    .eq("id", userId)
-    .single();
+  // One retry with a short backoff: a transient network/RLS blip must not
+  // brand the user role-less (→ treated as staff) for the entire session.
+  type ProfileRow = { id: string; full_name: string; role: UserRole; avatar_url: string | null };
+  let data:       ProfileRow | null = null;
+  let lastError:  { message: string; details: string | null; hint: string | null; code: string } | null = null;
+  let lastStatus: number | undefined;
+  let lastStatusText: string | undefined;
 
-  if (error) {
-    console.error("[AuthContext] fetchProfile — FAILED");
-    console.error("  message    :", error.message);
-    console.error("  details    :", error.details);
-    console.error("  hint       :", error.hint);
-    console.error("  code       :", error.code);
-    console.error("  HTTP status:", status, statusText);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const { data: row, error, status, statusText } = await supabase
+      .from("profiles")
+      .select("id, full_name, role, avatar_url")
+      .eq("id", userId)
+      .single();
+
+    if (!error && row) {
+      data = row as ProfileRow;
+      break;
+    }
+    lastError = error; lastStatus = status; lastStatusText = statusText;
+    if (attempt === 1) {
+      console.warn("[AuthContext] fetchProfile — attempt 1 failed, retrying in 500ms:", error?.message);
+      await new Promise(res => setTimeout(res, 500));
+    }
+  }
+
+  if (!data) {
+    console.error("[AuthContext] fetchProfile — FAILED after retry (role stays null; user treated as non-admin)");
+    console.error("  message    :", lastError?.message);
+    console.error("  details    :", lastError?.details);
+    console.error("  hint       :", lastError?.hint);
+    console.error("  code       :", lastError?.code);
+    console.error("  HTTP status:", lastStatus, lastStatusText);
     return null;
   }
 
@@ -161,13 +181,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setProfile(null);
       }
 
-      // Clear loading on the very first event (INITIAL_SESSION).
-      // All subsequent events (SIGNED_IN, TOKEN_REFRESHED, etc.) leave
-      // loading untouched — it is already false by then.
+      // Loading semantics (first event only — INITIAL_SESSION):
+      //   no session   → settled state, clear loading immediately.
+      //   session found → loading STAYS TRUE; Effect 2 clears it once the
+      //                   profile (and therefore `role`) has resolved. This
+      //                   closes the window where the app was interactive
+      //                   with role === null and admins were treated as staff.
+      // Subsequent events (SIGNED_IN, TOKEN_REFRESHED, …) leave loading alone.
       if (!initialised) {
         initialised = true;
-        console.log("[AuthContext] setLoading(false) — INITIAL_SESSION handled");
-        setLoading(false);
+        if (!session?.user) {
+          console.log("[AuthContext] setLoading(false) — no session (settled)");
+          setLoading(false);
+        } else {
+          console.log("[AuthContext] session found — holding loading until profile resolves");
+        }
       }
     });
 
@@ -188,6 +216,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!user) {
       setProfile(null);
+      // Signed out (possibly mid-fetch): unauthenticated is a settled state —
+      // never leave the app stuck on the loading spinner.
+      setLoading(false);
       return;
     }
 
@@ -195,14 +226,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     console.log("[AuthContext] profile fetch triggered for user:", user.id);
 
-    fetchProfile(user.id).then(prof => {
-      if (cancelled) {
-        console.log("[AuthContext] profile fetch cancelled (component unmounted or user changed)");
-        return;
-      }
-      console.log("[AuthContext] role resolved to:", prof?.role ?? null);
-      setProfile(prof);
-    });
+    fetchProfile(user.id)
+      .then(prof => {
+        if (cancelled) {
+          console.log("[AuthContext] profile fetch cancelled (component unmounted or user changed)");
+          return;
+        }
+        console.log("[AuthContext] role resolved to:", prof?.role ?? null);
+        setProfile(prof);
+        setLoading(false);   // role (or a definitive failure) is now known — app may render
+      })
+      .catch(err => {
+        // fetchProfile handles its own errors and resolves null; this is a
+        // last-resort net so an unexpected throw can never strand the spinner.
+        if (cancelled) return;
+        console.error("[AuthContext] profile fetch threw unexpectedly:", err);
+        setProfile(null);
+        setLoading(false);
+      });
 
     return () => {
       cancelled = true;

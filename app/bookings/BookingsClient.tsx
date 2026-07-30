@@ -725,7 +725,9 @@ function FloorHint({ floor, rate }: {
   );
 }
 
-/** Inline per-row message shown to a receptionist who is blocked. */
+/** Inline per-row message for a KNOWN-staff block ("ask an admin" is only
+ *  correct advice when the user is definitely staff). Callers must use the
+ *  permissions-loading message instead when role is null/indeterminate. */
 function floorErrorMessage(v: FloorViolation): string {
   return `Room ${v.roomNumber} (${v.categoryName}) can't be booked below its minimum rate of ` +
          `৳${v.minRate.toLocaleString()}. Enter ৳${v.minRate.toLocaleString()} or higher, ` +
@@ -2115,9 +2117,17 @@ export default function BookingsClient({ initialRoom }: Props) {
 
     if (floorViolations.length > 0) {
       if (!isAdmin) {
+        // Three-way: role "staff" → real block with the ask-an-admin message.
+        // role null/undefined → INDETERMINATE (profile not resolved / fetch
+        // failed): block too — never silently allow on unknown role — but say
+        // so, instead of telling a possible admin to ask an admin.
         const floorErrors: NonNullable<FormErrors["rooms"]> = {};
         for (const v of floorViolations) {
-          floorErrors[v.rowId] = { bookingRate: floorErrorMessage(v) };
+          floorErrors[v.rowId] = {
+            bookingRate: role === "staff"
+              ? floorErrorMessage(v)
+              : "Your permissions are still loading — please try again in a moment.",
+          };
         }
         setErrors(prev => ({ ...prev, rooms: { ...prev.rooms, ...floorErrors } }));
         return;
@@ -2792,9 +2802,15 @@ export default function BookingsClient({ initialRoom }: Props) {
 
     if (editFloorViolations.length > 0) {
       if (!isAdmin) {
+        // Same three-way rule as the create guard: staff → real block;
+        // unknown role → indeterminate block (never silently allow).
         const floorErrors: NonNullable<EditFormErrors["rooms"]> = {};
         for (const v of editFloorViolations) {
-          floorErrors[v.rowId] = { bookingRate: floorErrorMessage(v) };
+          floorErrors[v.rowId] = {
+            bookingRate: role === "staff"
+              ? floorErrorMessage(v)
+              : "Your permissions are still loading — please try again in a moment.",
+          };
         }
         setEditErrors(prev => ({ ...prev, rooms: { ...prev.rooms, ...floorErrors } }));
         return;
