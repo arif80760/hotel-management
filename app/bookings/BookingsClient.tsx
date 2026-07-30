@@ -653,11 +653,41 @@ function resolveFloorBySlug(
   return { minRate: cat.minRate, categoryName: cat.name };
 }
 
+/** [FLOOR][TEMP DIAGNOSTIC] Verbose resolution with a discriminated reason so
+ *  runtime logs show exactly WHY a floor did or didn't resolve. Remove the
+ *  logging (keep the logic) once the production floor bug is diagnosed. */
+function resolveCategoryFloorVerbose(
+  roomNumber: string,
+  roomCatalog: MockRoom[],
+  cats: RoomCategory[],
+): {
+  floor:  { minRate: number; categoryName: string } | null;
+  slug:   string;
+  reason: "ok" | "empty-room-number" | "room-not-in-catalog" | "category-not-found" | "no-floor-set";
+} {
+  if (!roomNumber) return { floor: null, slug: "", reason: "empty-room-number" };
+  const info = roomCatalog.find(x => x.roomNumber === roomNumber);
+  if (!info) {
+    console.log("[FLOOR] room lookup MISS", {
+      formValue: roomNumber,
+      formType:  typeof roomNumber,
+      catalogSize: roomCatalog.length,
+      catalogSample: roomCatalog.slice(0, 3).map(r => ({ roomNumber: r.roomNumber, type: typeof r.roomNumber })),
+    });
+    return { floor: null, slug: "", reason: "room-not-in-catalog" };
+  }
+  const slug = info.category?.trim().toLowerCase() ?? "";
+  const cat  = cats.find(c => c.slug.trim().toLowerCase() === slug);
+  if (!cat)                 return { floor: null, slug, reason: "category-not-found" };
+  if (cat.minRate == null)  return { floor: null, slug, reason: "no-floor-set" };
+  return { floor: { minRate: cat.minRate, categoryName: cat.name }, slug, reason: "ok" };
+}
+
 /**
  * Resolve a room's category floor by room number (room → category slug → floor).
  * Single resolution chain shared by the submit guards AND the rate-input hints,
  * so display and enforcement can't drift. null when the room is unknown or its
- * category has no floor.
+ * category has no floor. (Quiet wrapper — render-path hints must not log.)
  */
 function resolveCategoryFloor(
   roomNumber: string,
@@ -682,15 +712,28 @@ function findFloorViolations(
 ): FloorViolation[] {
   const out: FloorViolation[] = [];
   for (const en of entries) {
-    const floor = resolveCategoryFloor(en.roomNumber, roomCatalog, cats);
-    if (!floor) continue;
-    if (en.rate < floor.minRate) {
+    // [FLOOR][TEMP DIAGNOSTIC] verbose resolution so prod logs show exactly
+    // what the guard sees per room row. Same logic as resolveCategoryFloor.
+    const res = resolveCategoryFloorVerbose(en.roomNumber, roomCatalog, cats);
+    const isViolation = res.floor !== null && en.rate < res.floor.minRate;
+    console.log("[FLOOR] entry", {
+      roomNumber:           en.roomNumber,
+      roomNumberType:       typeof en.roomNumber,
+      resolvedCategorySlug: res.slug,
+      reason:               res.reason,
+      categoryFound:        res.reason === "ok" || res.reason === "no-floor-set",
+      minRate:              res.floor?.minRate ?? null,
+      enteredRate:          en.rate,
+      isViolation,
+    });
+    if (!res.floor) continue;
+    if (isViolation) {
       out.push({
         rowId:        en.rowId,
         roomNumber:   en.roomNumber,
-        categoryName: floor.categoryName,
+        categoryName: res.floor.categoryName,
         rate:         en.rate,
-        minRate:      floor.minRate,
+        minRate:      res.floor.minRate,
       });
     }
   }
@@ -2064,8 +2107,9 @@ export default function BookingsClient({ initialRoom }: Props) {
   // it always starts false.
   async function handleSubmit(e: React.FormEvent | null, floorConfirmed = false) {
     e?.preventDefault();
-    if (submitting) return;   // re-entry guard — Enter key bypasses the disabled button
-    if (!validate()) return;
+    console.log("[FLOOR] handleSubmit entered", { floorConfirmed, submitting });
+    if (submitting) { console.log("[FLOOR] aborted: already submitting"); return; }
+    if (!validate()) { console.log("[FLOOR] aborted: validate() failed"); return; }
 
     // Validate pending documents — each must have both type and file, or be empty
     const incompleteDoc = pendingDocs.find(d => (d.docType && !d.file) || (!d.docType && d.file));
@@ -2117,6 +2161,13 @@ export default function BookingsClient({ initialRoom }: Props) {
     // Staff are blocked; admins get a confirm and may proceed (warn-and-allow,
     // nothing is recorded). Every violating room is collected so the operator
     // sees all of them at once rather than fixing one per attempt.
+    // [FLOOR][TEMP DIAGNOSTIC] prove the guard is reached + what data it holds.
+    console.log("[FLOOR] create guard reached", {
+      role,
+      isAdmin,
+      categoriesCount:  categories.length,
+      categoriesSample: categories.slice(0, 8).map(c => ({ slug: c.slug, minRate: c.minRate })),
+    });
     const floorViolations = findFloorViolations(
       form.rooms.map(r => {
         const roomNo = r.room.trim();
@@ -2128,6 +2179,8 @@ export default function BookingsClient({ initialRoom }: Props) {
       rooms,
       categories,
     );
+
+    console.log("[FLOOR] create guard result", { role, isAdmin, violationCount: floorViolations.length });
 
     if (floorViolations.length > 0) {
       if (!isAdmin) {
@@ -2805,6 +2858,9 @@ export default function BookingsClient({ initialRoom }: Props) {
       rooms,
       categories,
     );
+
+    // [FLOOR][TEMP DIAGNOSTIC]
+    console.log("[FLOOR] edit guard result", { role, isAdmin, violationCount: editFloorViolations.length });
 
     if (editFloorViolations.length > 0) {
       if (!isAdmin) {
