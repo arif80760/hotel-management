@@ -636,11 +636,39 @@ type FloorViolation = {
 };
 
 /**
+ * Resolve a category's floor by slug. null when the category is unknown or has
+ * no minimum set (minRate === null means "no floor", the default).
+ */
+function resolveFloorBySlug(
+  slug: string,
+  cats: RoomCategory[],
+): { minRate: number; categoryName: string } | null {
+  const cat = cats.find(c => c.slug === slug);
+  if (!cat || cat.minRate == null) return null;
+  return { minRate: cat.minRate, categoryName: cat.name };
+}
+
+/**
+ * Resolve a room's category floor by room number (room → category slug → floor).
+ * Single resolution chain shared by the submit guards AND the rate-input hints,
+ * so display and enforcement can't drift. null when the room is unknown or its
+ * category has no floor.
+ */
+function resolveCategoryFloor(
+  roomNumber: string,
+  roomCatalog: MockRoom[],
+  cats: RoomCategory[],
+): { minRate: number; categoryName: string } | null {
+  if (!roomNumber) return null;
+  const info = roomCatalog.find(x => x.roomNumber === roomNumber);
+  return resolveFloorBySlug(info?.category?.toLowerCase() ?? "", cats);
+}
+
+/**
  * Shared floor rule used by BOTH the create and the edit path so the two can't
  * drift. Each caller resolves its own rate first — using whatever fallback its
  * own save payload uses — so the check always matches what will be written.
- * Rows with an unknown room, or whose category has no minRate, are skipped
- * (minRate === null means "no floor", the default for every category).
+ * Rows with an unknown room, or whose category has no minRate, are skipped.
  */
 function findFloorViolations(
   entries: { rowId: string; roomNumber: string; rate: number }[],
@@ -649,22 +677,38 @@ function findFloorViolations(
 ): FloorViolation[] {
   const out: FloorViolation[] = [];
   for (const en of entries) {
-    if (!en.roomNumber) continue;
-    const info = roomCatalog.find(x => x.roomNumber === en.roomNumber);
-    const slug = info?.category?.toLowerCase() ?? "";
-    const cat  = cats.find(c => c.slug === slug);
-    if (!cat || cat.minRate == null) continue;
-    if (en.rate < cat.minRate) {
+    const floor = resolveCategoryFloor(en.roomNumber, roomCatalog, cats);
+    if (!floor) continue;
+    if (en.rate < floor.minRate) {
       out.push({
         rowId:        en.rowId,
         roomNumber:   en.roomNumber,
-        categoryName: cat.name,
+        categoryName: floor.categoryName,
         rate:         en.rate,
-        minRate:      cat.minRate,
+        minRate:      floor.minRate,
       });
     }
   }
   return out;
+}
+
+/**
+ * Small hint rendered under a rate input when the room's category has a floor.
+ * Muted "Minimum ৳X" normally; amber "Below minimum ৳X" once the effective
+ * rate drops under it — purely informational, the submit guard is the
+ * enforcement point. Renders nothing when there is no floor.
+ */
+function FloorHint({ floor, rate }: {
+  floor: { minRate: number; categoryName: string } | null;
+  rate:  number;
+}) {
+  if (!floor) return null;
+  const below = !isNaN(rate) && rate < floor.minRate;
+  return (
+    <p className={`mt-1 text-[11px] ${below ? "text-amber-600 font-semibold" : "text-slate-400"}`}>
+      {below ? `Below minimum ৳${floor.minRate.toLocaleString()}` : `Minimum ৳${floor.minRate.toLocaleString()}`}
+    </p>
+  );
 }
 
 /** Inline per-row message shown to a receptionist who is blocked. */
@@ -3224,6 +3268,8 @@ export default function BookingsClient({ initialRoom }: Props) {
                               {r.fixedRate && r.fixedRate !== r.bookingRate && (
                                 <p className="mt-1 text-[11px] text-slate-400">Published: ৳{r.fixedRate}</p>
                               )}
+                              {/* bookingNum mirrors the submit guard's rate fallback exactly */}
+                              <FloorHint floor={resolveCategoryFloor(r.room.trim(), rooms, categories)} rate={bookingNum} />
                               {rowErr?.bookingRate && <p className="mt-1 text-[11.5px] text-rose-600">{rowErr.bookingRate}</p>}
                             </div>
                           </div>
@@ -6757,6 +6803,10 @@ export default function BookingsClient({ initialRoom }: Props) {
                                   placeholder="0"
                                 />
                               </div>
+                              {/* parseFloat(r.bookingRate) mirrors the edit guard's rate expression; locked rows are never submitted */}
+                              {!r.locked && (
+                                <FloorHint floor={resolveCategoryFloor(r.room.trim(), rooms, categories)} rate={parseFloat(r.bookingRate)} />
+                              )}
                               {rowErr?.bookingRate && <p className="mt-0.5 text-[11px] text-red-500">{rowErr.bookingRate}</p>}
                             </div>
                             <div>
@@ -7531,6 +7581,9 @@ export default function BookingsClient({ initialRoom }: Props) {
                                   />
                                 </div>
                               </div>
+
+                              {/* Category floor hint — the block rate feeds every row of this category */}
+                              <FloorHint floor={resolveFloorBySlug(cat.toLowerCase(), categories)} rate={parseFloat(sec.bookingRate)} />
 
                               {/* Published hint + discount banner — parity with the single-room card */}
                               {(() => {
