@@ -693,10 +693,11 @@ function findFloorViolations(
 }
 
 /**
- * Small hint rendered under a rate input when the room's category has a floor.
- * Muted "Minimum ৳X" normally; amber "Below minimum ৳X" once the effective
- * rate drops under it — purely informational, the submit guard is the
- * enforcement point. Renders nothing when there is no floor.
+ * Pill badge rendered under a rate input when the room's category has a floor.
+ * Always visible: amber "MINIMUM ৳X" while compliant, escalating to a red
+ * "BELOW MINIMUM ৳X" once the effective rate drops under the floor — purely
+ * informational, the submit guard is the enforcement point. Renders nothing
+ * when there is no floor, so unfloored categories look exactly as before.
  */
 function FloorHint({ floor, rate }: {
   floor: { minRate: number; categoryName: string } | null;
@@ -705,9 +706,22 @@ function FloorHint({ floor, rate }: {
   if (!floor) return null;
   const below = !isNaN(rate) && rate < floor.minRate;
   return (
-    <p className={`mt-1 text-[11px] ${below ? "text-amber-600 font-semibold" : "text-slate-400"}`}>
+    <span
+      style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+      className={`mt-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-bold uppercase tracking-wide ${
+        below
+          ? "text-rose-700 bg-rose-50 border border-rose-400"
+          : "text-amber-800 bg-amber-50 border border-amber-300"
+      }`}
+    >
+      {/* warning triangle — currentColor so it follows the amber/red text */}
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 flex-shrink-0">
+        <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+        <line x1="12" y1="9" x2="12" y2="13"/>
+        <line x1="12" y1="17" x2="12.01" y2="17"/>
+      </svg>
       {below ? `Below minimum ৳${floor.minRate.toLocaleString()}` : `Minimum ৳${floor.minRate.toLocaleString()}`}
-    </p>
+    </span>
   );
 }
 
