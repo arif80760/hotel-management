@@ -29,10 +29,7 @@ import {
   type Employee,
 } from "@/services/employeesService";
 
-import {
-  getExpenseCategories,
-  createExpenseCategory,
-} from "@/services/expenseCategoriesService";
+import { getExpenseCategoryBySystemKey } from "@/services/expenseCategoriesService";
 import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 // ── Payment kinds ──────────────────────────────────────────
@@ -153,11 +150,11 @@ export default function PayrollClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Resolve the "Salary" category id from the session cache ──
-  // Reacts when the reference cache finishes loading. The write flow
-  // (resolveSalaryCategoryId) still creates/refetches it on demand.
+  // ── Resolve the Salary category id from the session cache ──
+  // By system_key ONLY — display names are user-renameable and must never be
+  // matched. Inactive categories still resolve (history keeps its category).
   useEffect(() => {
-    const salaryCat = expenseCategories.find((c) => c.name.trim().toLowerCase() === "salary") ?? null;
+    const salaryCat = expenseCategories.find((c) => c.systemKey === "salary") ?? null;
     setSalaryCategoryId(salaryCat ? salaryCat.id : null);
   }, [expenseCategories]);
 
@@ -240,22 +237,20 @@ export default function PayrollClient() {
   // ── Resolve the Salary category id (find-or-create) ────────
   async function resolveSalaryCategoryId(): Promise<string> {
     if (salaryCategoryId) return salaryCategoryId;
-    const cats = await getExpenseCategories();
-    const found = cats.find((c) => c.name.trim().toLowerCase() === "salary");
-    if (found) { setSalaryCategoryId(found.id); return found.id; }
-    try {
-      const created = await createExpenseCategory("Salary");
-      setSalaryCategoryId(created.id);
-      return created.id;
-    } catch {
-      // Another writer may have created it concurrently — re-fetch.
-      const again = (await getExpenseCategories()).find(
-        (c) => c.name.trim().toLowerCase() === "salary",
+    // system_key lookup ONLY (regardless of is_active). NO auto-create:
+    // expense_categories.name is UNIQUE, so a blind insert on a miss would
+    // either throw a raw constraint violation or mint a duplicate salary
+    // category that orphans payroll history. A miss is a data problem the
+    // user must hear about, not silently paper over.
+    const cat = await getExpenseCategoryBySystemKey("salary");
+    if (!cat) {
+      throw new Error(
+        "The Salary category is missing — no expense category carries the " +
+        "system key 'salary'. Ask an admin to restore it before recording payments.",
       );
-      if (!again) throw new Error("Could not resolve the Salary category.");
-      setSalaryCategoryId(again.id);
-      return again.id;
     }
+    setSalaryCategoryId(cat.id);
+    return cat.id;
   }
 
   // ── Record a payment ───────────────────────────────────────

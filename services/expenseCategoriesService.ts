@@ -37,6 +37,12 @@ export type ExpenseCategory = {
   id:         string;
   name:       string;
   kind:       "operating" | "remuneration";
+  /**
+   * Stable machine identifier for system-relied categories ('salary',
+   * 'remuneration'); null for ordinary categories. Display names are freely
+   * user-renameable — NO code may resolve a category by name; use this key.
+   */
+  systemKey:  string | null;
   isActive:   boolean;
   createdAt:  string;
   createdBy:  string | null;
@@ -47,17 +53,23 @@ type ExpenseCategoryRow = {
   id:         string;
   name:       string;
   kind:       string | null;
+  system_key: string | null;
   is_active:  boolean;
   created_at: string;
   created_by: string | null;
   updated_at: string;
 };
 
+/** Single source of truth for the selected columns — one place to extend. */
+const CATEGORY_COLUMNS =
+  "id, name, kind, system_key, is_active, created_at, created_by, updated_at";
+
 function mapCategory(r: ExpenseCategoryRow): ExpenseCategory {
   return {
     id:        r.id,
     name:      r.name,
     kind:      (r.kind as "operating" | "remuneration") ?? "operating",
+    systemKey: r.system_key ?? null,
     isActive:  r.is_active,
     createdAt: r.created_at,
     createdBy: r.created_by,
@@ -76,7 +88,7 @@ function mapCategory(r: ExpenseCategoryRow): ExpenseCategory {
 export async function getExpenseCategories(): Promise<ExpenseCategory[]> {
   const { data, error } = await supabase
     .from("expense_categories")
-    .select("id, name, kind, is_active, created_at, created_by, updated_at")
+    .select(CATEGORY_COLUMNS)
     .order("is_active", { ascending: false })
     .order("name",       { ascending: true });
 
@@ -115,7 +127,7 @@ export async function createExpenseCategory(
   const { data, error } = await supabase
     .from("expense_categories")
     .insert({ name: trimmed, kind, created_by: createdBy })
-    .select("id, name, kind, is_active, created_at, created_by, updated_at")
+    .select(CATEGORY_COLUMNS)
     .single();
 
   if (error || !data) {
@@ -139,7 +151,7 @@ export async function updateExpenseCategoryName(id: string, newName: string): Pr
     .from("expense_categories")
     .update({ name: trimmed })
     .eq("id", id)
-    .select("id, name, kind, is_active, created_at, created_by, updated_at")
+    .select(CATEGORY_COLUMNS)
     .single();
 
   if (error || !data) {
@@ -161,7 +173,7 @@ export async function setExpenseCategoryActive(id: string, isActive: boolean): P
     .from("expense_categories")
     .update({ is_active: isActive })
     .eq("id", id)
-    .select("id, name, kind, is_active, created_at, created_by, updated_at")
+    .select(CATEGORY_COLUMNS)
     .single();
 
   if (error || !data) {
@@ -186,7 +198,7 @@ export async function updateExpenseCategoryKind(
     .from("expense_categories")
     .update({ kind })
     .eq("id", id)
-    .select("id, name, kind, is_active, created_at, created_by, updated_at")
+    .select(CATEGORY_COLUMNS)
     .single();
 
   if (error || !data) {
@@ -199,16 +211,39 @@ export async function updateExpenseCategoryKind(
 }
 
 /**
- * Resolve the category id used for director remuneration. Modeled on payroll's
- * salary-category resolution: prefer an existing kind='remuneration' category
- * (preferring one literally named "Remuneration"); if none exists, create one
- * named "Remuneration" with kind='remuneration'.
+ * Look a category up by its stable system_key ('salary', 'remuneration'),
+ * REGARDLESS of is_active — a deactivated system category must still resolve
+ * so history and writes keep pointing at the right row. Returns null when no
+ * category carries the key. Never matches by name (names are user-renameable).
+ */
+export async function getExpenseCategoryBySystemKey(
+  systemKey: string,
+): Promise<ExpenseCategory | null> {
+  const { data, error } = await supabase
+    .from("expense_categories")
+    .select(CATEGORY_COLUMNS)
+    .eq("system_key", systemKey)
+    .maybeSingle();
+
+  if (error) {
+    console.error("──────────── [getExpenseCategoryBySystemKey] FAILED ────────────");
+    console.error("  message:", error.message, "| code:", error.code);
+    throw new Error(`[getExpenseCategoryBySystemKey] ${error.message}`);
+  }
+
+  return data ? mapCategory(data as ExpenseCategoryRow) : null;
+}
+
+/**
+ * Resolve the category id used for director remuneration.
+ * Order: system_key = 'remuneration' (regardless of is_active) →
+ * any kind='remuneration' category → create one as a last resort.
+ * Name matching removed (names are user-renameable).
  */
 export async function resolveRemunerationCategoryId(): Promise<string> {
-  const cats = await getExpenseCategories();
-  const remun = cats.filter(c => c.kind === "remuneration");
-  const byName = remun.find(c => c.name.trim().toLowerCase() === "remuneration");
-  if (byName) return byName.id;
+  const byKey = await getExpenseCategoryBySystemKey("remuneration");
+  if (byKey) return byKey.id;
+  const remun = (await getExpenseCategories()).filter(c => c.kind === "remuneration");
   if (remun.length > 0) return remun[0].id;
   const created = await createExpenseCategory("Remuneration", "remuneration");
   return created.id;
