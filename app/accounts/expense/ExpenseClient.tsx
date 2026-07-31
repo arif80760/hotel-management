@@ -86,6 +86,11 @@ function inputCls(hasError = false): string {
 
 // ── Date helpers ───────────────────────────────────────────
 
+// pad/isoDate copied from ProfitLossClient — SAME plain-local date semantics
+// as the Revenue Report and P&L (no new date maths).
+function pad(n: number): string { return String(n).padStart(2, "0"); }
+function isoDate(y: number, m: number, d: number): string { return `${y}-${pad(m)}-${pad(d)}`; }
+
 function todayISO(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -145,6 +150,14 @@ export default function ExpenseClient() {
   // ── Filter state ───────────────────────────────────────────
   const [filterFromDate, setFilterFromDate] = useState<string>(todayISO());
   const [filterToDate,   setFilterToDate]   = useState<string>(todayISO());
+
+  // ── Period selector + search (STEP 4) ──────────────────────
+  const [periodMode,  setPeriodMode]  = useState<"daily" | "monthly" | "yearly" | "custom">("daily");
+  const [periodDay,   setPeriodDay]   = useState<string>(todayISO());
+  const [periodMonth, setPeriodMonth] = useState<string>(todayISO().slice(0, 7));  // "YYYY-MM"
+  const [periodYear,  setPeriodYear]  = useState<string>(todayISO().slice(0, 4));  // "YYYY"
+  const [searchTerm,      setSearchTerm]      = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
 
   // ── Manage Categories modal (Phase 4B, unchanged) ──────────
   const [categoryModalOpen, setCategoryModalOpen] = useState(false);
@@ -298,6 +311,36 @@ export default function ExpenseClient() {
     })();
     return () => { cancelled = true; };
   }, [filterFromDate, filterToDate, fetching]);
+
+  // Debounce the search box (same pattern as the Activity Log).
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchTerm), 300);
+    return () => clearTimeout(t);
+  }, [searchTerm]);
+
+  // Period → from/to. Daily = one day; Monthly = 1st..last day of the month
+  // (new Date(y, m, 0) — the P&L last_month pattern); Yearly = Jan 1..Dec 31;
+  // Custom leaves the two date inputs directly editable. The existing
+  // [filterFromDate, filterToDate] refetch effect then loads the period, so
+  // the drill-down list always contains every expense inside it.
+  useEffect(() => {
+    if (periodMode === "custom") return;
+    if (periodMode === "daily") {
+      if (!periodDay) return;
+      setFilterFromDate(periodDay);
+      setFilterToDate(periodDay);
+    } else if (periodMode === "monthly") {
+      const [y, m] = periodMonth.split("-").map(Number);
+      if (!y || !m) return;
+      setFilterFromDate(isoDate(y, m, 1));
+      setFilterToDate(isoDate(y, m, new Date(y, m, 0).getDate()));
+    } else {
+      const y = parseInt(periodYear, 10);
+      if (!y || y < 2000 || y > 2100) return;
+      setFilterFromDate(isoDate(y, 1, 1));
+      setFilterToDate(isoDate(y, 12, 31));
+    }
+  }, [periodMode, periodDay, periodMonth, periodYear]);
 
   // ── Auto-clear success banner ──────────────────────────────
   useEffect(() => {
@@ -813,7 +856,20 @@ export default function ExpenseClient() {
   }
   const visibleExpenses = expenses.filter(e => {
     const k = kindById.get(e.categoryId) ?? "operating";
-    return view === "remuneration" ? k === "remuneration" : k === "operating";
+    if (view === "remuneration" ? k !== "remuneration" : k !== "operating") return false;
+    // Search across item name, note, payee/employee name, and category name.
+    const q = debouncedSearch.trim().toLowerCase();
+    if (!q) return true;
+    const itemName = e.expenseItemId ? (expenseItems.find((i) => i.id === e.expenseItemId)?.name ?? "") : "";
+    const empName  = e.employeeId   ? (employees.find((x) => x.id === e.employeeId)?.fullName ?? "") : "";
+    const catName  = categoryById.get(e.categoryId)?.name ?? "";
+    return (
+      itemName.toLowerCase().includes(q) ||
+      (e.note ?? "").toLowerCase().includes(q) ||
+      (e.payee ?? "").toLowerCase().includes(q) ||
+      empName.toLowerCase().includes(q) ||
+      catName.toLowerCase().includes(q)
+    );
   });
   const groups = groupByDate(visibleExpenses);
 
@@ -919,33 +975,98 @@ export default function ExpenseClient() {
         ))}
       </div>
 
-      {/* ── Date filter ─────────────────────────────────────── */}
-      <div className="flex items-center gap-3 bg-white border border-slate-200 rounded-xl px-4 py-3">
-        <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">From</span>
+      {/* ── Period + search filter ──────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-3 bg-white border border-slate-200 rounded-xl px-4 py-3">
+        <div className="inline-flex rounded-lg bg-slate-100 p-0.5">
+          {(["daily", "monthly", "yearly", "custom"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setPeriodMode(m)}
+              className={`px-3 py-1.5 rounded-md text-[12.5px] font-semibold capitalize transition-colors ${
+                periodMode === m ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+        {periodMode === "daily" && (
+          <input
+            type="date"
+            value={periodDay}
+            onChange={(e) => setPeriodDay(e.target.value)}
+            className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-400"
+          />
+        )}
+        {periodMode === "monthly" && (
+          <input
+            type="month"
+            value={periodMonth}
+            onChange={(e) => setPeriodMonth(e.target.value)}
+            className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-400"
+          />
+        )}
+        {periodMode === "yearly" && (
+          <input
+            type="number"
+            min={2000}
+            max={2100}
+            value={periodYear}
+            onChange={(e) => setPeriodYear(e.target.value)}
+            className="w-24 px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-400"
+          />
+        )}
+        {periodMode === "custom" && (
+          <>
+            <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">From</span>
+            <input
+              type="date"
+              value={filterFromDate}
+              max={filterToDate}
+              onChange={(e) => setFilterFromDate(e.target.value)}
+              className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-400"
+            />
+            <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">To</span>
+            <input
+              type="date"
+              value={filterToDate}
+              min={filterFromDate}
+              onChange={(e) => setFilterToDate(e.target.value)}
+              className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-400"
+            />
+            <button
+              type="button"
+              onClick={() => { const t = todayISO(); setFilterFromDate(t); setFilterToDate(t); }}
+              className="px-3 py-1.5 text-[12.5px] text-slate-600 hover:bg-slate-100 rounded-md font-medium transition-colors"
+            >
+              Today
+            </button>
+          </>
+        )}
         <input
-          type="date"
-          value={filterFromDate}
-          max={filterToDate}
-          onChange={(e) => setFilterFromDate(e.target.value)}
-          className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-400"
+          type="search"
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          placeholder="Search item, note, payee, category…"
+          className="ml-auto w-64 px-3 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400"
         />
-        <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">To</span>
-        <input
-          type="date"
-          value={filterToDate}
-          min={filterFromDate}
-          onChange={(e) => setFilterToDate(e.target.value)}
-          className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-400"
-        />
-        <button
-          type="button"
-          onClick={() => { const t = todayISO(); setFilterFromDate(t); setFilterToDate(t); }}
-          className="ml-2 px-3 py-1.5 text-[12.5px] text-slate-600 hover:bg-slate-100 rounded-md font-medium transition-colors"
-        >
-          Today
-        </button>
-        <div className="ml-auto text-[12.5px] text-slate-500">
-          {expenses.length} {expenses.length === 1 ? "expense" : "expenses"}
+      </div>
+
+      {/* ── Period summary — total of everything listed below ── */}
+      <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-4 py-3">
+        <div className="text-[12.5px] text-slate-500">
+          <span className="font-semibold text-slate-700">
+            {view === "remuneration" ? "Remuneration" : "Operating expenses"}
+          </span>
+          {" · "}
+          {filterFromDate === filterToDate ? filterFromDate : `${filterFromDate} → ${filterToDate}`}
+          {" · "}
+          {visibleExpenses.length} {visibleExpenses.length === 1 ? "expense" : "expenses"}
+          {debouncedSearch.trim() && <span className="text-amber-600"> · filtered by “{debouncedSearch.trim()}”</span>}
+        </div>
+        <div className="text-[15px] font-semibold text-slate-900 tabular-nums">
+          ৳{formatAmount(visibleExpenses.reduce((sum, e) => sum + e.amount, 0))}
         </div>
       </div>
 
