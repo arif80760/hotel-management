@@ -460,112 +460,47 @@ function logSupabaseError(
 }
 
 // ─────────────────────────────────────────────────────────────
-// GUEST LOOKUP  (used internally by createBooking)
+// GUEST CREATION  (used internally by createBooking)
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Return the UUID of an existing guest matching the phone number,
- * or create a minimal guest profile and return its UUID.
+ * Create a FRESH guest row for this booking and return its UUID.
  *
- * This links every booking to a guest record without requiring the
- * UI to pre-select a profile. When the user later adds a full guest
- * profile (email, nationality, notes), they can merge records.
+ * BUSINESS RULE (2026-07-31): phone numbers and email addresses are NOT
+ * unique identifiers for guests. Staff members refer guests and give the
+ * staff member's own phone/email as the contact, so one phone or email
+ * legitimately appears on many unrelated bookings. Guests are therefore
+ * NEVER matched, reused, deduplicated, or merged on contact details —
+ * every booking inserts its own guest row. Booking identity is
+ * bookings.booking_ref (DB-assigned). The guests_email_key unique index
+ * was dropped live the same day, so duplicate emails insert cleanly.
+ *
+ * Email: the real email when provided, otherwise the
+ * '<phone-digits>.noemail@hotel.local' placeholder — guests.email is
+ * NOT NULL, so the placeholder must stay.
  */
-async function findOrCreateGuest(
+async function createGuestForBooking(
   name: string,
   phone: string,
   email?: string,
 ): Promise<string> {
   const trimmedPhone = phone.trim();
-  const trimmedName  = name.trim();
   const trimmedEmail = email?.trim() || undefined;
 
-  // ── 1. Look up by phone — but only reuse a guest when the NAME also agrees.
-  //    A phone-only match silently mis-attributed bookings to whoever owned
-  //    that phone first. A blank/placeholder phone ("" or "—") must never match.
-  const realPhone = trimmedPhone !== "" && trimmedPhone !== "—";
-  if (realPhone) {
-    const { data: matches } = await supabase
-      .from("guests")
-      .select("id, name, email")
-      .eq("phone", trimmedPhone);
-
-    const wantName = trimmedName.toLowerCase();
-    const existing = wantName
-      ? (matches ?? []).find(g => (g.name ?? "").trim().toLowerCase() === wantName)
-      : undefined;
-
-    if (existing) {
-      console.log("[createBooking] Step 1 — found existing guest:", existing.id);
-
-      // ── 1a. Upgrade placeholder email if caller supplied a real one ──
-      if (trimmedEmail && isPlaceholderEmail(existing.email)) {
-        try {
-          const { error: upErr, status: upStatus, statusText: upST } = await supabase
-            .from("guests")
-            .update({ email: trimmedEmail })
-            .eq("id", existing.id);
-
-          if (upErr) {
-            if (upErr.code === "23505") {
-              // Another guest already owns this email — skip silently
-              console.warn(
-                "[createBooking] Step 1 — email already in use, skipping upgrade:",
-                trimmedEmail,
-              );
-            } else {
-              logSupabaseError("Step 1 — UPDATE guests email", upErr, upStatus, upST, { id: existing.id, email: trimmedEmail });
-              throw upErr;
-            }
-          } else {
-            console.log("[createBooking] Step 1 — upgraded placeholder email for guest:", existing.id);
-          }
-        } catch (err: unknown) {
-          // Re-throw unless it was already handled above (23505 unique violation)
-          const pgErr = err as { code?: string };
-          if (pgErr?.code !== "23505") throw err;
-        }
-      }
-
-      return existing.id;
-    }
-    // phone matched a different person (or nobody) → fall through to create a new guest (duplicate phones allowed)
-  }
-  // blank phone → never match; fall through to create a new guest
-
-  // ── 2. Not found — create a minimal profile ───────────────────
-  //    Email: use the real email if provided; otherwise placeholder.
-  //    On 23505 collision (real email already owned by another guest),
-  //    fall back to placeholder and retry — booking must not crash.
   const placeholderEmail = `${trimmedPhone.replace(/\W/g, "")}.noemail@hotel.local`;
-  let emailToUse = trimmedEmail ?? placeholderEmail;
+  const emailToUse = trimmedEmail ?? placeholderEmail;
 
-  console.log("[createBooking] Step 1 — creating new guest, email:", emailToUse);
+  console.log("[createBooking] Step 1 — creating guest (no dedup), email:", emailToUse);
 
-  let { data: created, error, status, statusText } = await supabase
+  const { data: created, error, status, statusText } = await supabase
     .from("guests")
     .insert({ name: name.trim(), phone: trimmedPhone, email: emailToUse })
     .select("id")
     .single();
 
-  // If the provided real email collides with another guest, retry with placeholder
-  if (error?.code === "23505" && emailToUse !== placeholderEmail) {
-    console.warn(
-      `[findOrCreateGuest] Email '${emailToUse}' already in use by another guest.` +
-      ` Falling back to placeholder for this booking.`,
-    );
-    emailToUse = placeholderEmail;
-    ({ data: created, error, status, statusText } = await supabase
-      .from("guests")
-      .insert({ name: name.trim(), phone: trimmedPhone, email: emailToUse })
-      .select("id")
-      .single());
-  }
-
-  if (error) {
+  if (error || !created) {
     logSupabaseError("Step 1 — INSERT guests", error, status, statusText,
       { name: name.trim(), phone: trimmedPhone, email: emailToUse });
-    throw error;
   }
 
   console.log("[createBooking] Step 1 — guest created:", created!.id);
@@ -602,8 +537,8 @@ export async function createBooking(
     "| rooms:", input.rooms.map(r => r.roomNumber).join(", "),
   );
 
-  // ── Step 1 — Resolve primary guest UUID ───────────────────────────────────
-  const guestId = await findOrCreateGuest(
+  // ── Step 1 — Create the primary guest row (always fresh, never matched) ───
+  const guestId = await createGuestForBooking(
     input.primaryGuest.name,
     input.primaryGuest.phone,
     input.primaryGuest.email,
@@ -1214,10 +1149,11 @@ export async function updateBooking(
   }
 
   // ── Step 6 — Guest record UPDATE ────────────────────────────────────────
-  // Direct UPDATE by guestId — no find-or-create (that would create a duplicate profile).
+  // Direct UPDATE by guestId — edits this booking's own guest row in place.
   // Email: empty string in changes.email is treated as "leave unchanged" — placeholder
   // generation is a creation-time concern only, not applicable on edit.
-  // 23505 on email (unique violation) → throw with user-readable message, not silent.
+  // Duplicate phones/emails are ALLOWED (business rule 2026-07-31: contact
+  // details are not identity; guests_email_key was dropped) — no 23505 handling.
   const guestFieldsChanged =
     changes.guestName !== undefined ||
     changes.phone     !== undefined ||
@@ -1239,14 +1175,6 @@ export async function updateBooking(
       .eq("id", currentGuestId);
 
     if (gErr) {
-      if (gErr.code === "23505") {
-        // Email already belongs to another guest — surface a readable error to the UI
-        console.error("[updateBooking] Step 7 — email collision:", changes.email);
-        throw new Error(
-          `The email "${changes.email}" is already registered to another guest. ` +
-          `Use a different email or leave it blank.`,
-        );
-      }
       console.error("──────────── [updateBooking] Step 7 — UPDATE guests FAILED ────────────");
       console.error("  message    :", gErr.message);
       console.error("  details    :", gErr.details);
