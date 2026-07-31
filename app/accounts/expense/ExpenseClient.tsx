@@ -34,6 +34,16 @@ import {
 import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 import {
+  getExpenseItems,
+  createExpenseItem,
+  updateExpenseItemName,
+  updateExpenseItemCategory,
+  updateExpenseItemInventoryLink,
+  setExpenseItemActive,
+  type ExpenseItem,
+} from "@/services/expenseItemsService";
+
+import {
   getExpenses,
   getDistinctPayees,
   createExpense,
@@ -145,6 +155,22 @@ export default function ExpenseClient() {
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [kindUpdatingId, setKindUpdatingId] = useState<string | null>(null);
 
+  // ── Manage Items modal (mirrors Manage Categories) ─────────
+  const [expenseItems, setExpenseItems] = useState<ExpenseItem[]>([]);
+  const [itemModalOpen, setItemModalOpen] = useState(false);
+  const [newItemName, setNewItemName] = useState("");
+  const [newItemCategoryId, setNewItemCategoryId] = useState("");
+  const [newItemInventoryId, setNewItemInventoryId] = useState("");   // "" = no link
+  const [creatingItem, setCreatingItem] = useState(false);
+  const [createItemError, setCreateItemError] = useState<string | null>(null);
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
+  const [editingItemValue, setEditingItemValue] = useState("");
+  const [savingItemEdit, setSavingItemEdit] = useState(false);
+  const [itemEditError, setItemEditError] = useState<string | null>(null);
+  const [itemTogglingId, setItemTogglingId] = useState<string | null>(null);
+  const [itemCatUpdatingId, setItemCatUpdatingId] = useState<string | null>(null);
+  const [itemInvUpdatingId, setItemInvUpdatingId] = useState<string | null>(null);
+
   // ── View toggle: operating Expenses vs Remuneration ─────────
   const [view, setView] = useState<"expenses" | "remuneration">("expenses");
 
@@ -218,13 +244,14 @@ export default function ExpenseClient() {
     let cancelled = false;
     async function load() {
       try {
-        const [exps, emps, payeesH, invItems, invCats, dayClose] = await Promise.all([
+        const [exps, emps, payeesH, invItems, invCats, dayClose, expItems] = await Promise.all([
           getExpenses({ fromDate: filterFromDate, toDate: filterToDate }),
           getAllEmployees(),
           getDistinctPayees(),
           getInventoryItems({ activeOnly: false }),
           getInventoryCategories(),
           getDayCloseStatus().catch(() => null),
+          getExpenseItems(),
         ]);
         if (cancelled) return;
         setExpenses(exps);
@@ -233,6 +260,7 @@ export default function ExpenseClient() {
         setPayeesHistory(payeesH);
         setInventoryItems(invItems);
         setInventoryCategories(invCats);
+        setExpenseItems(expItems);
         setLastClosedDate(dayClose?.lastClosedDate ?? null);
       } catch (err) {
         if (!cancelled) {
@@ -370,6 +398,107 @@ export default function ExpenseClient() {
     setRemunNote(e.note ?? "");
     setRemunError(null);
     setRemunModalOpen(true);
+  }
+
+  // ── Manage Items handlers (mirrors Manage Categories) ─────
+  function openItemModal() {
+    setCreateItemError(null);
+    setItemEditError(null);
+    if (!newItemCategoryId) setNewItemCategoryId(categories.find((c) => c.isActive)?.id ?? "");
+    setItemModalOpen(true);
+  }
+  function closeItemModal() {
+    if (creatingItem || savingItemEdit || itemTogglingId) return;
+    setItemModalOpen(false);
+    setEditingItemId(null); setEditingItemValue("");
+    setNewItemName(""); setNewItemInventoryId("");
+    setCreateItemError(null); setItemEditError(null);
+  }
+  async function reloadItems() {
+    try {
+      setExpenseItems(await getExpenseItems());
+    } catch (err) {
+      console.error("[ExpenseClient] reloadItems failed:", err);
+    }
+  }
+  async function handleCreateItem() {
+    const trimmed = newItemName.trim();
+    if (!trimmed || !newItemCategoryId) return;
+    setCreatingItem(true);
+    setCreateItemError(null);
+    try {
+      await createExpenseItem(trimmed, newItemCategoryId, newItemInventoryId || null);
+      await reloadItems();
+      setNewItemName("");
+      setNewItemInventoryId("");
+      setSuccessMsg(`Item "${trimmed}" added.`);
+    } catch (err) {
+      setCreateItemError(err instanceof Error ? err.message : "Failed to create item.");
+    } finally {
+      setCreatingItem(false);
+    }
+  }
+  function startItemEdit(it: ExpenseItem) {
+    setEditingItemId(it.id);
+    setEditingItemValue(it.name);
+    setItemEditError(null);
+  }
+  function cancelItemEdit() {
+    setEditingItemId(null);
+    setEditingItemValue("");
+    setItemEditError(null);
+  }
+  async function handleSaveItemEdit() {
+    if (!editingItemId || !editingItemValue.trim()) return;
+    setSavingItemEdit(true);
+    setItemEditError(null);
+    try {
+      await updateExpenseItemName(editingItemId, editingItemValue);
+      await reloadItems();
+      setEditingItemId(null);
+      setEditingItemValue("");
+    } catch (err) {
+      setItemEditError(err instanceof Error ? err.message : "Rename failed.");
+    } finally {
+      setSavingItemEdit(false);
+    }
+  }
+  async function handleChangeItemCategory(it: ExpenseItem, categoryId: string) {
+    if (!categoryId || categoryId === it.categoryId) return;
+    setItemCatUpdatingId(it.id);
+    setItemEditError(null);
+    try {
+      await updateExpenseItemCategory(it.id, categoryId);
+      await reloadItems();
+    } catch (err) {
+      setItemEditError(err instanceof Error ? err.message : "Category change failed.");
+    } finally {
+      setItemCatUpdatingId(null);
+    }
+  }
+  async function handleChangeItemInventoryLink(it: ExpenseItem, inventoryItemId: string) {
+    setItemInvUpdatingId(it.id);
+    setItemEditError(null);
+    try {
+      await updateExpenseItemInventoryLink(it.id, inventoryItemId || null);
+      await reloadItems();
+    } catch (err) {
+      setItemEditError(err instanceof Error ? err.message : "Inventory link update failed.");
+    } finally {
+      setItemInvUpdatingId(null);
+    }
+  }
+  async function handleToggleItemActive(it: ExpenseItem) {
+    setItemTogglingId(it.id);
+    try {
+      await setExpenseItemActive(it.id, !it.isActive);
+      setSuccessMsg(`Item "${it.name}" ${it.isActive ? "deactivated" : "reactivated"}.`);
+      await reloadItems();
+    } catch (err) {
+      setItemEditError(err instanceof Error ? err.message : "Toggle failed.");
+    } finally {
+      setItemTogglingId(null);
+    }
   }
 
   // ── Reload helpers ─────────────────────────────────────────
@@ -722,6 +851,18 @@ export default function ExpenseClient() {
           </button>
           <button
             type="button"
+            onClick={openItemModal}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white border border-slate-200 text-slate-700 text-[13px] font-semibold hover:bg-slate-50 hover:border-slate-300 transition-colors"
+            title="Manage expense items (grouped under categories)"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <path d="M20 7h-9M20 12h-9M20 17h-9" />
+              <path d="M4 5.5h2v3H4zM4 10.5h2v3H4zM4 15.5h2v3H4z" />
+            </svg>
+            Manage Items
+          </button>
+          <button
+            type="button"
             onClick={openExpenseModal}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors"
           >
@@ -1006,6 +1147,174 @@ export default function ExpenseClient() {
             </div>
             <div className="flex items-center justify-end px-5 py-3 border-t border-slate-200">
               <button type="button" onClick={closeCategoryModal} disabled={!!(savingEdit || creatingCategory || togglingId)} className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ────────────────────────────────────────────────────── */}
+      {/* MANAGE ITEMS MODAL (mirrors Manage Categories)          */}
+      {/* ────────────────────────────────────────────────────── */}
+      {itemModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeItemModal}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+              <h2 className="text-[15px] font-semibold text-slate-800">Manage Items</h2>
+              <button
+                type="button"
+                onClick={closeItemModal}
+                disabled={!!(savingItemEdit || creatingItem || itemTogglingId)}
+                className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                aria-label="Close"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div className="px-5 py-4 border-b border-slate-200 space-y-2">
+              <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Add item</label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={newItemName}
+                  onChange={(e) => setNewItemName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleCreateItem(); }}
+                  placeholder="e.g. Aerosol"
+                  disabled={creatingItem}
+                  className={inputCls(!!createItemError)}
+                />
+                <select
+                  value={newItemCategoryId}
+                  onChange={(e) => setNewItemCategoryId(e.target.value)}
+                  disabled={creatingItem}
+                  className="px-3 py-2.5 rounded-lg border border-slate-200 bg-white text-[13px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-40 whitespace-nowrap"
+                >
+                  <option value="">Category…</option>
+                  {categories.filter((c) => c.isActive).map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={handleCreateItem}
+                  disabled={creatingItem || !newItemName.trim() || !newItemCategoryId}
+                  className="px-4 py-2.5 rounded-lg bg-slate-900 text-white text-[13px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                >
+                  {creatingItem ? "Adding…" : "Add"}
+                </button>
+              </div>
+              <select
+                value={newItemInventoryId}
+                onChange={(e) => setNewItemInventoryId(e.target.value)}
+                disabled={creatingItem}
+                className="w-full px-3 py-2.5 rounded-lg border border-slate-200 bg-white text-[13px] text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-40"
+                title="Optional inventory link"
+              >
+                <option value="">No inventory link (optional)</option>
+                {inventoryItems.filter((i) => i.isActive).map((i) => (
+                  <option key={i.id} value={i.id}>{i.name}</option>
+                ))}
+              </select>
+              {createItemError && (<p className="text-[12px] text-rose-600">{createItemError}</p>)}
+              <p className="text-[11.5px] text-slate-400">Items are grouped under their category. The inventory link is informational — recording stock still uses the inventory purchase toggle on the expense.</p>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-3">
+              {expenseItems.length === 0 ? (
+                <div className="py-8 text-center text-[13px] text-slate-400 italic">
+                  No items yet. Create one above to get started.
+                </div>
+              ) : (
+                categories.map((cat) => {
+                  const catItems = expenseItems.filter((i) => i.categoryId === cat.id);
+                  if (catItems.length === 0) return null;
+                  return (
+                    <div key={cat.id} className="mb-3">
+                      <p className="pt-1.5 pb-0.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">{cat.name}</p>
+                      <ul className="divide-y divide-slate-100">
+                        {catItems.map((it) => {
+                          const isEditing = editingItemId === it.id;
+                          const isToggling = itemTogglingId === it.id;
+                          const linkedInv = it.inventoryItemId ? inventoryItems.find((i) => i.id === it.inventoryItemId) : undefined;
+                          return (
+                            <li key={it.id} className={`py-3 flex items-center gap-3 ${it.isActive ? "" : "opacity-60"}`}>
+                              {isEditing ? (
+                                <>
+                                  <input
+                                    type="text"
+                                    autoFocus
+                                    value={editingItemValue}
+                                    onChange={(e) => setEditingItemValue(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") handleSaveItemEdit();
+                                      if (e.key === "Escape") cancelItemEdit();
+                                    }}
+                                    disabled={savingItemEdit}
+                                    className={inputCls(!!itemEditError)}
+                                  />
+                                  <button type="button" onClick={handleSaveItemEdit} disabled={savingItemEdit || !editingItemValue.trim()} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[12.5px] font-semibold hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
+                                    {savingItemEdit ? "Saving…" : "Save"}
+                                  </button>
+                                  <button type="button" onClick={cancelItemEdit} disabled={savingItemEdit} className="px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-100 text-[12.5px] font-medium transition-colors disabled:opacity-40">
+                                    Cancel
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button type="button" onClick={() => startItemEdit(it)} className="flex-1 text-left text-[13.5px] font-medium text-slate-800 hover:text-amber-700 transition-colors" title="Click to rename">
+                                    {it.name}
+                                  </button>
+                                  {linkedInv && (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200 text-[10.5px] font-semibold uppercase tracking-wider" title={`Linked to inventory: ${linkedInv.name}`}>Inventory</span>
+                                  )}
+                                  {!it.isActive && (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10.5px] font-semibold uppercase tracking-wider">Inactive</span>
+                                  )}
+                                  <select
+                                    value={it.categoryId}
+                                    onChange={(e) => handleChangeItemCategory(it, e.target.value)}
+                                    disabled={itemCatUpdatingId === it.id}
+                                    title="Category"
+                                    className="max-w-[110px] px-2 py-1.5 rounded-md border border-slate-200 bg-white text-[11.5px] text-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-40"
+                                  >
+                                    {categories.map((c) => (
+                                      <option key={c.id} value={c.id}>{c.name}</option>
+                                    ))}
+                                  </select>
+                                  <select
+                                    value={it.inventoryItemId ?? ""}
+                                    onChange={(e) => handleChangeItemInventoryLink(it, e.target.value)}
+                                    disabled={itemInvUpdatingId === it.id}
+                                    title="Inventory link (optional)"
+                                    className="max-w-[110px] px-2 py-1.5 rounded-md border border-slate-200 bg-white text-[11.5px] text-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-40"
+                                  >
+                                    <option value="">No link</option>
+                                    {inventoryItems.filter((i) => i.isActive || i.id === it.inventoryItemId).map((i) => (
+                                      <option key={i.id} value={i.id}>{i.name}</option>
+                                    ))}
+                                  </select>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleItemActive(it)}
+                                    disabled={isToggling}
+                                    className={`px-3 py-1.5 rounded-md text-[11.5px] font-semibold uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${it.isActive ? "bg-slate-100 text-slate-600 hover:bg-slate-200" : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"}`}
+                                  >
+                                    {isToggling ? "…" : it.isActive ? "Deactivate" : "Reactivate"}
+                                  </button>
+                                </>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  );
+                })
+              )}
+              {itemEditError && (<p className="mt-2 text-[12px] text-rose-600">{itemEditError}</p>)}
+            </div>
+            <div className="flex items-center justify-end px-5 py-3 border-t border-slate-200">
+              <button type="button" onClick={closeItemModal} disabled={!!(savingItemEdit || creatingItem || itemTogglingId)} className="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                 Done
               </button>
             </div>
