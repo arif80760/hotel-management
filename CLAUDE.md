@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-06-21 (rev 32)
+Last updated: 2026-07-31 (rev 33)
 
 > **rev 19** — Removed the cleaning/maintenance lifecycle from the dashboard Room Board. Checkout now releases a room straight to Available (`checkoutNormal`/`checkoutWithOverride` set the physical room Available and optimistically mark `booking_rooms` Checked Out). `lib/roomStatus.deriveRoomStatusForDate` no longer special-cases Cleaning/Maintenance — the board shows only Available/Reserved/Occupied, derived from bookings; summary/legend trimmed to those three.
 >
@@ -28,6 +28,13 @@ Last updated: 2026-06-21 (rev 32)
 > **rev 32** — **Profit & Loss statement shipped** (`/accounts/profit-loss`, admin-gated server wrapper + `ProfitLossClient`; commit `c088623`). Period presets (This month / Last month / This year / All time / Custom) using the **same date semantics as the Revenue Report**. **Revenue is computed 1:1 with the Revenue Report:** `getTransactions(filters)` → `type==='revenue_in'` → sum. **Refunds netted:** `expense_out` rows with `bookingPaymentId !== null`, shown as a "Less: Refunds" line. Operating vs remuneration split via the `categoryId→kind` map; operating expenses shown with a by-category breakdown. Statement order: Revenue → less Refunds → **Net Revenue** → less Operating Expenses → **Net Profit** → less Director Remuneration (appropriation of profit) → **Retained Profit**. Sidebar: "Profit & Loss" child under the (admin-only) Accounts group, after Revenue Report. STATUS: built + deployed, compiles clean. **LIVE PARITY CHECK STILL PENDING** — confirm P&L "This month" Revenue equals Revenue Report "This month" Revenue in the running app. Restyled "Midnight" (commit `35c85bb`): dark metric cards + revenue-allocation bar + Space Grotesk numerals. Fonts: `Space_Grotesk` + `Plus_Jakarta_Sans` via `next/font`, scoped to `/accounts/profit-loss` through CSS variables set in `page.tsx` (not global). Pure presentation — compute path unchanged.
 >
 > **Notification bell** (`2237727`): `components/NotificationBell.tsx` (new), mounted in `TopBar` replacing the old static placeholder. Derives notifications live, NO new table. Fetches `getAllBookings` directly (not `useHotel`, so TopBar stays context-independent); role + user from `useAuth`. Categories (all roles): overdue checkout (`checkOutISO < today && status 'Checked In'`), departures today (`checkOutISO===today && Checked In`), arrivals today (`checkInISO===today && status 'Confirmed'`), payment due (Checked In, payment≠Paid, `amountPaid<totalAmount`, `checkOutISO≤today`), latest 5 bookings (`created_at` desc). Admin-only: low stock (`getInventoryItems` activeOnly + `getStockForAllItems`, qty ≤ `lowStockThreshold`) and day-not-closed (`getDayCloseStatus`, `lastClosedDate < today`, shows `missedDays` backlog). Dates: plain local `todayISO()` + `'YYYY-MM-DD'` string compare (matches cashbook/day-close convention). Red dot/count badge driven by a per-user localStorage marker `notif_seen_<userId>`: stamped = now on open (clears), re-lights on a newer booking `createdAt` or the next day's `startOfToday` for today-items. Links: bookings → `/bookings/<id>/reservation`, low stock → `/inventory`, day-close → `/accounts/cashbook`.
+>
+> **rev 33 (2026-07-31)** — Booking-identity + guest + category-identity overhaul; all SQL applied LIVE first, then recorded as migrations.
+> **Overlap-guard regression + restoration:** the double-booking guard shipped in `2026-06-07-booking-overlap-guard.sql` was **silently overwritten** by a later `CREATE OR REPLACE` based on a pre-guard body (the snapshot embedded in `2026-06-07-room-category-enum-to-text.sql` — that file now carries a prominent SUPERSEDED warning; never replay or copy its function bodies). The DB consequently had **no double-booking protection**; **66 overlapping `booking_rooms` pairs exist in live data** (cleanup pending). Restored in `2026-07-31-restore-overlap-guard.sql` (full current bodies of `create_booking_with_rooms` + `add_room_to_booking`); the guard runs **before** the booking_ref nextval loop so rejected bookings do not consume reference numbers. LESSON: before any `CREATE OR REPLACE` of a live function, pull the CURRENT body via `pg_get_functiondef` — never rebuild from an old migration.
+> **DB-assigned booking_ref:** `public.booking_ref_seq` (seeded live to 1150; `2026-07-31-booking-ref-sequence.sql`); `create_booking_with_rooms` now assigns the ref server-side via `nextval` — the client's `nextBookingId` is no longer authoritative.
+> **Guests: insert-always, NO dedup:** `guests_email_key` DROPPED live (`2026-07-31-drop-guests-email-unique.sql`). Business rule: phones/emails are NOT unique guest identifiers (staff refer guests using their own contact details); booking identity is `booking_ref`. `findOrCreateGuest` → `createGuestForBooking` (commit `b9eef61`): every booking inserts a fresh guest row; no phone/name matching, no placeholder-email upgrade, no 23505 handling (the user-facing "email already registered" branch in `updateBooking` is gone). `guests.email`/`phone` stay NOT NULL — the `{phone_digits}.noemail@hotel.local` placeholder remains. Guest lists grow by design; nothing merges.
+> **Category identity = `system_key`, never name:** `expense_categories.system_key` (text, unique where not null; `2026-07-31-expense-category-system-key.sql`) set to `'salary'` and `'remuneration'` live. Display names are user-renameable, so **no code may resolve a category by name**. `getExpenseCategoryBySystemKey()` (matches regardless of `is_active`); PayrollClient resolves Salary by key and its **auto-create fallback is removed** (name is UNIQUE — a miss now throws "Salary category is missing" instead of inserting); `resolveRemunerationCategoryId` = key → kind fallback → create (name preference removed). Commit `b4aea0c`.
+> **expense_items:** new `public.expense_items` table + `account_transactions.expense_item_id` applied live (`2026-07-31-expense-items.sql`). Schema recorded only — **client-side expense_items work NOT started.**
 
 ### Role Permissions
 | Action | staff | admin |
@@ -43,10 +50,12 @@ Last updated: 2026-06-21 (rev 32)
 | Provision new user accounts | ❌ | ✅ |
 | View/manage loans | ❌ | ✅ |
 
-### Guest Find-or-Create
-When creating a booking, the service looks up guests by phone number:
-1. If found → use existing guest UUID
-2. If not found → create minimal profile (name + phone + placeholder email `{phone_digits}.noemail@hotel.local`)
+### Guest Creation (insert-always — no find-or-create)
+Business rule (2026-07-31): phone numbers and emails are **NOT** unique guest identifiers — staff members refer guests and give their own phone/email as the contact, so one phone or email legitimately appears on many unrelated bookings. Consequences:
+1. Every booking INSERTs a **fresh** `guests` row (`createGuestForBooking` in `bookingsService`). Guests are never looked up, matched, merged, or deduplicated on contact details.
+2. Booking identity is `bookings.booking_ref`, DB-assigned from `public.booking_ref_seq`.
+3. `guests.email`/`phone` remain NOT NULL; when no email is given, the placeholder `{phone_digits}.noemail@hotel.local` is used (the `guests_email_key` unique index is dropped, so duplicates are harmless).
+4. Never re-introduce duplicate-contact validation, 23505 email handling, or name/phone matching on guests.
 
 ### Employee Provisioning (server-only)
 `POST /api/employees/provision` uses the Supabase admin client to atomically create auth.users + employees + profiles with rollback on failure.

@@ -1,0 +1,23 @@
+-- =============================================================
+-- 2026-07-31-drop-guests-email-unique.sql
+-- Guests: email is no longer unique.
+--
+-- RECORD OF LIVE STATE — applied in the Supabase SQL editor on 2026-07-31
+-- (apply-first). Committed for history; DROP INDEX IF EXISTS is idempotent.
+--
+-- BUSINESS RULE (Arif, 2026-07-31):
+--   Phone numbers and email addresses are NOT unique identifiers for
+--   guests. Staff members refer guests and give the staff member's own
+--   phone/email as the contact, so one phone or email legitimately
+--   appears on many unrelated bookings. Guests are never deduplicated,
+--   merged, or matched on contact details — every booking inserts its own
+--   fresh guests row. Booking identity is bookings.booking_ref
+--   (DB-assigned from public.booking_ref_seq).
+--
+-- NOT CHANGED:
+--   guests.email and guests.phone remain NOT NULL. The
+--   '<phone-digits>.noemail@hotel.local' placeholder email stays — with
+--   the unique index gone, duplicate placeholders are harmless.
+-- =============================================================
+
+DROP INDEX IF EXISTS public.guests_email_key;

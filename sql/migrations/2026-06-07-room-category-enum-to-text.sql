@@ -1,3 +1,22 @@
+-- ╔═══════════════════════════════════════════════════════════════════════╗
+-- ║  ⚠⚠  WARNING — HISTORICAL FUNCTION BODIES, SUPERSEDED  ⚠⚠              ║
+-- ║                                                                       ║
+-- ║  The bodies of create_booking_with_rooms and add_room_to_booking      ║
+-- ║  embedded BELOW are a 2026-06-07 SNAPSHOT and are SUPERSEDED.         ║
+-- ║  They PREDATE the double-booking overlap guard AND the DB-assigned    ║
+-- ║  booking_ref sequence (nextval on public.booking_ref_seq).            ║
+-- ║                                                                       ║
+-- ║  DO NOT replay this file, and DO NOT copy these bodies as the base    ║
+-- ║  of any future CREATE OR REPLACE — doing exactly that once already    ║
+-- ║  silently DESTROYED the overlap guard in production (no double-       ║
+-- ║  booking protection; 66 overlapping booking_rooms pairs resulted),    ║
+-- ║  and doing it again would also destroy the booking_ref sequence       ║
+-- ║  logic.                                                               ║
+-- ║                                                                       ║
+-- ║  The CURRENT authoritative bodies of both functions live in:          ║
+-- ║      2026-07-31-restore-overlap-guard.sql                             ║
+-- ╚═══════════════════════════════════════════════════════════════════════╝
+--
 -- =============================================================
 -- 2026-06-07-room-category-enum-to-text.sql
 -- Stage B of dynamic room categories — the atomic conversion.
