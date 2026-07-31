@@ -179,7 +179,7 @@ function ItemCombobox({
   const openPanel = () => {
     if (disabled) return;
     const r = wrapRef.current?.getBoundingClientRect();
-    if (r) setRect({ top: r.bottom + 4, left: r.left, width: r.width });
+    if (r) setRect({ top: r.bottom + 6, left: r.left, width: r.width });
     setHighlight(0);
     setOpen(true);
   };
@@ -254,15 +254,28 @@ function ItemCombobox({
         autoComplete="off"
         role="combobox"
         aria-expanded={open}
-        className={inputCls(!!invalid) + " pr-8"}
+        className={inputCls(!!invalid) + (selected || query.length > 0 ? " pr-14" : " pr-9")}
       />
+      {/* Chevron — decorative; clicks fall through to the input */}
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+      >
+        <svg
+          viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+          strokeLinecap="round" strokeLinejoin="round"
+          className={`w-4 h-4 transition-transform duration-150 ${open ? "rotate-180" : ""}`}
+        >
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </span>
       {(selected || query.length > 0) && !disabled && (
         <button
           type="button"
           aria-label="Clear selection"
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => { onSelect(null); onQueryChange(""); setOpen(false); }}
-          className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 text-slate-300 hover:text-slate-500 transition-colors"
+          className="absolute right-8 top-1/2 -translate-y-1/2 p-0.5 rounded text-slate-300 hover:text-slate-500 transition-colors"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3.5 h-3.5">
             <path d="M6 6l12 12M18 6L6 18" />
@@ -270,32 +283,43 @@ function ItemCombobox({
         </button>
       )}
       {open && rect && (
-        <div
-          ref={panelRef}
-          style={{ position: "fixed", top: rect.top, left: rect.left, width: rect.width, zIndex: 60 }}
-          className="max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-xl py-1"
-        >
-          {options.length === 0 ? (
-            <div className="px-3.5 py-2.5 text-[13px] text-slate-400 italic">{emptyText}</div>
-          ) : filtered.length === 0 ? (
-            <div className="px-3.5 py-2.5 text-[13px] text-slate-400 italic">No matches.</div>
-          ) : (
-            filtered.map((o, idx) => (
-              <button
-                key={o.id}
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => { onSelect(o); setOpen(false); }}
-                onMouseEnter={() => setHighlight(idx)}
-                className={`block w-full text-left px-3.5 py-2 text-[13px] transition-colors ${
-                  idx === highlight ? "bg-amber-50 text-slate-900" : "text-slate-700"
-                } ${o.id === valueId ? "font-semibold" : ""}`}
-              >
-                {o.label}
-              </button>
-            ))
-          )}
-        </div>
+        <>
+          <style>{`@keyframes ex-combo-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }`}</style>
+          <div
+            ref={panelRef}
+            style={{
+              position: "fixed", top: rect.top, left: rect.left, width: rect.width, zIndex: 60,
+              animation: "ex-combo-in 130ms ease-out",
+            }}
+            className="max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl p-1.5"
+          >
+            {options.length === 0 ? (
+              <div className="px-3 py-2.5 text-[13px] text-slate-400 italic">{emptyText}</div>
+            ) : filtered.length === 0 ? (
+              <div className="px-3 py-2.5 text-[13px] text-slate-400 italic">No matches.</div>
+            ) : (
+              filtered.map((o, idx) => (
+                <button
+                  key={o.id}
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => { onSelect(o); setOpen(false); }}
+                  onMouseEnter={() => setHighlight(idx)}
+                  className={`flex items-center gap-2 w-full text-left px-3 py-2.5 text-[13px] rounded-lg transition-colors ${
+                    idx === highlight ? "bg-amber-50 text-amber-900" : "text-slate-700"
+                  } ${o.id === valueId ? "font-semibold" : ""}`}
+                >
+                  <span className="flex-1 min-w-0 truncate">{o.label}</span>
+                  {o.id === valueId && (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 shrink-0 text-amber-600">
+                      <path d="M5 13l4 4L19 7" />
+                    </svg>
+                  )}
+                </button>
+              ))
+            )}
+          </div>
+        </>
       )}
     </div>
   );
