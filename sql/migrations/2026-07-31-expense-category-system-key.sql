@@ -12,6 +12,9 @@
 --   the two categories the app depends on:
 --     'salary'        — payroll payments (PayrollClient)
 --     'remuneration'  — director remuneration (resolveRemunerationCategoryId)
+--     'commission'    — excludes the Commission category from the expense
+--                       item picker (its notes carry room/booking refs);
+--                       tagged live later the same day, one row
 --   Client-side, resolution goes through getExpenseCategoryBySystemKey(),
 --   which matches REGARDLESS of is_active. The payroll "Salary" auto-create
 --   fallback was removed the same day (name is UNIQUE — a blind insert on a
@@ -39,4 +42,11 @@ WHERE  name = 'Salary'
 UPDATE public.expense_categories
 SET    system_key = 'remuneration'
 WHERE  kind = 'remuneration'
+  AND  system_key IS NULL;
+
+-- Applied live later on 2026-07-31 (one row) — Commission is excluded from
+-- the expense item picker by key, never by name.
+UPDATE public.expense_categories
+SET    system_key = 'commission'
+WHERE  name = 'Commission'
   AND  system_key IS NULL;
