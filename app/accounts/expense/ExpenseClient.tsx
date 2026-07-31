@@ -307,7 +307,7 @@ function ItemCombobox({
                   onMouseEnter={() => setHighlight(idx)}
                   className={`flex items-center gap-2 w-full text-left px-3 py-2.5 text-[13px] rounded-lg transition-colors duration-100 ${
                     idx === highlight
-                      ? "bg-amber-500 text-white font-medium"
+                      ? "bg-amber-100 text-amber-900 font-medium"
                       : o.id === valueId
                         ? "bg-amber-50 text-amber-900 font-semibold"
                         : "text-slate-700"
@@ -315,7 +315,7 @@ function ItemCombobox({
                 >
                   <span className="flex-1 min-w-0 truncate">{o.label}</span>
                   {o.id === valueId && (
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-4 h-4 shrink-0 ${idx === highlight ? "text-white" : "text-amber-600"}`}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-4 h-4 shrink-0 ${idx === highlight ? "text-amber-900" : "text-amber-600"}`}>
                       <path d="M5 13l4 4L19 7" />
                     </svg>
                   )}
