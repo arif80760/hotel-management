@@ -121,6 +121,12 @@ function formatAmount(n: number): string {
 }
 
 
+// Categories whose expenses never carry an item: resolved by system_key /
+// kind ONLY (names are user-renameable and must never be matched).
+// 'commission' is reserved — tag the Commission category with
+// system_key='commission' live for it to take effect.
+const NO_ITEM_PICKER_KEYS = new Set(["salary", "remuneration", "commission"]);
+
 export default function ExpenseClient() {
   // ── Data ───────────────────────────────────────────────────
   // Expense categories come from the session-level reference cache; aliased to
@@ -205,6 +211,9 @@ export default function ExpenseClient() {
   const [exEmployeeId,  setExEmployeeId]  = useState<string>("");
   const [exPayeeText,   setExPayeeText]   = useState<string>("");
   const [exNote,        setExNote]        = useState<string>("");
+  // Optional expense-item picker (type-to-search; datalist like the inventory picker)
+  const [exExpItemId,     setExExpItemId]     = useState<string>("");
+  const [exExpItemSearch, setExExpItemSearch] = useState<string>("");
   // ── Inventory purchase toggle state ───────────────────────
   const [exIsInventory,   setExIsInventory]   = useState<boolean>(false);
   const [exInvItemId,     setExInvItemId]     = useState<string>("");
@@ -343,6 +352,8 @@ export default function ExpenseClient() {
     setExEmployeeId("");
     setExPayeeText("");
     setExNote("");
+    setExExpItemId("");
+    setExExpItemSearch("");
     setCreateExpenseError(null);
     setCreateExpenseFieldErrors({});
     setExIsInventory(false);
@@ -379,6 +390,8 @@ export default function ExpenseClient() {
     if (e.employeeId) { setExPayeeMode("employee"); setExEmployeeId(e.employeeId); setExPayeeText(""); }
     else              { setExPayeeMode("vendor");   setExPayeeText(e.payee ?? ""); setExEmployeeId(""); }
     setExNote(e.note ?? "");
+    setExExpItemId(e.expenseItemId ?? "");
+    setExExpItemSearch(e.expenseItemId ? (expenseItems.find((i) => i.id === e.expenseItemId)?.name ?? "") : "");
     setCreateExpenseError(null);
     setCreateExpenseFieldErrors({});
     // Inventory seam is create-only — never re-applied on edit.
@@ -664,10 +677,15 @@ export default function ExpenseClient() {
     setCreatingExpense(true);
 
     try {
+      const selCatForItem = categories.find((c) => c.id === exCategoryId);
+      const itemAllowed = !!selCatForItem
+        && selCatForItem.kind !== "remuneration"
+        && !(selCatForItem.systemKey && NO_ITEM_PICKER_KEYS.has(selCatForItem.systemKey));
       const input: NewExpense = {
         txnDate:     exTxnDate,
         amount:      amountNum,
         categoryId:  exCategoryId,
+        expenseItemId: itemAllowed && exExpItemId ? exExpItemId : null,
         payeeMode:   exPayeeMode,
         employeeId:  exPayeeMode === "employee" ? exEmployeeId : undefined,
         payee:       exPayeeMode === "vendor"   ? exPayeeText.trim() : undefined,
@@ -985,9 +1003,15 @@ export default function ExpenseClient() {
                           </span>
                           <span className="text-[12.5px] text-slate-500 truncate">{payeeDisplay}</span>
                         </div>
-                        {e.note && (
-                          <p className="mt-1 text-[12px] text-slate-400 truncate">{e.note}</p>
-                        )}
+                        {(() => {
+                          const itemName = e.expenseItemId
+                            ? expenseItems.find((i) => i.id === e.expenseItemId)?.name
+                            : undefined;
+                          const label = itemName ?? e.note;
+                          return label ? (
+                            <p className="mt-1 text-[12px] text-slate-400 truncate">{label}</p>
+                          ) : null;
+                        })()}
                       </div>
                       <div className="flex items-center gap-3 flex-shrink-0">
                         <span className="font-mono text-[11.5px] text-slate-400">{e.voucherNumber}</span>
@@ -1383,7 +1407,7 @@ export default function ExpenseClient() {
                 <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Category</label>
                 <select
                   value={exCategoryId}
-                  onChange={(e) => setExCategoryId(e.target.value)}
+                  onChange={(e) => { setExCategoryId(e.target.value); setExExpItemId(""); setExExpItemSearch(""); }}
                   disabled={creatingExpense}
                   className={inputCls(!!createExpenseFieldErrors.category)}
                 >
@@ -1399,6 +1423,51 @@ export default function ExpenseClient() {
                   <p className="text-[11.5px] text-rose-600">{createExpenseFieldErrors.category}</p>
                 )}
               </div>
+
+              {/* ── Item picker (optional) — active items of the selected category.
+                    Hidden for remuneration-kind and system-keyed salary /
+                    remuneration / commission categories. Purely a tag on the
+                    expense row; the free-text description below is unchanged. */}
+              {(() => {
+                const selCat = categories.find((c) => c.id === exCategoryId);
+                const allowed = !!selCat
+                  && selCat.kind !== "remuneration"
+                  && !(selCat.systemKey && NO_ITEM_PICKER_KEYS.has(selCat.systemKey));
+                if (!allowed) return null;
+                const catItems = expenseItems.filter((i) => i.isActive && i.categoryId === exCategoryId);
+                const selected = exExpItemId ? expenseItems.find((i) => i.id === exExpItemId) : undefined;
+                return (
+                  <div className="space-y-1">
+                    <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Item (optional)</label>
+                    <input
+                      type="text"
+                      list="expense-item-options"
+                      value={exExpItemSearch}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setExExpItemSearch(v);
+                        const match = catItems.find((i) => i.name.toLowerCase() === v.trim().toLowerCase());
+                        setExExpItemId(match ? match.id : "");
+                      }}
+                      placeholder={catItems.length > 0 ? "Type to search items…" : "No items in this category yet"}
+                      disabled={creatingExpense || catItems.length === 0}
+                      className={inputCls(false)}
+                    />
+                    <datalist id="expense-item-options">
+                      {catItems.map((i) => (<option key={i.id} value={i.name} />))}
+                    </datalist>
+                    {selected ? (
+                      <p className="text-[11.5px] text-emerald-700">Selected: <span className="font-semibold">{selected.name}</span></p>
+                    ) : (
+                      <p className="text-[11.5px] text-slate-400">
+                        {catItems.length > 0
+                          ? "Pick from the list or leave blank."
+                          : "Define items via Manage Items — or leave blank."}
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Payee mode toggle */}
               <div className="space-y-1">

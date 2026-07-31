@@ -49,6 +49,7 @@ export type Expense = {
   amount:         number;
   voucherNumber:  string;
   categoryId:     string;
+  expenseItemId:  string | null;   // optional expense_items link (item within the category)
   payee:          string | null;   // free-text payee (exclusive with employeeId)
   employeeId:     string | null;   // FK to employees (exclusive with payee)
   note:           string | null;
@@ -62,6 +63,7 @@ export type NewExpense = {
   txnDate:      string;        // "YYYY-MM-DD"
   amount:       number;        // positive
   categoryId:   string;        // FK to expense_categories
+  expenseItemId?: string | null; // optional FK to expense_items (item within the category)
   payeeMode:    "employee" | "vendor";
   employeeId?:  string;        // required if payeeMode === 'employee'
   payee?:       string;        // required if payeeMode === 'vendor'
@@ -84,7 +86,7 @@ export type ExpenseFilters = {
 export async function getExpenses(filters: ExpenseFilters = {}): Promise<Expense[]> {
   let query = supabase
     .from("account_transactions")
-    .select("id, txn_date, amount, voucher_number, category_id, payee, employee_id, note, created_at, created_by")
+    .select("id, txn_date, amount, voucher_number, category_id, expense_item_id, payee, employee_id, note, created_at, created_by")
     .eq("type", "expense_out")
     .is("booking_payment_id", null)
     .is("deleted_at", null)
@@ -108,6 +110,7 @@ export async function getExpenses(filters: ExpenseFilters = {}): Promise<Expense
     amount: string | number;
     voucher_number: string | null;
     category_id: string | null;
+    expense_item_id: string | null;
     payee: string | null;
     employee_id: string | null;
     note: string | null;
@@ -121,6 +124,7 @@ export async function getExpenses(filters: ExpenseFilters = {}): Promise<Expense
     amount:        typeof r.amount === "string" ? parseFloat(r.amount) : r.amount,
     voucherNumber: r.voucher_number ?? "",   // should never be null on user expenses (CHECK enforces)
     categoryId:    r.category_id ?? "",
+    expenseItemId: r.expense_item_id ?? null,
     payee:         r.payee,
     employeeId:    r.employee_id,
     note:          r.note,
@@ -165,7 +169,7 @@ export async function getDistinctPayees(): Promise<string[]> {
 export async function getExpenseById(id: string): Promise<Expense | null> {
   const { data, error } = await supabase
     .from("account_transactions")
-    .select("id, type, txn_date, amount, voucher_number, category_id, payee, employee_id, note, booking_payment_id, created_at, created_by, deleted_at")
+    .select("id, type, txn_date, amount, voucher_number, category_id, expense_item_id, payee, employee_id, note, booking_payment_id, created_at, created_by, deleted_at")
     .eq("id", id)
     .maybeSingle();
 
@@ -189,6 +193,7 @@ export async function getExpenseById(id: string): Promise<Expense | null> {
     amount:        typeof data.amount === "string" ? parseFloat(data.amount) : data.amount,
     voucherNumber: data.voucher_number ?? "",
     categoryId:    data.category_id ?? "",
+    expenseItemId: data.expense_item_id ?? null,
     payee:         data.payee,
     employeeId:    data.employee_id,
     note:          data.note,
@@ -250,6 +255,7 @@ export async function createExpense(input: NewExpense): Promise<Expense> {
     to_account_id:      null,
     voucher_number:     voucherNumber,
     category_id:        input.categoryId,
+    expense_item_id:    input.expenseItemId ?? null,
     payee:              input.payeeMode === "vendor"   ? input.payee!.trim() : null,
     employee_id:        input.payeeMode === "employee" ? input.employeeId!   : null,
     note:               input.note?.trim() || null,
@@ -260,7 +266,7 @@ export async function createExpense(input: NewExpense): Promise<Expense> {
   const { data, error } = await supabase
     .from("account_transactions")
     .insert(payload)
-    .select("id, txn_date, amount, voucher_number, category_id, payee, employee_id, note, created_at, created_by")
+    .select("id, txn_date, amount, voucher_number, category_id, expense_item_id, payee, employee_id, note, created_at, created_by")
     .single();
 
   if (error || !data) {
@@ -275,6 +281,7 @@ export async function createExpense(input: NewExpense): Promise<Expense> {
     amount: string | number;
     voucher_number: string;
     category_id: string;
+    expense_item_id: string | null;
     payee: string | null;
     employee_id: string | null;
     note: string | null;
@@ -288,6 +295,7 @@ export async function createExpense(input: NewExpense): Promise<Expense> {
     amount:        typeof r.amount === "string" ? parseFloat(r.amount) : r.amount,
     voucherNumber: r.voucher_number,
     categoryId:    r.category_id,
+    expenseItemId: r.expense_item_id ?? null,
     payee:         r.payee,
     employeeId:    r.employee_id,
     note:          r.note,
@@ -357,6 +365,7 @@ export async function editExpense(id: string, input: NewExpense): Promise<Expens
       txn_date:    input.txnDate,
       amount:      input.amount,
       category_id: input.categoryId,
+      expense_item_id: input.expenseItemId ?? null,
       payee:       input.payeeMode === "vendor"   ? input.payee!.trim() : null,
       employee_id: input.payeeMode === "employee" ? input.employeeId!   : null,
       note:        input.note?.trim() || null,
@@ -365,7 +374,7 @@ export async function editExpense(id: string, input: NewExpense): Promise<Expens
     })
     .eq("id", id)
     .is("deleted_at", null)
-    .select("id, txn_date, amount, voucher_number, category_id, payee, employee_id, note, created_at, created_by")
+    .select("id, txn_date, amount, voucher_number, category_id, expense_item_id, payee, employee_id, note, created_at, created_by")
     .single();
 
   if (error || !data) {
@@ -380,6 +389,7 @@ export async function editExpense(id: string, input: NewExpense): Promise<Expens
     amount: string | number;
     voucher_number: string;
     category_id: string;
+    expense_item_id: string | null;
     payee: string | null;
     employee_id: string | null;
     note: string | null;
@@ -393,6 +403,7 @@ export async function editExpense(id: string, input: NewExpense): Promise<Expens
     amount:        typeof r.amount === "string" ? parseFloat(r.amount) : r.amount,
     voucherNumber: r.voucher_number,
     categoryId:    r.category_id,
+    expenseItemId: r.expense_item_id ?? null,
     payee:         r.payee,
     employeeId:    r.employee_id,
     note:          r.note,
