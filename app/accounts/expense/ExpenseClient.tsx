@@ -291,7 +291,7 @@ function ItemCombobox({
               position: "fixed", top: rect.top, left: rect.left, width: rect.width, zIndex: 60,
               animation: "ex-combo-in 130ms ease-out",
             }}
-            className="max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl p-1.5"
+            className="max-h-60 overflow-y-auto rounded-xl border border-slate-300 bg-white shadow-xl p-1.5"
           >
             {options.length === 0 ? (
               <div className="px-3 py-2.5 text-[13px] text-slate-400 italic">{emptyText}</div>
@@ -305,13 +305,17 @@ function ItemCombobox({
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => { onSelect(o); setOpen(false); }}
                   onMouseEnter={() => setHighlight(idx)}
-                  className={`flex items-center gap-2 w-full text-left px-3 py-2.5 text-[13px] rounded-lg transition-colors ${
-                    idx === highlight ? "bg-amber-50 text-amber-900" : "text-slate-700"
-                  } ${o.id === valueId ? "font-semibold" : ""}`}
+                  className={`flex items-center gap-2 w-full text-left px-3 py-2.5 text-[13px] rounded-lg transition-colors duration-100 ${
+                    idx === highlight
+                      ? "bg-amber-500 text-white font-medium"
+                      : o.id === valueId
+                        ? "bg-amber-50 text-amber-900 font-semibold"
+                        : "text-slate-700"
+                  }`}
                 >
                   <span className="flex-1 min-w-0 truncate">{o.label}</span>
                   {o.id === valueId && (
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 shrink-0 text-amber-600">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-4 h-4 shrink-0 ${idx === highlight ? "text-white" : "text-amber-600"}`}>
                       <path d="M5 13l4 4L19 7" />
                     </svg>
                   )}
