@@ -21,7 +21,7 @@
 //
 // ─────────────────────────────────────────────────────────────
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 import {
   createExpenseCategory,
@@ -132,6 +132,175 @@ function formatAmount(n: number): string {
 // system_key='commission' live for it to take effect.
 const NO_ITEM_PICKER_KEYS = new Set(["salary", "remuneration", "commission"]);
 
+// ── ItemCombobox ─────────────────────────────────────────────
+// Styled replacement for the OS-native <datalist> pickers in the Add
+// Expense modal. Fully controlled: the parent owns both the selected id
+// and the free-typed query (the inventory picker's "create new item"
+// flow needs the typed text after the panel closes). The options panel
+// is position:fixed so the modal body's overflow can't clip it — safe
+// here because the expense modal overlay has no backdrop-blur (a
+// backdrop-filter would make the overlay the containing block for
+// fixed descendants; see CLAUDE.md). z-[60] = above the z-50 modal.
+type ComboOption = { id: string; label: string };
+
+function ItemCombobox({
+  options,
+  valueId,
+  query,
+  placeholder,
+  disabled,
+  invalid,
+  emptyText,
+  onQueryChange,
+  onSelect,
+}: {
+  options: ComboOption[];
+  valueId: string;                      // "" = nothing selected
+  query: string;                        // free-typed filter text
+  placeholder: string;
+  disabled?: boolean;
+  invalid?: boolean;
+  emptyText: string;                    // shown when options is empty
+  onQueryChange: (q: string) => void;   // typing (parent clears valueId)
+  onSelect: (opt: ComboOption | null) => void; // null = cleared via ✕
+}) {
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  const wrapRef  = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  const selected = valueId ? options.find((o) => o.id === valueId) ?? null : null;
+  const q = query.trim().toLowerCase();
+  // With a selection the field shows its label, so don't filter by it —
+  // the full list stays visible for re-picking.
+  const filtered = selected || !q ? options : options.filter((o) => o.label.toLowerCase().includes(q));
+
+  const openPanel = () => {
+    if (disabled) return;
+    const r = wrapRef.current?.getBoundingClientRect();
+    if (r) setRect({ top: r.bottom + 4, left: r.left, width: r.width });
+    setHighlight(0);
+    setOpen(true);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (wrapRef.current?.contains(t) || panelRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    // The panel is fixed, so any outer scroll would detach it from the
+    // field — close instead. Scrolls inside the panel itself are fine.
+    const onScroll = (e: Event) => {
+      if (panelRef.current && e.target instanceof Node && panelRef.current.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onResize = () => setOpen(false);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [open]);
+
+  useEffect(() => { setHighlight(0); }, [query]);
+
+  useEffect(() => {
+    if (!open) return;
+    const el = panelRef.current?.children[highlight] as HTMLElement | undefined;
+    el?.scrollIntoView?.({ block: "nearest" });
+  }, [highlight, open]);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (!open) openPanel();
+      else setHighlight((h) => Math.min(h + 1, Math.max(filtered.length - 1, 0)));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (open) setHighlight((h) => Math.max(h - 1, 0));
+    } else if (e.key === "Enter") {
+      if (open) {
+        e.preventDefault(); // don't submit the form while picking
+        const o = filtered[highlight];
+        if (o) { onSelect(o); setOpen(false); }
+      }
+    } else if (e.key === "Escape") {
+      if (open) {
+        e.stopPropagation(); // close the panel, not the modal
+        setOpen(false);
+      }
+    } else if (e.key === "Tab") {
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <input
+        type="text"
+        value={selected ? selected.label : query}
+        onChange={(e) => { onQueryChange(e.target.value); if (!open) openPanel(); }}
+        onClick={openPanel}
+        onFocus={openPanel}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        disabled={disabled}
+        autoComplete="off"
+        role="combobox"
+        aria-expanded={open}
+        className={inputCls(!!invalid) + " pr-8"}
+      />
+      {(selected || query.length > 0) && !disabled && (
+        <button
+          type="button"
+          aria-label="Clear selection"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => { onSelect(null); onQueryChange(""); setOpen(false); }}
+          className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 text-slate-300 hover:text-slate-500 transition-colors"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3.5 h-3.5">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      )}
+      {open && rect && (
+        <div
+          ref={panelRef}
+          style={{ position: "fixed", top: rect.top, left: rect.left, width: rect.width, zIndex: 60 }}
+          className="max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-xl py-1"
+        >
+          {options.length === 0 ? (
+            <div className="px-3.5 py-2.5 text-[13px] text-slate-400 italic">{emptyText}</div>
+          ) : filtered.length === 0 ? (
+            <div className="px-3.5 py-2.5 text-[13px] text-slate-400 italic">No matches.</div>
+          ) : (
+            filtered.map((o, idx) => (
+              <button
+                key={o.id}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => { onSelect(o); setOpen(false); }}
+                onMouseEnter={() => setHighlight(idx)}
+                className={`block w-full text-left px-3.5 py-2 text-[13px] transition-colors ${
+                  idx === highlight ? "bg-amber-50 text-slate-900" : "text-slate-700"
+                } ${o.id === valueId ? "font-semibold" : ""}`}
+              >
+                {o.label}
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ExpenseClient() {
   // ── Data ───────────────────────────────────────────────────
   // Expense categories come from the session-level reference cache; aliased to
@@ -224,7 +393,7 @@ export default function ExpenseClient() {
   const [exEmployeeId,  setExEmployeeId]  = useState<string>("");
   const [exPayeeText,   setExPayeeText]   = useState<string>("");
   const [exNote,        setExNote]        = useState<string>("");
-  // Optional expense-item picker (type-to-search; datalist like the inventory picker)
+  // Optional expense-item picker (ItemCombobox: click-to-open list + type-to-filter)
   const [exExpItemId,     setExExpItemId]     = useState<string>("");
   const [exExpItemSearch, setExExpItemSearch] = useState<string>("");
   // ── Inventory purchase toggle state ───────────────────────
@@ -676,7 +845,7 @@ export default function ExpenseClient() {
         notes:      exInvNewNotes.trim() || undefined,
       };
       const created = await createInventoryItem(input);
-      // Refresh the items list so the new item appears in the datalist
+      // Refresh the items list so the new item appears in the picker
       const refreshed = await getInventoryItems({ activeOnly: false });
       setInventoryItems(refreshed);
       // Select the new item and exit create mode
@@ -1556,36 +1725,24 @@ export default function ExpenseClient() {
                   && !(selCat.systemKey && NO_ITEM_PICKER_KEYS.has(selCat.systemKey));
                 if (!allowed) return null;
                 const catItems = expenseItems.filter((i) => i.isActive && i.categoryId === exCategoryId);
-                const selected = exExpItemId ? expenseItems.find((i) => i.id === exExpItemId) : undefined;
                 return (
                   <div className="space-y-1">
                     <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Item (optional)</label>
-                    <input
-                      type="text"
-                      list="expense-item-options"
-                      value={exExpItemSearch}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setExExpItemSearch(v);
-                        const match = catItems.find((i) => i.name.toLowerCase() === v.trim().toLowerCase());
-                        setExExpItemId(match ? match.id : "");
-                      }}
-                      placeholder={catItems.length > 0 ? "Type to search items…" : "No items in this category yet"}
-                      disabled={creatingExpense || catItems.length === 0}
-                      className={inputCls(false)}
+                    <ItemCombobox
+                      options={catItems.map((i) => ({ id: i.id, label: i.name }))}
+                      valueId={exExpItemId}
+                      query={exExpItemSearch}
+                      placeholder="Select an item (optional)…"
+                      disabled={creatingExpense}
+                      emptyText="No items in this category"
+                      onQueryChange={(v) => { setExExpItemSearch(v); setExExpItemId(""); }}
+                      onSelect={(o) => { setExExpItemId(o?.id ?? ""); setExExpItemSearch(o?.label ?? ""); }}
                     />
-                    <datalist id="expense-item-options">
-                      {catItems.map((i) => (<option key={i.id} value={i.name} />))}
-                    </datalist>
-                    {selected ? (
-                      <p className="text-[11.5px] text-emerald-700">Selected: <span className="font-semibold">{selected.name}</span></p>
-                    ) : (
-                      <p className="text-[11.5px] text-slate-400">
-                        {catItems.length > 0
-                          ? "Pick from the list or leave blank."
-                          : "Define items via Manage Items — or leave blank."}
-                      </p>
-                    )}
+                    <p className="text-[11.5px] text-slate-400">
+                      {catItems.length > 0
+                        ? "Pick from the list or leave blank."
+                        : "Define items via Manage Items — or leave blank."}
+                    </p>
                   </div>
                 );
               })()}
@@ -1697,15 +1854,19 @@ export default function ExpenseClient() {
                   {/* Item picker */}
                   <div className="space-y-1">
                     <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Inventory item</label>
-                    <input
-                      type="text"
-                      list="inv-item-datalist"
-                      value={exInvItemSearch}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setExInvItemSearch(val);
-                        const match = inventoryItems.find((it) => it.name === val);
-                        setExInvItemId(match ? match.id : "");
+                    <ItemCombobox
+                      options={inventoryItems.filter((it) => it.isActive).map((it) => ({ id: it.id, label: it.name }))}
+                      valueId={exInvItemId}
+                      query={exInvItemSearch}
+                      placeholder="Search inventory items…"
+                      disabled={creatingExpense}
+                      invalid={!!(createExpenseFieldErrors as Record<string,string>).invItem}
+                      emptyText="No active inventory items"
+                      onQueryChange={(val) => { setExInvItemSearch(val); setExInvItemId(""); }}
+                      onSelect={(o) => {
+                        setExInvItemId(o?.id ?? "");
+                        setExInvItemSearch(o?.label ?? "");
+                        const match = o ? inventoryItems.find((it) => it.id === o.id) : undefined;
                         // auto-compute unit price when qty already entered
                         if (match && exInvQuantity) {
                           const upp = match.unitsPerPack ?? null;
@@ -1714,15 +1875,7 @@ export default function ExpenseClient() {
                           if (baseQty > 0 && amt > 0) setExInvUnitPrice((amt / baseQty).toFixed(2));
                         }
                       }}
-                      placeholder="Type to search items…"
-                      disabled={creatingExpense}
-                      className={inputCls(!!(createExpenseFieldErrors as Record<string,string>).invItem)}
                     />
-                    <datalist id="inv-item-datalist">
-                      {inventoryItems.filter((it) => it.isActive).map((it) => (
-                        <option key={it.id} value={it.name} />
-                      ))}
-                    </datalist>
                     {(createExpenseFieldErrors as Record<string,string>).invItem && (
                       <p className="text-[11.5px] text-rose-600">{(createExpenseFieldErrors as Record<string,string>).invItem}</p>
                     )}
