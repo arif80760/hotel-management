@@ -18,6 +18,16 @@
 --   time. LIVE VALUE AT APPLY: the sequence was seeded to 1150.
 --   setval(..., v_next, false) means the NEXT nextval() returns v_next
 --   itself (is_called = false), not v_next + 1.
+--
+-- PRIVILEGES:
+--   Both create_booking_with_rooms and add_room_to_booking are
+--   SECURITY INVOKER (prosecdef = false), so the AUTHENTICATED role itself
+--   needs USAGE on this sequence for nextval() to work. The GRANT below was
+--   run live on 2026-07-31 and was a NO-OP — the ACL was byte-identical
+--   before and after (authenticated=rwU/postgres already present from
+--   Supabase's default privileges). It is recorded here to make the
+--   privilege EXPLICIT for a rebuild from migrations, not as a fix for
+--   anything that was broken.
 -- =============================================================
 
 DO $$
@@ -43,3 +53,6 @@ BEGIN
     PERFORM setval('public.booking_ref_seq', v_next, false);
   END IF;
 END $$;
+
+-- Explicit privilege for rebuilds (no-op live — see PRIVILEGES note above).
+GRANT USAGE, SELECT ON SEQUENCE public.booking_ref_seq TO authenticated;

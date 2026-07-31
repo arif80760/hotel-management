@@ -18,9 +18,10 @@
 --   Per-category name uniqueness via expense_items_cat_name_uidx on
 --   (category_id, lower(trim(name))). No DELETE policy — deactivate-only
 --   (is_active = false), matching expense_categories; both FKs RESTRICT.
---   updated_at maintained by trg_expense_items_updated_at when the live
---   fn_set_updated_at helper exists (it is live-only; see the schema-drift
---   note in CLAUDE.md).
+--   updated_at maintained by trg_expense_items_updated_at when the
+--   fn_set_updated_at helper exists (that helper is already recorded in
+--   CLAUDE.md's deferred schema-drift backfill list — consistent with
+--   existing documentation, not a new finding).
 --
 -- CLIENT: services/expenseItemsService.ts. The inventory link is
 -- display/metadata only for now — it does NOT drive the purchase seam
