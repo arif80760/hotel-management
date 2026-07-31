@@ -1461,35 +1461,60 @@ export default function BookingsClient({ initialRoom }: Props) {
 
   /** Patch a room row by id. Imperative rate auto-fill fires when "room" key is in patch. */
   function updateRoom(id: string, patch: Partial<Omit<RoomFormRow, "id">>) {
-    setForm(prev => ({
-      ...prev,
-      rooms: prev.rooms.map(r => {
-        if (r.id !== id) return r;
-        const updated = { ...r, ...patch };
-        if ("room" in patch) {
-          const found = rooms.find(x => x.roomNumber === updated.room.trim());
-          if (found) {
-            updated.fixedRate   = String(getCategoryPrice(found.category?.toLowerCase() ?? "", categories));
-            updated.bookingRate = String(getCategoryPrice(found.category?.toLowerCase() ?? "", categories));
-          }
+    // Single patch mapper used for BOTH the state update and the entry-time
+    // check below, so the checked values can never drift from what's stored.
+    const applyPatch = (r: RoomFormRow): RoomFormRow => {
+      if (r.id !== id) return r;
+      const updated = { ...r, ...patch };
+      if ("room" in patch) {
+        const found = rooms.find(x => x.roomNumber === updated.room.trim());
+        if (found) {
+          updated.fixedRate   = String(getCategoryPrice(found.category?.toLowerCase() ?? "", categories));
+          updated.bookingRate = String(getCategoryPrice(found.category?.toLowerCase() ?? "", categories));
         }
-        return updated;
-      }),
-    }));
-    // Clear per-row errors for the patched fields
-    if (errors.rooms?.[id]) {
-      const rowErrors = { ...errors.rooms[id] };
-      for (const k of Object.keys(patch) as Array<keyof typeof rowErrors>) {
-        if (k in rowErrors) delete rowErrors[k as keyof typeof rowErrors];
       }
-      setErrors(prev => {
-        const merged = { ...prev.rooms, [id]: Object.keys(rowErrors).length > 0 ? rowErrors : undefined };
-        const filtered = Object.fromEntries(
-          Object.entries(merged).filter(([, v]) => v !== undefined)
-        ) as NonNullable<FormErrors["rooms"]>;
-        return { ...prev, rooms: Object.keys(filtered).length > 0 ? filtered : undefined };
-      });
+      return updated;
+    };
+
+    setForm(prev => ({ ...prev, rooms: prev.rooms.map(applyPatch) }));
+
+    // ── Row-error housekeeping + ENTRY-TIME floor check ───────
+    // 1. Clear errors for the fields just edited (existing behaviour).
+    // 2. Immediately re-flag the rate if the updated row is below its
+    //    category minimum — the user learns while typing, not at Confirm.
+    //    Informational for admins too (they can still proceed via the
+    //    submit-time override dialog); the submit guard stays the backstop
+    //    for paste/autofill paths that skip onChange.
+    const current = form.rooms.find(r => r.id === id);
+    if (!current) return;
+    const updatedRow = applyPatch(current);
+
+    const rowErrors: NonNullable<FormErrors["rooms"]>[string] = { ...(errors.rooms?.[id] ?? {}) };
+    for (const k of Object.keys(patch) as Array<keyof typeof rowErrors>) {
+      if (k in rowErrors) delete rowErrors[k as keyof typeof rowErrors];
     }
+
+    if ("bookingRate" in patch || "room" in patch) {
+      const floor   = resolveCategoryFloor(updatedRow.room.trim(), rooms, categories);
+      const rateNum = parseFloat(updatedRow.bookingRate);
+      if (floor && !isNaN(rateNum) && rateNum < floor.minRate) {
+        rowErrors.bookingRate = floorErrorMessage({
+          rowId:        id,
+          roomNumber:   updatedRow.room.trim(),
+          categoryName: floor.categoryName,
+          rate:         rateNum,
+          minRate:      floor.minRate,
+        });
+      }
+    }
+
+    setErrors(prev => {
+      const merged = { ...prev.rooms, [id]: Object.keys(rowErrors).length > 0 ? rowErrors : undefined };
+      const filtered = Object.fromEntries(
+        Object.entries(merged).filter(([, v]) => v !== undefined)
+      ) as NonNullable<FormErrors["rooms"]>;
+      return { ...prev, rooms: Object.keys(filtered).length > 0 ? filtered : undefined };
+    });
   }
 
   // ── Block manipulation helpers ──────────────────────────────
@@ -6895,9 +6920,24 @@ export default function BookingsClient({ initialRoom }: Props) {
                                       ...prev,
                                       rooms: prev.rooms.map(row => row.id === r.id ? { ...row, bookingRate: val } : row),
                                     }));
+                                    // ENTRY-TIME floor check: flag a below-minimum rate the moment
+                                    // it's typed, clear it the moment it's corrected (msg undefined).
+                                    // Informational for admins (submit override still available);
+                                    // the submit-time guard remains the backstop.
+                                    const floor   = resolveCategoryFloor(r.room.trim(), rooms, categories);
+                                    const rateNum = parseFloat(val);
+                                    const msg = floor && !isNaN(rateNum) && rateNum < floor.minRate
+                                      ? floorErrorMessage({
+                                          rowId:        r.id,
+                                          roomNumber:   r.room.trim(),
+                                          categoryName: floor.categoryName,
+                                          rate:         rateNum,
+                                          minRate:      floor.minRate,
+                                        })
+                                      : undefined;
                                     setEditErrors(prev => ({
                                       ...prev,
-                                      rooms: { ...prev.rooms, [r.id]: { ...prev.rooms?.[r.id], bookingRate: undefined } },
+                                      rooms: { ...prev.rooms, [r.id]: { ...prev.rooms?.[r.id], bookingRate: msg } },
                                     }));
                                   }}
                                   onWheel={e => (e.target as HTMLInputElement).blur()}
