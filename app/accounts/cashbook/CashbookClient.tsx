@@ -38,7 +38,7 @@ import {
 } from "@/services/dayCloseService";
 
 import LoanEntryActions from "@/app/accounts/loans/LoanEntryActions";
-import { getAllBookings } from "@/services/bookingsService";
+import { getAllBookings, getRoomsForBookingPayments } from "@/services/bookingsService";
 import type { MockBooking } from "@/lib/mockData";
 import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
@@ -491,6 +491,28 @@ export default function CashbookClient({
   // bookings: live snapshot for the outstanding-dues tile. Loaded ONCE on
   // mount (period-independent) — NOT part of the date-range refetch.
   const [bookings,     setBookings]     = useState<MockBooking[]>([]);
+  // paymentId -> { bookingRef, roomNumbers[] } for "Room revenue" row labels.
+  // Batched: ONE lookup per data change covering every visible transaction
+  // (ledger + Day Close activity) — never a per-row query.
+  const [roomsByPaymentId, setRoomsByPaymentId] = useState<Map<string, { bookingRef: string; roomNumbers: string[] }>>(new Map());
+
+  /** Display strings for a Room-revenue row's rooms + booking ref.
+   *  1 room -> "Room 301"; 2 -> "Rooms 301, 304"; 3+ -> "Rooms 301, 304 +2"
+   *  (full comma-separated list goes in the title attribute). null when the
+   *  payment is unknown or resolves to no rooms — caller renders nothing. */
+  const roomInfoFor = (bookingPaymentId: string | null | undefined) => {
+    if (!bookingPaymentId) return null;
+    const info = roomsByPaymentId.get(bookingPaymentId);
+    if (!info || info.roomNumbers.length === 0) return null;
+    const nums   = info.roomNumbers;   // sorted ascending by the service
+    const prefix = nums.length === 1 ? "Room" : "Rooms";
+    const shown  = nums.length <= 2 ? nums.join(", ") : `${nums.slice(0, 2).join(", ")} +${nums.length - 2}`;
+    const ref    = info.bookingRef ? ` · ${info.bookingRef}` : "";
+    return {
+      text: `${prefix} ${shown}${ref}`,
+      full: `${prefix} ${nums.join(", ")}${ref}`,
+    };
+  };
   // Category reference maps — used to label Day Close activity rows by their
   // true category (and detect remuneration via kind). Sourced from the
   // session-level reference cache, not refetched on mount.
@@ -507,6 +529,7 @@ export default function CashbookClient({
     setExpenseCatMap(new Map(expenseCategories.map((c) => [c.id, { name: c.name, kind: c.kind }])));
     setRevenueCatMap(new Map(revenueCategories.map((c) => [c.id, c.name])));
   }, [accountDefs, expenseCategories, revenueCategories]);
+
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching,   setFetching]   = useState(true);
@@ -536,6 +559,27 @@ export default function CashbookClient({
   // pastActivity: data for the oldest missed day (review screen). Loaded by
   // loadDayCloseStatus when missedDays.length > 0; null otherwise.
   const [pastActivity, setPastActivity] = useState<PastDayActivity | null>(null);
+
+  // Resolve rooms + booking_ref for every booking-linked revenue row in view
+  // (ledger + Day Close catch-up activity) in one batched lookup. Display
+  // only — a failed lookup just leaves the labels without room text.
+  useEffect(() => {
+    const ids = new Set<string>();
+    for (const t of transactions) {
+      if (t.type === "revenue_in" && t.bookingPaymentId) ids.add(t.bookingPaymentId);
+    }
+    if (pastActivity) {
+      for (const t of pastActivity.transactions) {
+        if (t.type === "revenue_in" && t.bookingPaymentId) ids.add(t.bookingPaymentId);
+      }
+    }
+    if (ids.size === 0) { setRoomsByPaymentId(new Map()); return; }
+    let cancelled = false;
+    getRoomsForBookingPayments([...ids])
+      .then((m) => { if (!cancelled) setRoomsByPaymentId(m); })
+      .catch((err) => console.error("[CashbookClient] room lookup failed (labels stay bare):", err));
+    return () => { cancelled = true; };
+  }, [transactions, pastActivity]);
   // closingDay: true while closeDay() call is in flight (disables button).
   const [closingDay, setClosingDay] = useState(false);
   // closeDayError: error message from a failed close attempt (banner under the button).
@@ -1025,7 +1069,14 @@ export default function CashbookClient({
         // For "today" mode: pull from the already-loaded transactions state.
         // For "catchup" mode: use pastActivity (a separate service fetch).
         // For "closed" mode: show today's opening, no activity list.
-        type DerivedRow = { id: string; label: string; note: string | null; amount: number; sign: "+" | "−"; color: string };
+        type DerivedRow = { id: string; label: string; title?: string; note: string | null; amount: number; sign: "+" | "−"; color: string };
+
+        /** Full-list tooltip for rows whose label truncates the room list (3+ rooms). */
+        const deriveTitle = (t: { type: string; bookingPaymentId?: string | null }): string | undefined => {
+          if (t.type !== "revenue_in" || !t.bookingPaymentId) return undefined;
+          const ri = roomInfoFor(t.bookingPaymentId);
+          return ri && ri.full !== ri.text ? `Room revenue · ${ri.full}` : undefined;
+        };
 
         const deriveLabel = (t: { type: string; note: string | null; bookingPaymentId?: string | null; revenueCategoryId?: string | null; categoryId?: string | null }): string => {
           switch (t.type) {
@@ -1034,7 +1085,11 @@ export default function CashbookClient({
             case "injection":      return "Cash injection";
             case "transfer":       return "Transfer";
             case "revenue_in":
-              if (t.bookingPaymentId) return "Room revenue";
+              if (t.bookingPaymentId) {
+                const ri = roomInfoFor(t.bookingPaymentId);
+                // No rooms resolved -> plain label, no blank separator.
+                return ri ? `Room revenue · ${ri.text}` : "Room revenue";
+              }
               return (t.revenueCategoryId && revenueCatMap.get(t.revenueCategoryId)) || "Other revenue";
             case "expense_out": {
               const cat = t.categoryId ? expenseCatMap.get(t.categoryId) : undefined;
@@ -1059,6 +1114,7 @@ export default function CashbookClient({
             id:     t.id,
             note:   t.note,
             label:  deriveLabel(t),
+            title:  deriveTitle(t),
             amount: t.amount,
             sign:   t.toAccountId === cashId ? "+" : "−",
             color:  t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700",
@@ -1086,6 +1142,7 @@ export default function CashbookClient({
             id:     t.id,
             note:   t.note,
             label:  deriveLabel(t),
+            title:  deriveTitle(t),
             amount: t.amount,
             sign:   t.toAccountId === cashId ? "+" : "−",
             color:  t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700",
@@ -1187,7 +1244,7 @@ export default function CashbookClient({
                 <ul className="space-y-1 pl-3">
                   {displayRows.map((r) => (
                     <li key={r.id} className="flex items-center justify-between">
-                      <span style={{ fontFamily: archivoFamily, fontSize: 13, color: "#5F5F5F" }} className="truncate pr-3">{r.label}{r.note && r.note !== r.label ? ` · ${r.note}` : ""}</span>
+                      <span style={{ fontFamily: archivoFamily, fontSize: 13, color: "#5F5F5F" }} className="truncate pr-3" title={r.title}>{r.label}{r.note && r.note !== r.label ? ` · ${r.note}` : ""}</span>
                       <span style={{ fontFamily: oswaldFamily, fontSize: 15, fontWeight: 600 }} className={`tabular-nums ${r.color}`}>{r.sign}{formatBdt(r.amount)}</span>
                     </li>
                   ))}
@@ -1347,6 +1404,21 @@ export default function CashbookClient({
                                 </span>
                               )}
                               <p className="text-[13px] font-medium text-slate-700">{flow}</p>
+                              {/* Room revenue: room number(s) + booking ref, resolved via
+                                  payments -> booking_rooms (NEVER bookings.room_id — that
+                                  legacy column holds only the first room). Rows without a
+                                  resolvable booking render exactly as before. */}
+                              {t.type === "revenue_in" && t.bookingPaymentId && (() => {
+                                const ri = roomInfoFor(t.bookingPaymentId);
+                                return ri ? (
+                                  <span
+                                    className={`text-[12px] text-slate-500 whitespace-nowrap ${isDeleted ? "line-through decoration-slate-400" : ""}`}
+                                    title={ri.full}
+                                  >
+                                    {ri.text}
+                                  </span>
+                                ) : null;
+                              })()}
                             </div>
                             {(t.type === "loan_received" || t.type === "loan_repayment") && t.lenderName && (
                               <p className={`mt-1 text-[12.5px] text-slate-500 break-words ${isDeleted ? "line-through decoration-slate-400" : ""}`}>{t.lenderName}</p>

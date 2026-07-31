@@ -2497,6 +2497,88 @@ export async function markBookingNoShow(bookingRef: string): Promise<void> {
  * booking-derived revenue rows (which carry only the payment id)
  * with their booking reference and payment method. One query, no N+1.
  */
+/**
+ * Batch-resolve the room numbers + booking_ref behind booking payments, for
+ * display on Cashbook "Room revenue" rows. Keyed by payments.id.
+ *
+ * DATA PATH (deliberate): payments.id -> payments.booking_id ->
+ * booking_rooms.booking_id -> rooms.room_number. NEVER via bookings.room_id —
+ * that legacy column holds only the FIRST room, so a multi-room booking
+ * (48 of 146 bookings) would silently render one room and look correct.
+ *
+ * One payment covers the whole booking, so a payment maps to N rooms.
+ * Room numbers are sorted ascending (numeric-aware). Two batched queries
+ * total — never call per row.
+ */
+export async function getRoomsForBookingPayments(
+  paymentIds: string[],
+): Promise<Map<string, { bookingRef: string; roomNumbers: string[] }>> {
+  const out = new Map<string, { bookingRef: string; roomNumbers: string[] }>();
+  const unique = [...new Set(paymentIds)].filter(Boolean);
+  if (unique.length === 0) return out;
+
+  // 1. payments -> booking_id + booking_ref (embedded relation may be array or object)
+  const { data: pays, error: payErr } = await supabase
+    .from("payments")
+    .select("id, booking_id, bookings!booking_id ( booking_ref )")
+    .in("id", unique);
+
+  if (payErr) {
+    console.error("[getRoomsForBookingPayments] payments fetch FAILED:", payErr.message, "| code:", payErr.code);
+    throw new Error(`[getRoomsForBookingPayments] ${payErr.message}`);
+  }
+
+  type PayRow = {
+    id: string;
+    booking_id: string | null;
+    bookings: { booking_ref: string } | { booking_ref: string }[] | null;
+  };
+  const payRows = (pays ?? []) as PayRow[];
+  const bookingIds = [...new Set(payRows.map(r => r.booking_id).filter((b): b is string => !!b))];
+  if (bookingIds.length === 0) return out;
+
+  // 2. booking_rooms -> room_number for every involved booking, one query
+  const { data: brs, error: brErr } = await supabase
+    .from("booking_rooms")
+    .select("booking_id, rooms ( room_number )")
+    .in("booking_id", bookingIds);
+
+  if (brErr) {
+    console.error("[getRoomsForBookingPayments] booking_rooms fetch FAILED:", brErr.message, "| code:", brErr.code);
+    throw new Error(`[getRoomsForBookingPayments] ${brErr.message}`);
+  }
+
+  type BrRow = {
+    booking_id: string;
+    rooms: { room_number: string } | { room_number: string }[] | null;
+  };
+  const roomsByBooking = new Map<string, string[]>();
+  for (const r of (brs ?? []) as BrRow[]) {
+    const roomNo = Array.isArray(r.rooms) ? r.rooms[0]?.room_number : r.rooms?.room_number;
+    if (!roomNo) continue;
+    const list = roomsByBooking.get(r.booking_id) ?? [];
+    if (!list.includes(roomNo)) list.push(roomNo);
+    roomsByBooking.set(r.booking_id, list);
+  }
+  for (const list of roomsByBooking.values()) {
+    list.sort((a, b) => {
+      const na = parseInt(a, 10), nb = parseInt(b, 10);
+      if (!isNaN(na) && !isNaN(nb)) return na - nb;
+      return a.localeCompare(b);
+    });
+  }
+
+  for (const pr of payRows) {
+    if (!pr.booking_id) continue;
+    const ref = Array.isArray(pr.bookings) ? pr.bookings[0]?.booking_ref : pr.bookings?.booking_ref;
+    out.set(pr.id, {
+      bookingRef:  ref ?? "",
+      roomNumbers: roomsByBooking.get(pr.booking_id) ?? [],
+    });
+  }
+  return out;
+}
+
 export async function getBookingPaymentMap(
   paymentIds: string[],
 ): Promise<Map<string, { bookingRef: string; method: PaymentMethod }>> {
