@@ -634,7 +634,7 @@ export default function FrontDeskClient() {
       {/* ══════════════════════════════════════════════════════
           SUMMARY STAT CARDS
       ══════════════════════════════════════════════════════ */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
 
         <div className="bg-white border border-blue-200 rounded-xl px-5 py-4 flex items-center gap-3 shadow-sm">
           <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
@@ -714,7 +714,7 @@ export default function FrontDeskClient() {
               const due = calcTrueDue(b);
               return (
                 <div key={b.id} className="px-5 py-4">
-                  <div className="flex items-start gap-3">
+                  <div className="flex flex-wrap sm:flex-nowrap items-start gap-3">
 
                     {/* Avatar */}
                     <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold mt-0.5 ${avatarColor(b.guestName)}`}>
@@ -745,34 +745,48 @@ export default function FrontDeskClient() {
                     </div>
 
                     {/* Actions */}
-                    <div className="flex flex-col gap-1.5 items-end flex-shrink-0">
+                    <div className="flex w-full flex-row flex-wrap items-center justify-end gap-1.5 sm:w-auto sm:flex-col sm:flex-nowrap sm:items-end sm:justify-start sm:flex-shrink-0">
                       {(() => {
                         const gated = !canCheckInToday(b.checkInISO);
                         return (
-                          <button
-                            onClick={gated ? undefined : () => handleCheckIn(b)}
-                            disabled={gated}
-                            title={gated ? `Check-in available on ${b.checkIn}` : undefined}
-                            className={`flex items-center gap-1.5 text-[12px] font-semibold text-white px-3 py-1.5 rounded-lg whitespace-nowrap shadow-sm
-                              ${gated ? "bg-blue-300 cursor-not-allowed opacity-60" : "bg-blue-600 hover:bg-blue-700 transition-colors"}`}
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
-                              <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
-                            </svg>
-                            Check In
-                          </button>
+                          <>
+                            <button
+                              onClick={gated ? undefined : () => handleCheckIn(b)}
+                              disabled={gated}
+                              title={gated ? `Check-in available on ${b.checkIn}` : undefined}
+                              className={`flex items-center gap-1.5 min-h-11 md:min-h-0 text-[12px] font-semibold text-white px-3 py-1.5 rounded-lg whitespace-nowrap shadow-sm
+                                ${gated ? "bg-blue-300 cursor-not-allowed opacity-60" : "bg-blue-600 hover:bg-blue-700 transition-colors"}`}
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
+                                <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
+                              </svg>
+                              Check In
+                            </button>
+                            {/* Touch has no hover tooltip — surface the gating reason visibly */}
+                            {gated && (
+                              <p className="md:hidden w-full text-[10.5px] text-slate-400 text-right leading-tight">
+                                Check-in available on {b.checkIn}
+                              </p>
+                            )}
+                          </>
                         );
                       })()}
                       {/* Collect Payment — admin only before check-in; staff must check in first */}
                       {due > 0 && (
                         isAdmin ? (
-                          <button
-                            onClick={() => openPayModal(b)}
-                            title="Guest not yet checked in — verify before recording payment"
-                            className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100 px-2.5 py-1 rounded-lg transition-colors whitespace-nowrap"
-                          >
-                            + Collect Payment
-                          </button>
+                          <>
+                            <button
+                              onClick={() => openPayModal(b)}
+                              title="Guest not yet checked in — verify before recording payment"
+                              className="inline-flex items-center min-h-11 md:min-h-0 text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100 px-2.5 py-1 rounded-lg transition-colors whitespace-nowrap"
+                            >
+                              + Collect Payment
+                            </button>
+                            {/* Touch has no hover tooltip — surface the warning visibly */}
+                            <p className="md:hidden w-full text-[10.5px] text-amber-600 text-right leading-tight">
+                              Not checked in yet — verify the guest before recording payment
+                            </p>
+                          </>
                         ) : (
                           <p className="text-[10px] text-slate-400 italic text-right leading-tight">
                             Payment after<br/>check-in
@@ -831,7 +845,7 @@ export default function FrontDeskClient() {
                   key={b.id}
                   className={`px-5 py-4 ${isDepartingToday ? "bg-amber-50/40" : ""}`}
                 >
-                  <div className="flex items-start gap-3">
+                  <div className="flex flex-wrap sm:flex-nowrap items-start gap-3">
 
                     {/* Avatar */}
                     <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold mt-0.5 ${avatarColor(b.guestName)}`}>
@@ -872,10 +886,10 @@ export default function FrontDeskClient() {
                     </div>
 
                     {/* Actions */}
-                    <div className="flex flex-col gap-1.5 items-end flex-shrink-0">
+                    <div className="flex w-full flex-row flex-wrap items-center justify-end gap-1.5 sm:w-auto sm:flex-col sm:flex-nowrap sm:items-end sm:justify-start sm:flex-shrink-0">
                       <button
                         onClick={() => handleCheckOut(b)}
-                        className="flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap text-slate-700 bg-slate-100 border border-slate-200 hover:bg-slate-200"
+                        className="flex items-center gap-1.5 min-h-11 md:min-h-0 text-[12px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap text-slate-700 bg-slate-100 border border-slate-200 hover:bg-slate-200"
                       >
                         Check Out
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
@@ -886,7 +900,7 @@ export default function FrontDeskClient() {
                       {due > 0 && (
                         <button
                           onClick={() => openPayModal(b)}
-                          className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 px-2.5 py-1 rounded-lg transition-colors whitespace-nowrap"
+                          className="inline-flex items-center min-h-11 md:min-h-0 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 px-2.5 py-1 rounded-lg transition-colors whitespace-nowrap"
                         >
                           + Add Payment
                         </button>
@@ -940,7 +954,7 @@ export default function FrontDeskClient() {
                   key={b.id}
                   className={`px-5 py-4 ${due > 0 ? "bg-rose-50/40" : ""}`}
                 >
-                  <div className="flex items-start gap-3">
+                  <div className="flex flex-wrap sm:flex-nowrap items-start gap-3">
 
                     {/* Avatar */}
                     <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold mt-0.5 ${avatarColor(b.guestName)}`}>
@@ -973,11 +987,11 @@ export default function FrontDeskClient() {
                     </div>
 
                     {/* Actions */}
-                    <div className="flex flex-col gap-1.5 items-end flex-shrink-0">
+                    <div className="flex w-full flex-row flex-wrap items-center justify-end gap-1.5 sm:w-auto sm:flex-col sm:flex-nowrap sm:items-end sm:justify-start sm:flex-shrink-0">
                       {b.status === "Checked In" && (
                         <button
                           onClick={() => handleCheckOut(b)}
-                          className="flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap text-slate-700 bg-slate-100 border border-slate-200 hover:bg-slate-200"
+                          className="flex items-center gap-1.5 min-h-11 md:min-h-0 text-[12px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap text-slate-700 bg-slate-100 border border-slate-200 hover:bg-slate-200"
                         >
                           Check Out
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
@@ -997,17 +1011,25 @@ export default function FrontDeskClient() {
                         }
                         const warnAdmin = isAdmin && !checkedIn;
                         return (
-                          <button
-                            onClick={() => openPayModal(b)}
-                            title={warnAdmin ? "Guest not yet checked in — verify before recording payment" : undefined}
-                            className={`text-[11px] font-semibold px-2.5 py-1 rounded-lg transition-colors whitespace-nowrap ${
-                              warnAdmin
-                                ? "text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100"
-                                : "text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100"
-                            }`}
-                          >
-                            + Settle Balance
-                          </button>
+                          <>
+                            <button
+                              onClick={() => openPayModal(b)}
+                              title={warnAdmin ? "Guest not yet checked in — verify before recording payment" : undefined}
+                              className={`inline-flex items-center min-h-11 md:min-h-0 text-[11px] font-semibold px-2.5 py-1 rounded-lg transition-colors whitespace-nowrap ${
+                                warnAdmin
+                                  ? "text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100"
+                                  : "text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100"
+                              }`}
+                            >
+                              + Settle Balance
+                            </button>
+                            {/* Touch has no hover tooltip — surface the warning visibly */}
+                            {warnAdmin && (
+                              <p className="md:hidden w-full text-[10.5px] text-amber-600 text-right leading-tight">
+                                Not checked in yet — verify the guest before recording payment
+                              </p>
+                            )}
+                          </>
                         );
                       })()}
                     </div>
@@ -1068,7 +1090,7 @@ export default function FrontDeskClient() {
                     </p>
                   </div>
                 </div>
-                <button onClick={closeCheckoutConfirm} className={`p-1.5 rounded-lg transition-colors ${
+                <button onClick={closeCheckoutConfirm} className={`p-1.5 rounded-lg transition-colors flex items-center justify-center w-11 h-11 md:w-auto md:h-auto ${
                   finalPayable > 0 ? "text-amber-500 hover:text-amber-800 hover:bg-amber-100" : "text-slate-400 hover:text-slate-700 hover:bg-slate-100"
                 }`}>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
@@ -1551,10 +1573,10 @@ export default function FrontDeskClient() {
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
           onClick={e => { if (e.target === e.currentTarget) closePayModal(); }}
         >
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden max-h-[90vh] flex flex-col">
 
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50 flex-shrink-0">
               <div className="flex items-center gap-2.5">
                 <div className="w-7 h-7 rounded-lg bg-emerald-600 flex items-center justify-center">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-white">
@@ -1566,14 +1588,14 @@ export default function FrontDeskClient() {
                   <p className="text-[11.5px] text-slate-400 mt-0.5 font-mono">{payModal.id}</p>
                 </div>
               </div>
-              <button onClick={closePayModal} className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition-colors">
+              <button onClick={closePayModal} className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition-colors flex items-center justify-center w-11 h-11 md:w-auto md:h-auto">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4">
                   <path d="M18 6L6 18M6 6l12 12"/>
                 </svg>
               </button>
             </div>
 
-            <div className="px-6 pt-5 pb-4">
+            <div className="px-6 pt-5 pb-4 overflow-y-auto flex-1">
 
               {/* Guest info */}
               <div className="flex items-center gap-3 mb-5">
@@ -1615,7 +1637,7 @@ export default function FrontDeskClient() {
               )}
 
               {/* Amount breakdown */}
-              <div className="grid grid-cols-3 gap-3 mb-5">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3 mb-5">
                 <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-center">
                   <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Total</p>
                   <p className="text-[15px] font-bold text-slate-800">৳{payModal.totalAmount.toLocaleString()}</p>
