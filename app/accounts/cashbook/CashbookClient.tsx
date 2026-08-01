@@ -1459,6 +1459,22 @@ export default function CashbookClient({
                                   </span>
                                 ) : null;
                               })()}
+                              {/* Expense detail — same rule as the Day Close labels:
+                                  employee name (who was paid) beats item name; both
+                                  null renders exactly as before. Reuses the maps
+                                  loaded once on mount — no per-row lookups. */}
+                              {t.type === "expense_out" && (() => {
+                                const emp    = t.employeeId    ? employeeNameById.get(t.employeeId)       : undefined;
+                                const item   = t.expenseItemId ? expenseItemNameById.get(t.expenseItemId) : undefined;
+                                const detail = emp ?? item;
+                                if (!detail) return null;
+                                const catName = t.categoryId ? expenseCatMap.get(t.categoryId)?.name : undefined;
+                                return (
+                                  <span className={`text-[12px] text-slate-500 truncate max-w-full min-w-0 ${isDeleted ? "line-through decoration-slate-400" : ""}`}>
+                                    {catName ? `${catName} · ${detail}` : detail}
+                                  </span>
+                                );
+                              })()}
                             </div>
                             {(t.type === "loan_received" || t.type === "loan_repayment") && t.lenderName && (
                               <p className={`mt-1 text-[12.5px] text-slate-500 break-words ${isDeleted ? "line-through decoration-slate-400" : ""}`}>{t.lenderName}</p>
