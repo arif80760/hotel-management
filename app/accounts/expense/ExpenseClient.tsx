@@ -136,11 +136,13 @@ const NO_ITEM_PICKER_KEYS = new Set(["salary", "remuneration", "commission"]);
 // Styled replacement for the OS-native <datalist> pickers in the Add
 // Expense modal. Fully controlled: the parent owns both the selected id
 // and the free-typed query (the inventory picker's "create new item"
-// flow needs the typed text after the panel closes). The options panel
-// is position:fixed so the modal body's overflow can't clip it — safe
-// here because the expense modal overlay has no backdrop-blur (a
-// backdrop-filter would make the overlay the containing block for
-// fixed descendants; see CLAUDE.md). z-[60] = above the z-50 modal.
+// flow needs the typed text after the panel closes). Two presentations:
+// md+ renders an anchored position:fixed panel (safe — the expense
+// modal overlay has no backdrop-blur, which would otherwise become the
+// containing block for fixed descendants; see CLAUDE.md); below md it
+// renders a bottom sheet with its own search input, because the soft
+// keyboard resizes the viewport mid-open and makes anchored panels land
+// on stale coordinates. z-[60] = above the z-50 modal in both modes.
 type ComboOption = { id: string; label: string };
 
 function ItemCombobox({
@@ -164,11 +166,13 @@ function ItemCombobox({
   onQueryChange: (q: string) => void;   // typing (parent clears valueId)
   onSelect: (opt: ComboOption | null) => void; // null = cleared via ✕
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(false);           // md+: anchored floating panel
+  const [sheetOpen, setSheetOpen] = useState(false); // <md: bottom sheet
   const [highlight, setHighlight] = useState(0);
   const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const wrapRef  = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const sheetListRef = useRef<HTMLDivElement>(null);
 
   const selected = valueId ? options.find((o) => o.id === valueId) ?? null : null;
   const q = query.trim().toLowerCase();
@@ -176,13 +180,25 @@ function ItemCombobox({
   // the full list stays visible for re-picking.
   const filtered = selected || !q ? options : options.filter((o) => o.label.toLowerCase().includes(q));
 
+  const anyOpen = open || sheetOpen;
+
   const openPanel = () => {
-    if (disabled) return;
     const r = wrapRef.current?.getBoundingClientRect();
     if (r) setRect({ top: r.bottom + 6, left: r.left, width: r.width });
     setHighlight(0);
     setOpen(true);
   };
+
+  // Below md a floating panel can't be positioned reliably — the soft
+  // keyboard resizes the viewport mid-animation and stale measurements
+  // put the panel anywhere. Open a bottom sheet instead.
+  const openPicker = () => {
+    if (disabled || anyOpen) return;
+    if (window.matchMedia("(min-width: 768px)").matches) openPanel();
+    else { setHighlight(0); setSheetOpen(true); }
+  };
+
+  const closeAll = () => { setOpen(false); setSheetOpen(false); };
 
   useEffect(() => {
     if (!open) return;
@@ -191,24 +207,14 @@ function ItemCombobox({
       if (wrapRef.current?.contains(t) || panelRef.current?.contains(t)) return;
       setOpen(false);
     };
-    // Desktop: any outer scroll/resize would detach the fixed panel from
-    // the field — close it. Mobile (<md): the soft keyboard fires exactly
-    // these events the moment the user types, so closing would make the
-    // picker unusable — re-measure and follow the field instead.
-    const isDesktop = () => window.matchMedia("(min-width: 768px)").matches;
-    const remeasure = () => {
-      const r = wrapRef.current?.getBoundingClientRect();
-      if (r) setRect({ top: r.bottom + 6, left: r.left, width: r.width });
-    };
+    // The panel is fixed, so any outer scroll/resize would detach it
+    // from the field — close instead. Scrolls inside the panel are fine.
+    // (Desktop-only concern: the mobile sheet doesn't anchor to the field.)
     const onScroll = (e: Event) => {
       if (panelRef.current && e.target instanceof Node && panelRef.current.contains(e.target)) return;
-      if (isDesktop()) setOpen(false);
-      else remeasure();
+      setOpen(false);
     };
-    const onResize = () => {
-      if (isDesktop()) setOpen(false);
-      else remeasure();
-    };
+    const onResize = () => setOpen(false);
     document.addEventListener("mousedown", onDown);
     document.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onResize);
@@ -222,49 +228,83 @@ function ItemCombobox({
   useEffect(() => { setHighlight(0); }, [query]);
 
   useEffect(() => {
-    if (!open) return;
-    const el = panelRef.current?.children[highlight] as HTMLElement | undefined;
+    if (!anyOpen) return;
+    const list = panelRef.current ?? sheetListRef.current;
+    const el = list?.children[highlight] as HTMLElement | undefined;
     el?.scrollIntoView?.({ block: "nearest" });
-  }, [highlight, open]);
+  }, [highlight, anyOpen]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      if (!open) openPanel();
+      if (!anyOpen) openPicker();
       else setHighlight((h) => Math.min(h + 1, Math.max(filtered.length - 1, 0)));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      if (open) setHighlight((h) => Math.max(h - 1, 0));
+      if (anyOpen) setHighlight((h) => Math.max(h - 1, 0));
     } else if (e.key === "Enter") {
-      if (open) {
+      if (anyOpen) {
         e.preventDefault(); // don't submit the form while picking
         const o = filtered[highlight];
-        if (o) { onSelect(o); setOpen(false); }
+        if (o) { onSelect(o); closeAll(); }
       }
     } else if (e.key === "Escape") {
-      if (open) {
-        e.stopPropagation(); // close the panel, not the modal
-        setOpen(false);
+      if (anyOpen) {
+        e.stopPropagation(); // close the picker, not the modal
+        closeAll();
       }
     } else if (e.key === "Tab") {
-      setOpen(false);
+      closeAll();
     }
   };
+
+  // Option rows — shared verbatim between the desktop panel and the
+  // mobile sheet so styling/highlight/check/empty states can't diverge.
+  const optionRows = (closePicker: () => void) =>
+    options.length === 0 ? (
+      <div className="px-3 py-2.5 text-[13px] text-slate-400 italic">{emptyText}</div>
+    ) : filtered.length === 0 ? (
+      <div className="px-3 py-2.5 text-[13px] text-slate-400 italic">No matches.</div>
+    ) : (
+      filtered.map((o, idx) => (
+        <button
+          key={o.id}
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => { onSelect(o); closePicker(); }}
+          onMouseEnter={() => setHighlight(idx)}
+          className={`flex items-center gap-2 w-full text-left px-3 py-2.5 text-[13px] rounded-lg transition-colors duration-100 ${
+            idx === highlight
+              ? "bg-amber-100 text-amber-900 font-medium"
+              : o.id === valueId
+                ? "bg-amber-50 text-amber-900 font-semibold"
+                : "text-slate-700"
+          }`}
+        >
+          <span className="flex-1 min-w-0 truncate">{o.label}</span>
+          {o.id === valueId && (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-4 h-4 shrink-0 ${idx === highlight ? "text-amber-900" : "text-amber-600"}`}>
+              <path d="M5 13l4 4L19 7" />
+            </svg>
+          )}
+        </button>
+      ))
+    );
 
   return (
     <div ref={wrapRef} className="relative">
       <input
         type="text"
         value={selected ? selected.label : query}
-        onChange={(e) => { onQueryChange(e.target.value); if (!open) openPanel(); }}
-        onClick={openPanel}
-        onFocus={openPanel}
+        onChange={(e) => { onQueryChange(e.target.value); if (!anyOpen) openPicker(); }}
+        onClick={openPicker}
+        onFocus={openPicker}
         onKeyDown={handleKeyDown}
         placeholder={placeholder}
         disabled={disabled}
         autoComplete="off"
         role="combobox"
-        aria-expanded={open}
+        aria-expanded={anyOpen}
         className={inputCls(!!invalid) + (selected || query.length > 0 ? " pr-14" : " pr-9")}
       />
       {/* Chevron — decorative; clicks fall through to the input */}
@@ -275,7 +315,7 @@ function ItemCombobox({
         <svg
           viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
           strokeLinecap="round" strokeLinejoin="round"
-          className={`w-4 h-4 transition-transform duration-150 ${open ? "rotate-180" : ""}`}
+          className={`w-4 h-4 transition-transform duration-150 ${anyOpen ? "rotate-180" : ""}`}
         >
           <path d="M6 9l6 6 6-6" />
         </svg>
@@ -285,7 +325,7 @@ function ItemCombobox({
           type="button"
           aria-label="Clear selection"
           onMouseDown={(e) => e.preventDefault()}
-          onClick={() => { onSelect(null); onQueryChange(""); setOpen(false); }}
+          onClick={() => { onSelect(null); onQueryChange(""); closeAll(); }}
           className="absolute right-8 top-1/2 -translate-y-1/2 w-11 h-11 md:w-auto md:h-auto flex items-center justify-center p-0.5 rounded text-slate-300 hover:text-slate-500 transition-colors"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3.5 h-3.5">
@@ -293,6 +333,8 @@ function ItemCombobox({
           </svg>
         </button>
       )}
+
+      {/* ── md+: anchored floating panel (unchanged behaviour) ── */}
       {open && rect && (
         <>
           <style>{`@keyframes ex-combo-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }`}</style>
@@ -304,37 +346,34 @@ function ItemCombobox({
             }}
             className="max-h-60 overflow-y-auto rounded-xl border border-slate-300 bg-white shadow-xl p-1.5"
           >
-            {options.length === 0 ? (
-              <div className="px-3 py-2.5 text-[13px] text-slate-400 italic">{emptyText}</div>
-            ) : filtered.length === 0 ? (
-              <div className="px-3 py-2.5 text-[13px] text-slate-400 italic">No matches.</div>
-            ) : (
-              filtered.map((o, idx) => (
-                <button
-                  key={o.id}
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => { onSelect(o); setOpen(false); }}
-                  onMouseEnter={() => setHighlight(idx)}
-                  className={`flex items-center gap-2 w-full text-left px-3 py-2.5 text-[13px] rounded-lg transition-colors duration-100 ${
-                    idx === highlight
-                      ? "bg-amber-100 text-amber-900 font-medium"
-                      : o.id === valueId
-                        ? "bg-amber-50 text-amber-900 font-semibold"
-                        : "text-slate-700"
-                  }`}
-                >
-                  <span className="flex-1 min-w-0 truncate">{o.label}</span>
-                  {o.id === valueId && (
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-4 h-4 shrink-0 ${idx === highlight ? "text-amber-900" : "text-amber-600"}`}>
-                      <path d="M5 13l4 4L19 7" />
-                    </svg>
-                  )}
-                </button>
-              ))
-            )}
+            {optionRows(() => setOpen(false))}
           </div>
         </>
+      )}
+
+      {/* ── <md: bottom sheet (same pattern as the date pickers).
+             z-[60] clears the z-50 Add Expense modal that hosts it.
+             The search input lives at the top of the sheet, so the
+             keyboard opening never pushes the edited field off-screen. ── */}
+      {sheetOpen && (
+        <div className="md:hidden fixed inset-0 z-[60]">
+          <div className="absolute inset-0 bg-slate-900/40" onClick={() => setSheetOpen(false)} />
+          <div className="absolute inset-x-0 bottom-0 rounded-t-2xl bg-white shadow-2xl p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+            <input
+              type="text"
+              value={selected ? selected.label : query}
+              onChange={(e) => onQueryChange(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={placeholder}
+              autoFocus
+              autoComplete="off"
+              className={inputCls(false)}
+            />
+            <div ref={sheetListRef} className="mt-2 max-h-[50vh] overflow-y-auto">
+              {optionRows(() => setSheetOpen(false))}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
