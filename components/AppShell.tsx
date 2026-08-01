@@ -44,7 +44,8 @@ export default function AppShell({ children }: { children: ReactNode }) {
   // render without app shell so they print cleanly
   const isStandaloneDocument =
     /^\/bookings\/[^/]+\/(invoice|reservation)$/.test(pathname) ||
-    /^\/accounts\/voucher\/[^/]+$/.test(pathname);
+    /^\/accounts\/voucher\/[^/]+$/.test(pathname) ||
+    /^\/accounts\/cashbook\/report\/[^/]+$/.test(pathname);
 
   // ── Routing guard ─────────────────────────────────────────────
   useEffect(() => {
