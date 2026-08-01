@@ -1109,7 +1109,7 @@ export default function CashbookClient({
           return ri && ri.full !== ri.text ? `Room revenue · ${ri.full}` : undefined;
         };
 
-        const deriveLabel = (t: { type: string; note: string | null; bookingPaymentId?: string | null; revenueCategoryId?: string | null; categoryId?: string | null; expenseItemId?: string | null; employeeId?: string | null }): string => {
+        const deriveLabel = (t: { type: string; note: string | null; bookingPaymentId?: string | null; revenueCategoryId?: string | null; categoryId?: string | null; expenseItemId?: string | null; employeeId?: string | null; payee?: string | null }): string => {
           switch (t.type) {
             case "loan_received":  return "Loan received";
             case "loan_repayment": return "Loan repayment";
@@ -1125,13 +1125,14 @@ export default function CashbookClient({
             case "expense_out": {
               const cat  = t.categoryId ? expenseCatMap.get(t.categoryId) : undefined;
               const base = cat?.name || "Expense";
-              // Who was paid beats what it was for: employee name first
-              // (any staff-paid expense — no category special-casing),
-              // expense item as the fallback. Both null -> exactly as today.
-              const emp  = t.employeeId    ? employeeNameById.get(t.employeeId)       : undefined;
-              const item = t.expenseItemId ? expenseItemNameById.get(t.expenseItemId) : undefined;
-              const detail = emp ?? item;
-              return detail ? `${base} · ${detail}` : base;
+              // Category · Item · Receiver — every part that exists, fixed
+              // order (what it was, what was bought, who was paid). Receiver
+              // is the employee's name, else the free-text payee. Missing
+              // parts are omitted; category-only rows render as before.
+              const item     = t.expenseItemId ? expenseItemNameById.get(t.expenseItemId) : undefined;
+              const receiver = (t.employeeId ? employeeNameById.get(t.employeeId) : undefined)
+                ?? (t.payee?.trim() || undefined);
+              return [base, item, receiver].filter(Boolean).join(" · ");
             }
             default: return t.type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
           }
@@ -1148,15 +1149,20 @@ export default function CashbookClient({
           displayDate  = pa.closeDate;
           opening      = pa.opening;
           closingShown = pa.closingPreview;
-          displayRows  = pa.transactions.map((t) => ({
-            id:     t.id,
-            note:   t.note,
-            label:  deriveLabel(t),
-            title:  deriveTitle(t),
-            amount: t.amount,
-            sign:   t.toAccountId === cashId ? "+" : "−",
-            color:  t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700",
-          }));
+          displayRows  = pa.transactions.map((t) => {
+            const label = deriveLabel(t);
+            return {
+              id:     t.id,
+              note:   t.note,
+              label,
+              // Truncation bites often on phones — the full label (+ note,
+              // matching the visible text) is always hoverable on desktop.
+              title:  deriveTitle(t) ?? (t.note && t.note !== label ? `${label} · ${t.note}` : label),
+              amount: t.amount,
+              sign:   t.toAccountId === cashId ? "+" : "−",
+              color:  t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700",
+            };
+          });
           isClosing = closingDay;
         } else if (mode === "today") {
           displayDate = today;
@@ -1176,15 +1182,18 @@ export default function CashbookClient({
             return acc;
           }, 0);
           closingShown = +(opening + netDelta).toFixed(2);
-          displayRows = todaysCashTxns.map((t) => ({
-            id:     t.id,
-            note:   t.note,
-            label:  deriveLabel(t),
-            title:  deriveTitle(t),
-            amount: t.amount,
-            sign:   t.toAccountId === cashId ? "+" : "−",
-            color:  t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700",
-          }));
+          displayRows = todaysCashTxns.map((t) => {
+            const label = deriveLabel(t);
+            return {
+              id:     t.id,
+              note:   t.note,
+              label,
+              title:  deriveTitle(t) ?? (t.note && t.note !== label ? `${label} · ${t.note}` : label),
+              amount: t.amount,
+              sign:   t.toAccountId === cashId ? "+" : "−",
+              color:  t.toAccountId === cashId ? "text-emerald-700" : "text-rose-700",
+            };
+          });
           isClosing = closingDay;
         } else {
           // closed
@@ -1460,18 +1469,21 @@ export default function CashbookClient({
                                 ) : null;
                               })()}
                               {/* Expense detail — same rule as the Day Close labels:
-                                  employee name (who was paid) beats item name; both
-                                  null renders exactly as before. Reuses the maps
-                                  loaded once on mount — no per-row lookups. */}
+                                  Category · Item · Receiver, every part that exists
+                                  (receiver = employee name, else free-text payee).
+                                  Nothing set -> no span, row renders as before.
+                                  Reuses the maps loaded once on mount — no per-row
+                                  lookups. */}
                               {t.type === "expense_out" && (() => {
-                                const emp    = t.employeeId    ? employeeNameById.get(t.employeeId)       : undefined;
-                                const item   = t.expenseItemId ? expenseItemNameById.get(t.expenseItemId) : undefined;
-                                const detail = emp ?? item;
-                                if (!detail) return null;
+                                const item     = t.expenseItemId ? expenseItemNameById.get(t.expenseItemId) : undefined;
+                                const receiver = (t.employeeId ? employeeNameById.get(t.employeeId) : undefined)
+                                  ?? (t.payee?.trim() || undefined);
+                                if (!item && !receiver) return null;
                                 const catName = t.categoryId ? expenseCatMap.get(t.categoryId)?.name : undefined;
+                                const text = [catName, item, receiver].filter(Boolean).join(" · ");
                                 return (
-                                  <span className={`text-[12px] text-slate-500 truncate max-w-full min-w-0 ${isDeleted ? "line-through decoration-slate-400" : ""}`}>
-                                    {catName ? `${catName} · ${detail}` : detail}
+                                  <span title={text} className={`text-[12px] text-slate-500 truncate max-w-full min-w-0 ${isDeleted ? "line-through decoration-slate-400" : ""}`}>
+                                    {text}
                                   </span>
                                 );
                               })()}

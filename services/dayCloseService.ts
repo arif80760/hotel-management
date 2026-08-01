@@ -399,8 +399,9 @@ export type PastDayActivity = {
     categoryId:         string | null;
     revenueCategoryId:  string | null;
     bookingPaymentId:   string | null;
-    expenseItemId:      string | null;  // display only — "Category · Item" labels
+    expenseItemId:      string | null;  // display only — "Category · Item · Receiver" labels
     employeeId:         string | null;  // display only — staff-paid expense labels
+    payee:              string | null;  // display only — free-text receiver fallback
   }>;
 };
 
@@ -446,7 +447,7 @@ export async function getPastDayActivity(closeDate: string): Promise<PastDayActi
   const cashId = ACCOUNT_IDS.cash;
   const { data: txnRows, error: txnError } = await supabase
     .from("account_transactions")
-    .select("id, type, amount, from_account_id, to_account_id, note, category_id, revenue_category_id, booking_payment_id, expense_item_id, employee_id")
+    .select("id, type, amount, from_account_id, to_account_id, note, category_id, revenue_category_id, booking_payment_id, expense_item_id, employee_id, payee")
     .eq("txn_date", closeDate)
     .or(`from_account_id.eq.${cashId},to_account_id.eq.${cashId}`)
     .is("deleted_at", null)
@@ -457,7 +458,7 @@ export async function getPastDayActivity(closeDate: string): Promise<PastDayActi
   }
 
   let netDelta = 0;
-  const transactions = (txnRows ?? []).map((r: { id: string; type: string; amount: string | number; from_account_id: string | null; to_account_id: string | null; note: string | null; category_id: string | null; revenue_category_id: string | null; booking_payment_id: string | null; expense_item_id: string | null; employee_id: string | null }) => {
+  const transactions = (txnRows ?? []).map((r: { id: string; type: string; amount: string | number; from_account_id: string | null; to_account_id: string | null; note: string | null; category_id: string | null; revenue_category_id: string | null; booking_payment_id: string | null; expense_item_id: string | null; employee_id: string | null; payee: string | null }) => {
     const amt = typeof r.amount === "string" ? parseFloat(r.amount) : r.amount;
     if (r.to_account_id   === cashId) netDelta += amt;
     if (r.from_account_id === cashId) netDelta -= amt;
@@ -473,6 +474,7 @@ export async function getPastDayActivity(closeDate: string): Promise<PastDayActi
       bookingPaymentId:  r.booking_payment_id ?? null,
       expenseItemId:     r.expense_item_id ?? null,
       employeeId:        r.employee_id ?? null,
+      payee:             r.payee ?? null,
     };
   });
 
