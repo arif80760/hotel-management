@@ -18,6 +18,11 @@ import { getDayCloses, type DayCloseListItem } from "@/services/dayCloseService"
 // ── Date helpers — copied from RevenueReportClient (same semantics) ──
 function todayISO(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function firstOfMonthISO(d=new Date()){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-01`; }
+function yesterdayISO(){
+  const d = new Date();
+  d.setDate(d.getDate() - 1); // same local-date convention as todayISO
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
 function mondayOfWeekISO(){
   const d = new Date();
   d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // back to Monday, same local-date convention
@@ -35,7 +40,7 @@ function formatTimestamp(iso: string): string {
   return new Date(iso).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-type Preset = "today" | "week" | "month" | "year" | "custom";
+type Preset = "today" | "yesterday" | "week" | "month" | "year" | "custom";
 
 export default function CashbookReportsClient() {
   const [preset,   setPreset]   = useState<Preset>("month");
@@ -49,8 +54,9 @@ export default function CashbookReportsClient() {
   function applyPreset(p: Exclude<Preset, "custom">) {
     const today = todayISO();
     setPreset(p);
-    if (p === "today")      { setFromDate(today);                    setToDate(today); }
-    else if (p === "week")  { setFromDate(mondayOfWeekISO());        setToDate(today); }
+    if (p === "today")          { setFromDate(today);             setToDate(today); }
+    else if (p === "yesterday") { const y = yesterdayISO();       setFromDate(y); setToDate(y); }
+    else if (p === "week")      { setFromDate(mondayOfWeekISO()); setToDate(today); }
     else if (p === "month") { setFromDate(firstOfMonthISO());        setToDate(today); }
     else                    { setFromDate(`${new Date().getFullYear()}-01-01`); setToDate(today); }
   }
@@ -82,7 +88,7 @@ export default function CashbookReportsClient() {
       {/* ── Filter bar ──────────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-3 bg-white border border-slate-200 rounded-xl px-4 py-3">
         <div className="inline-flex flex-wrap rounded-lg bg-slate-100 p-0.5">
-          {([["today","Today"],["week","This Week"],["month","This Month"],["year","This Year"],["custom","Custom"]] as const).map(([key, label]) => (
+          {([["today","Today"],["yesterday","Yesterday"],["week","This Week"],["month","This Month"],["year","This Year"],["custom","Custom"]] as const).map(([key, label]) => (
             <button
               key={key}
               type="button"
