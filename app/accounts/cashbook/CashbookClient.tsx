@@ -39,6 +39,8 @@ import {
 
 import LoanEntryActions from "@/app/accounts/loans/LoanEntryActions";
 import { getAllBookings, getRoomsForBookingPayments } from "@/services/bookingsService";
+import { getExpenseItems } from "@/services/expenseItemsService";
+import { getAllEmployees } from "@/services/employeesService";
 import type { MockBooking } from "@/lib/mockData";
 import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
@@ -526,6 +528,27 @@ export default function CashbookClient({
   // session-level reference cache, not refetched on mount.
   const [expenseCatMap, setExpenseCatMap] = useState<Map<string, { name: string; kind: string }>>(new Map());
   const [revenueCatMap, setRevenueCatMap] = useState<Map<string, string>>(new Map());
+  // id -> name maps for expense-row label detail ("Category · Item" /
+  // "Category · Employee"). Loaded ONCE on mount, one batched read each —
+  // same style as expenseCatMap; never a per-row query. Display only:
+  // a failed load just leaves labels without the detail suffix.
+  const [expenseItemNameById, setExpenseItemNameById] = useState<Map<string, string>>(new Map());
+  const [employeeNameById,    setEmployeeNameById]    = useState<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const items = await getExpenseItems();
+        if (!cancelled) setExpenseItemNameById(new Map(items.map((i) => [i.id, i.name])));
+      } catch { /* display-only lookup — labels fall back to category alone */ }
+      try {
+        const emps = await getAllEmployees();
+        if (!cancelled) setEmployeeNameById(new Map(emps.map((e) => [e.id, e.fullName])));
+      } catch { /* display-only lookup — labels fall back to category alone */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // ── Reference data (cached once per session) ───────────────
   // accounts (definitions) + expense/revenue categories come from the shared
@@ -1086,7 +1109,7 @@ export default function CashbookClient({
           return ri && ri.full !== ri.text ? `Room revenue · ${ri.full}` : undefined;
         };
 
-        const deriveLabel = (t: { type: string; note: string | null; bookingPaymentId?: string | null; revenueCategoryId?: string | null; categoryId?: string | null }): string => {
+        const deriveLabel = (t: { type: string; note: string | null; bookingPaymentId?: string | null; revenueCategoryId?: string | null; categoryId?: string | null; expenseItemId?: string | null; employeeId?: string | null }): string => {
           switch (t.type) {
             case "loan_received":  return "Loan received";
             case "loan_repayment": return "Loan repayment";
@@ -1100,8 +1123,15 @@ export default function CashbookClient({
               }
               return (t.revenueCategoryId && revenueCatMap.get(t.revenueCategoryId)) || "Other revenue";
             case "expense_out": {
-              const cat = t.categoryId ? expenseCatMap.get(t.categoryId) : undefined;
-              return cat?.name || "Expense";
+              const cat  = t.categoryId ? expenseCatMap.get(t.categoryId) : undefined;
+              const base = cat?.name || "Expense";
+              // Who was paid beats what it was for: employee name first
+              // (any staff-paid expense — no category special-casing),
+              // expense item as the fallback. Both null -> exactly as today.
+              const emp  = t.employeeId    ? employeeNameById.get(t.employeeId)       : undefined;
+              const item = t.expenseItemId ? expenseItemNameById.get(t.expenseItemId) : undefined;
+              const detail = emp ?? item;
+              return detail ? `${base} · ${detail}` : base;
             }
             default: return t.type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
           }
