@@ -161,6 +161,7 @@ const navItems: NavItem[] = [
     adminOnly: true,
     children: [
       { label: "Cashbook",           href: "/accounts/cashbook" },
+      { label: "Cashbook Reports",   href: "/accounts/cashbook-reports" },
       { label: "Expense",            href: "/accounts/expense" },
       { label: "Payroll",            href: "/accounts/payroll" },
       { label: "Revenue Management", href: "/accounts/revenue-management" },

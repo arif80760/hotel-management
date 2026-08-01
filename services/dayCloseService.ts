@@ -119,6 +119,50 @@ function mapDayClose(r: DayCloseRow): DayClose {
 // QUERIES
 // ─────────────────────────────────────────────────────────────
 
+export type DayCloseListItem = DayClose & { closedByName: string | null };
+
+/**
+ * Archive read for the Cashbook Reports panel — day-close records,
+ * newest first, optionally bounded by close_date. READ ONLY; this is
+ * the first list-read surface for day_closes (previously write-only
+ * plus the latest-row status check). closed_by is resolved to
+ * employees.full_name in ONE batched query — never per row;
+ * unresolvable ids yield closedByName null.
+ */
+export async function getDayCloses(
+  filters: { fromDate?: string; toDate?: string } = {},
+): Promise<DayCloseListItem[]> {
+  let q = supabase
+    .from("day_closes")
+    .select("id, close_date, opening_balance, closing_balance, closed_by, closed_at")
+    .order("close_date", { ascending: false });
+  if (filters.fromDate) q = q.gte("close_date", filters.fromDate);
+  if (filters.toDate)   q = q.lte("close_date", filters.toDate);
+
+  const { data, error } = await q;
+  if (error) {
+    console.error("──────────── [getDayCloses] FAILED ────────────");
+    console.error("  message:", error.message, "| code:", error.code);
+    throw new Error(`[getDayCloses] ${error.message}`);
+  }
+  const rows = (data as DayCloseRow[]).map(mapDayClose);
+
+  const ids = [...new Set(rows.map((r) => r.closedBy).filter((v): v is string => !!v))];
+  const names = new Map<string, string>();
+  if (ids.length > 0) {
+    const { data: emps, error: empErr } = await supabase
+      .from("employees")
+      .select("auth_user_id, full_name")
+      .in("auth_user_id", ids);
+    if (!empErr) {
+      for (const e of emps ?? []) {
+        if (e.auth_user_id) names.set(e.auth_user_id as string, e.full_name as string);
+      }
+    }
+  }
+  return rows.map((r) => ({ ...r, closedByName: r.closedBy ? names.get(r.closedBy) ?? null : null }));
+}
+
 /**
  * Returns the day-close status:
  *   - lastClosedDate: most recent close_date in day_closes
