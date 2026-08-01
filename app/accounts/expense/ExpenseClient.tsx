@@ -356,21 +356,29 @@ function ItemCombobox({
              The search input lives at the top of the sheet, so the
              keyboard opening never pushes the edited field off-screen. ── */}
       {sheetOpen && (
-        <div className="md:hidden fixed inset-0 z-[60]">
+        <div className="md:hidden fixed inset-0 z-[60] overflow-x-hidden">
           <div className="absolute inset-0 bg-slate-900/40" onClick={() => setSheetOpen(false)} />
-          <div className="absolute inset-x-0 bottom-0 rounded-t-2xl bg-white shadow-2xl p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-            <input
-              type="text"
-              value={selected ? selected.label : query}
-              onChange={(e) => onQueryChange(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={placeholder}
-              autoFocus
-              autoComplete="off"
-              className={inputCls(false)}
-            />
-            <div ref={sheetListRef} className="mt-2 max-h-[50vh] overflow-y-auto">
-              {optionRows(() => setSheetOpen(false))}
+          {/* Sheet spans exactly left-0..right-0; padding lives on the inner
+              wrapper so it can never push the fixed element past 100vw. */}
+          <div className="absolute left-0 right-0 bottom-0 rounded-t-2xl bg-white shadow-2xl overflow-x-hidden">
+            <div className="min-w-0 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+              {/* 16px font — anything smaller makes iOS Safari zoom the page
+                  on focus, which is exactly the "clipped both edges +
+                  horizontal scrollbar" failure seen on device. */}
+              <input
+                type="text"
+                value={selected ? selected.label : query}
+                onChange={(e) => onQueryChange(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={placeholder}
+                autoFocus
+                autoComplete="off"
+                style={{ fontSize: 16 }}
+                className={inputCls(false) + " min-w-0"}
+              />
+              <div ref={sheetListRef} className="mt-2 max-h-[50vh] min-w-0 overflow-y-auto overflow-x-hidden">
+                {optionRows(() => setSheetOpen(false))}
+              </div>
             </div>
           </div>
         </div>
