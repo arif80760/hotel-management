@@ -173,7 +173,11 @@ const navItems: NavItem[] = [
   { label: "My Profile", href: "/profile",     icon: Icons.profile    },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ variant = "static" }: { variant?: "static" | "drawer" }) {
+  // "static"  — the in-flow desktop sidebar (md and up), with the manual
+  //             collapse toggle persisted in localStorage (unchanged).
+  // "drawer"  — the off-canvas mobile instance rendered by AppShell below
+  //             md: always expanded, no collapse button, no localStorage.
   const pathname = usePathname();
   const { profile, role, signOut, canViewActivityLog } = useAuth();
   const [accountsExpanded, setAccountsExpanded] = useState(false);
@@ -189,9 +193,10 @@ export default function Sidebar() {
   // initial state) so the server and first client render agree (no hydration
   // mismatch). Falls back to expanded if nothing is stored.
   useEffect(() => {
+    if (variant === "drawer") return; // drawer is always expanded
     const saved = localStorage.getItem("sidebar-collapsed");
     if (saved === "true") setIsCollapsed(true);
-  }, []);
+  }, [variant]);
 
   function toggleCollapsed() {
     setIsCollapsed(prev => {
@@ -233,8 +238,9 @@ export default function Sidebar() {
             )}
           </div>
 
-          {/* Collapse button — inline on the right when expanded */}
-          {!isCollapsed && (
+          {/* Collapse button — inline on the right when expanded.
+              Hidden in the mobile drawer (a half-collapsed drawer is useless). */}
+          {!isCollapsed && variant !== "drawer" && (
             <button
               type="button"
               onClick={toggleCollapsed}

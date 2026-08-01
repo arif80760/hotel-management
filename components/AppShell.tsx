@@ -26,7 +26,7 @@
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { HotelProvider } from "@/contexts/HotelContext";
@@ -52,6 +52,24 @@ export default function AppShell({ children }: { children: ReactNode }) {
     if (!user && !isLoginPage) router.replace("/login");
     if ( user &&  isLoginPage) router.replace("/");
   }, [user, loading, isLoginPage, router]);
+
+  // ── Mobile nav drawer (below md) ──────────────────────────────
+  // Presentation only — the sidebar becomes an off-canvas drawer on
+  // phones. Closed by the overlay, Escape, or any navigation.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  useEffect(() => {
+    setMobileNavOpen(false);            // close on route change
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;         // close on Escape
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileNavOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mobileNavOpen]);
 
   // ── Loading state ──────────────────────────────────────────────
   // Show a minimal spinner while the Supabase session check is in flight.
@@ -90,9 +108,31 @@ export default function AppShell({ children }: { children: ReactNode }) {
     <HotelProvider>
       <ReferenceDataProvider>
         <div className="flex w-full h-screen overflow-hidden">
-          <Sidebar />
+          {/* Desktop sidebar — in-flow at md+, exactly as before */}
+          <div className="hidden md:flex flex-shrink-0">
+            <Sidebar />
+          </div>
+
+          {/* Mobile drawer — off-canvas over the content, below md only */}
+          {mobileNavOpen && (
+            <div className="md:hidden fixed inset-0 z-50">
+              <style>{`@keyframes shell-drawer-in { from { transform: translateX(-100%); } to { transform: translateX(0); } } @keyframes shell-drawer-fade { from { opacity: 0; } to { opacity: 1; } }`}</style>
+              <div
+                className="absolute inset-0 bg-slate-900/50"
+                style={{ animation: "shell-drawer-fade 150ms ease-out" }}
+                onClick={() => setMobileNavOpen(false)}
+              />
+              <div
+                className="absolute inset-y-0 left-0 shadow-2xl"
+                style={{ animation: "shell-drawer-in 200ms ease-out" }}
+              >
+                <Sidebar variant="drawer" />
+              </div>
+            </div>
+          )}
+
           <div className="flex-1 flex flex-col min-w-0 h-screen">
-            <TopBar />
+            <TopBar onMenuClick={() => setMobileNavOpen(true)} />
             <main className="flex-1 overflow-auto min-w-0 bg-slate-50">
               {children}
             </main>

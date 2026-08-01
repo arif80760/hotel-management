@@ -126,19 +126,19 @@ export default function NotificationBell(){
 
   return (
     <div className="relative" ref={ref}>
-      <button onClick={toggle} aria-label="Notifications" className="relative p-1.5 text-slate-400 hover:text-slate-600 transition-colors rounded-lg hover:bg-slate-100">
+      <button onClick={toggle} aria-label="Notifications" className="relative w-11 h-11 flex items-center justify-center text-slate-400 hover:text-slate-600 transition-colors rounded-lg hover:bg-slate-100">
         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
         </svg>
         {showDot && (badge>0 ? (
-          <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 flex items-center justify-center text-[10px] font-bold text-white bg-red-500 rounded-full">{badge>9?"9+":badge}</span>
+          <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 flex items-center justify-center text-[10px] font-bold text-white bg-red-500 rounded-full">{badge>9?"9+":badge}</span>
         ) : (
-          <span className="absolute top-1 right-1 w-1.5 h-1.5 bg-red-500 rounded-full" />
+          <span className="absolute top-2.5 right-2.5 w-1.5 h-1.5 bg-red-500 rounded-full" />
         ))}
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-[360px] max-h-[480px] overflow-y-auto bg-white rounded-xl border border-slate-200 shadow-xl z-50">
+        <div className="fixed inset-x-3 top-16 w-auto md:absolute md:inset-x-auto md:top-auto md:right-0 md:mt-2 md:w-[360px] max-h-[480px] overflow-y-auto bg-white rounded-xl border border-slate-200 shadow-xl z-50">
           <div className="px-4 py-3 border-b border-slate-100 sticky top-0 bg-white">
             <span className="text-[13px] font-semibold text-slate-800">Notifications</span>
           </div>
