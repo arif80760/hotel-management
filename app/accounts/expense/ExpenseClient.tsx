@@ -362,9 +362,8 @@ function ItemCombobox({
               wrapper so it can never push the fixed element past 100vw. */}
           <div className="absolute left-0 right-0 bottom-0 rounded-t-2xl bg-white shadow-2xl overflow-x-hidden">
             <div className="min-w-0 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-              {/* 16px font — anything smaller makes iOS Safari zoom the page
-                  on focus, which is exactly the "clipped both edges +
-                  horizontal scrollbar" failure seen on device. */}
+              {/* 16px floor below md comes from the global iOS focus-zoom
+                  guard in globals.css — no per-field override needed. */}
               <input
                 type="text"
                 value={selected ? selected.label : query}
@@ -373,7 +372,6 @@ function ItemCombobox({
                 placeholder={placeholder}
                 autoFocus
                 autoComplete="off"
-                style={{ fontSize: 16 }}
                 className={inputCls(false) + " min-w-0"}
               />
               <div ref={sheetListRef} className="mt-2 max-h-[50vh] min-w-0 overflow-y-auto overflow-x-hidden">
