@@ -39,6 +39,10 @@ const notoSansBengali = Noto_Sans_Bengali({
 export const metadata: Metadata = {
   title: "Hotel Albatross Resort — Admin",
   description: "Internal hotel management system",
+  // iOS Safari auto-detects digit strings (bKash numbers in expense
+  // notes) as phone numbers and injects styled tel: links that break
+  // truncation — opt out. Emits <meta name="format-detection">.
+  formatDetection: { telephone: false },
 };
 
 export default function RootLayout({

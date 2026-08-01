@@ -1241,7 +1241,7 @@ export default function CashbookClient({
 
             <div className="flex items-center justify-between">
               <span style={{ fontFamily: archivoFamily, fontSize: 13, color: "#6B6B6B" }}>Opening balance</span>
-              <span style={{ fontFamily: oswaldFamily, fontSize: 18, fontWeight: 600, color: "#3F3F3F" }} className="tabular-nums">{formatBdt(opening)}</span>
+              <span style={{ fontFamily: oswaldFamily, fontSize: 18, fontWeight: 600, color: "#3F3F3F" }} className="tabular-nums whitespace-nowrap flex-shrink-0">{formatBdt(opening)}</span>
             </div>
 
             <div className="space-y-1.5">
@@ -1249,11 +1249,13 @@ export default function CashbookClient({
               {displayRows.length === 0 ? (
                 <div style={{ fontFamily: archivoFamily, fontSize: 12.5, color: "#A8A8A8", fontStyle: "italic" }} className="pl-3">{emptyActivityLabel}</div>
               ) : (
-                <ul className="space-y-1 pl-3">
+                <ul className="space-y-0.5 sm:space-y-1 pl-3">
                   {displayRows.map((r) => (
                     <li key={r.id} className="flex items-center justify-between">
-                      <span style={{ fontFamily: archivoFamily, fontSize: 13, color: "#5F5F5F" }} className="truncate pr-3" title={r.title}>{r.label}{r.note && r.note !== r.label ? ` · ${r.note}` : ""}</span>
-                      <span style={{ fontFamily: oswaldFamily, fontSize: 15, fontWeight: 600 }} className={`tabular-nums ${r.color}`}>{r.sign}{formatBdt(r.amount)}</span>
+                      {/* fontSize lives in classes (not style) so the sm: step-down
+                          can apply — an inline fontSize would override it. */}
+                      <span style={{ fontFamily: archivoFamily, color: "#5F5F5F" }} className="min-w-0 flex-1 truncate pr-2 sm:pr-3 text-[12px] sm:text-[13px]" title={r.title}>{r.label}{r.note && r.note !== r.label ? ` · ${r.note}` : ""}</span>
+                      <span style={{ fontFamily: oswaldFamily, fontWeight: 600 }} className={`tabular-nums whitespace-nowrap flex-shrink-0 text-[13px] sm:text-[15px] ${r.color}`}>{r.sign}{formatBdt(r.amount)}</span>
                     </li>
                   ))}
                 </ul>
@@ -1262,7 +1264,7 @@ export default function CashbookClient({
 
             <div className="flex items-center justify-between pt-3 border-t border-slate-100">
               <span style={{ fontFamily: archivoFamily, fontSize: 13, fontWeight: 600, color: "#3F3F3F" }}>Closing balance{mode === "closed" ? "" : " (preview)"}</span>
-              <span style={{ fontFamily: oswaldFamily, fontSize: 19, fontWeight: 600, color: "#3F3F3F" }} className="tabular-nums">{formatBdt(closingShown)}</span>
+              <span style={{ fontFamily: oswaldFamily, fontSize: 19, fontWeight: 600, color: "#3F3F3F" }} className="tabular-nums whitespace-nowrap flex-shrink-0">{formatBdt(closingShown)}</span>
             </div>
 
             {mode !== "closed" && (
@@ -1493,7 +1495,7 @@ export default function CashbookClient({
                             </>
                           )}
 
-                          <p style={{ fontFamily: oswaldFamily, fontSize: 16, fontWeight: 600 }} className={`ml-auto tabular-nums whitespace-nowrap ${amountCls} ${isDeleted ? "line-through decoration-current" : ""}`}>{amountSign}{formatBdt(t.amount)}</p>
+                          <p style={{ fontFamily: oswaldFamily, fontSize: 16, fontWeight: 600 }} className={`ml-auto flex-shrink-0 tabular-nums whitespace-nowrap ${amountCls} ${isDeleted ? "line-through decoration-current" : ""}`}>{amountSign}{formatBdt(t.amount)}</p>
                         </div>
                       );
                     })}
