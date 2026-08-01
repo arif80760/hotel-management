@@ -156,7 +156,7 @@ export default function DashboardPage() {
   }, [rooms, bookings]);
 
   return (
-    <div className="p-7 space-y-6 max-w-[1440px]">
+    <div className="p-4 sm:p-7 space-y-4 sm:space-y-6 max-w-[1440px]">
 
       {/* ══════════════════════════════════════════════════════
           SECTION 1 — Page heading  (unchanged)

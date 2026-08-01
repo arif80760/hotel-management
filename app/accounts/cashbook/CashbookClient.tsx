@@ -258,11 +258,18 @@ function DatePickerField({
         </svg>
       </button>
 
-      {/* ── Dropdown panel ─────────────────────────────────── */}
+      {/* ── Dropdown panel ───────────────────────────────────
+          md+: anchored popover (unchanged). Below md: centered
+          fixed sheet with a dimming overlay — an anchored panel
+          has no horizontal clamping and renders off-screen when
+          the trigger sits near a phone's edge. z-[60] so it
+          clears the z-50 transaction modal that also hosts it. */}
       {open && (
-        <div className={`absolute left-0 z-30 bg-white border border-slate-200 rounded-xl shadow-2xl p-4 w-[272px] max-w-[calc(100vw-2rem)] ${
-          openUpward ? "bottom-full mb-2" : "top-full mt-2"
-        }`}>
+        <>
+          <div className="md:hidden fixed inset-0 z-[60] bg-slate-900/40" onClick={() => setOpen(false)} />
+          <div className={`fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[60] w-[calc(100vw-2rem)] max-w-[340px] md:absolute md:left-0 md:translate-x-0 md:translate-y-0 md:z-30 md:w-[272px] md:max-w-none bg-white border border-slate-200 rounded-xl shadow-2xl p-4 ${
+            openUpward ? "md:top-auto md:bottom-full md:mb-2" : "md:top-full md:bottom-auto md:mt-2"
+          }`}>
 
           {/* ── Shared header: prev arrow · label · next arrow ─ */}
           <div className="flex items-center justify-between mb-3 gap-1">
@@ -307,13 +314,13 @@ function DatePickerField({
               <div className="grid grid-cols-7 gap-y-0.5">
                 {dayCells.map((day, idx) =>
                   day === null ? (
-                    <div key={idx} className="h-8" />
+                    <div key={idx} className="h-10 md:h-8" />
                   ) : (
                     <button
                       key={idx}
                       type="button"
                       onClick={() => selectDay(day)}
-                      className={`h-8 w-8 mx-auto flex items-center justify-center rounded-lg text-[13px] transition-colors select-none ${
+                      className={`h-10 w-10 md:h-8 md:w-8 mx-auto flex items-center justify-center rounded-lg text-[13px] transition-colors select-none ${
                         isSelectedDay(day)
                           ? "bg-slate-900 text-white font-semibold shadow-sm"
                           : isTodayDay(day)
@@ -389,7 +396,8 @@ function DatePickerField({
               </button>
             </div>
           )}
-        </div>
+          </div>
+        </>
       )}
     </div>
   );
@@ -964,7 +972,7 @@ export default function CashbookClient({
 
   // ── Loaded ─────────────────────────────────────────────────
   return (
-    <div className="p-8 space-y-5">
+    <div className="p-4 sm:p-8 space-y-4 sm:space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold text-slate-800">Accounts</h1>
         <div className="flex flex-wrap items-center gap-2">
@@ -1390,7 +1398,7 @@ export default function CashbookClient({
                       const isDeleted = t.deletedAt !== null;
 
                       return (
-                        <div key={t.id} className={`px-5 py-3.5 flex flex-wrap sm:flex-nowrap items-start gap-4 ${isDeleted ? "opacity-50 bg-rose-50/40" : ""}`}>
+                        <div key={t.id} className={`px-4 sm:px-5 py-3.5 flex flex-wrap sm:flex-nowrap items-start gap-x-4 gap-y-2 ${isDeleted ? "opacity-50 bg-rose-50/40" : ""}`}>
                           <div className="w-full sm:w-auto flex-none sm:flex-1 min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
                               <span style={{ fontFamily: archivoFamily }} className={`text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full ${meta.badgeCls}`}>

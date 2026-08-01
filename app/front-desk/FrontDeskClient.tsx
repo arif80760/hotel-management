@@ -602,7 +602,7 @@ export default function FrontDeskClient() {
 
   // ── Render ───────────────────────────────────────────────────
   return (
-    <div className="p-7 max-w-[1400px] space-y-6">
+    <div className="p-4 sm:p-7 max-w-[1400px] space-y-4 sm:space-y-6">
 
       {/* ══════════════════════════════════════════════════════
           PAGE HEADER
@@ -636,7 +636,7 @@ export default function FrontDeskClient() {
       ══════════════════════════════════════════════════════ */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
 
-        <div className="bg-white border border-blue-200 rounded-xl px-5 py-4 flex items-center gap-3 shadow-sm">
+        <div className="bg-white border border-blue-200 rounded-xl px-4 py-3 sm:px-5 sm:py-4 flex items-center gap-3 shadow-sm">
           <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-5 h-5 text-blue-600">
               <path d="M5 12h14M12 5l7 7-7 7"/>
@@ -648,7 +648,7 @@ export default function FrontDeskClient() {
           </div>
         </div>
 
-        <div className="bg-white border border-emerald-200 rounded-xl px-5 py-4 flex items-center gap-3 shadow-sm">
+        <div className="bg-white border border-emerald-200 rounded-xl px-4 py-3 sm:px-5 sm:py-4 flex items-center gap-3 shadow-sm">
           <div className="w-10 h-10 rounded-lg bg-emerald-100 flex items-center justify-center flex-shrink-0">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-5 h-5 text-emerald-600">
               <path d="M2 20V9a2 2 0 012-2h16a2 2 0 012 2v11"/><path d="M2 20h20"/>
@@ -661,7 +661,7 @@ export default function FrontDeskClient() {
           </div>
         </div>
 
-        <div className="bg-white border border-amber-200 rounded-xl px-5 py-4 flex items-center gap-3 shadow-sm">
+        <div className="bg-white border border-amber-200 rounded-xl px-4 py-3 sm:px-5 sm:py-4 flex items-center gap-3 shadow-sm">
           <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center flex-shrink-0">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" className="w-5 h-5 text-amber-600">
               <path d="M19 12H5M12 5l7 7-7 7"/>
@@ -713,7 +713,7 @@ export default function FrontDeskClient() {
             ) : todaysArrivals.map(b => {
               const due = calcTrueDue(b);
               return (
-                <div key={b.id} className="px-5 py-4">
+                <div key={b.id} className="px-4 py-3.5 sm:px-5 sm:py-4">
                   <div className="flex flex-wrap sm:flex-nowrap items-start gap-3">
 
                     {/* Avatar */}
@@ -843,7 +843,7 @@ export default function FrontDeskClient() {
               return (
                 <div
                   key={b.id}
-                  className={`px-5 py-4 ${isDepartingToday ? "bg-amber-50/40" : ""}`}
+                  className={`px-4 py-3.5 sm:px-5 sm:py-4 ${isDepartingToday ? "bg-amber-50/40" : ""}`}
                 >
                   <div className="flex flex-wrap sm:flex-nowrap items-start gap-3">
 
@@ -952,7 +952,7 @@ export default function FrontDeskClient() {
               return (
                 <div
                   key={b.id}
-                  className={`px-5 py-4 ${due > 0 ? "bg-rose-50/40" : ""}`}
+                  className={`px-4 py-3.5 sm:px-5 sm:py-4 ${due > 0 ? "bg-rose-50/40" : ""}`}
                 >
                   <div className="flex flex-wrap sm:flex-nowrap items-start gap-3">
 

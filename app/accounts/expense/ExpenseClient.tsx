@@ -1109,7 +1109,7 @@ export default function ExpenseClient() {
 
   // ── Render ─────────────────────────────────────────────────
   return (
-    <div className="p-8 space-y-5">
+    <div className="p-4 sm:p-8 space-y-4 sm:space-y-5">
 
       {/* ── Header ──────────────────────────────────────────── */}
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1309,7 +1309,7 @@ export default function ExpenseClient() {
           {groups.map((g) => (
             <div key={g.date} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
               {/* Date header */}
-              <div className="flex items-center justify-between px-5 py-3 bg-slate-50 border-b border-slate-200">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 px-4 sm:px-5 py-3 bg-slate-50 border-b border-slate-200">
                 <h3 className="text-[13.5px] font-semibold text-slate-700">{formatDateLabel(g.date)}</h3>
                 <span className="text-[12.5px] text-slate-500">
                   <span className="font-semibold text-slate-700">৳{formatAmount(g.total)}</span>{" "}
@@ -1323,9 +1323,9 @@ export default function ExpenseClient() {
                   const emp = e.employeeId ? employeeById.get(e.employeeId) : undefined;
                   const payeeDisplay = emp ? emp.fullName : (e.payee ?? "—");
                   return (
-                    <li key={e.id} className="px-5 py-3.5 flex items-center gap-4">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-3">
+                    <li key={e.id} className="px-4 sm:px-5 py-3.5 flex flex-wrap sm:flex-nowrap items-center gap-x-4 gap-y-2">
+                      <div className="w-full sm:w-auto flex-none sm:flex-1 min-w-0">
+                        <div className="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-1">
                           <span className="text-[14px] font-semibold text-slate-800">৳{formatAmount(e.amount)}</span>
                           <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[11px] font-semibold uppercase tracking-wider border border-amber-100">
                             {cat?.name ?? "—"}
@@ -1342,7 +1342,7 @@ export default function ExpenseClient() {
                           ) : null;
                         })()}
                       </div>
-                      <div className="flex items-center gap-3 flex-shrink-0">
+                      <div className="flex w-full justify-end sm:w-auto sm:justify-start items-center gap-3 sm:flex-shrink-0">
                         <span className="font-mono text-[11.5px] text-slate-400">{e.voucherNumber}</span>
                         {(() => {
                           const closed = isRowClosed(e);

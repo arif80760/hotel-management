@@ -185,7 +185,7 @@ export default function RoomBoard() {
       </div>
 
       {/* ── Date navigation bar ─────────────────────────────── */}
-      <div className="flex items-center justify-between px-6 py-2.5 border-b border-slate-100 bg-slate-50/50">
+      <div className="flex flex-wrap items-center justify-between gap-y-1.5 px-4 sm:px-6 py-2.5 border-b border-slate-100 bg-slate-50/50">
 
         {/* ← Prev */}
         <button
