@@ -581,6 +581,10 @@ export default function CashbookClient({
 
   // ── Success banner ─────────────────────────────────────────
   const [successMsg, setSuccessMsg] = useState("");
+  // Set to the closed date AFTER a day close succeeds — drives the
+  // "print today's report?" confirm dialog. Never set before/instead of
+  // the close itself; purely a follow-up offer.
+  const [printPromptDate, setPrintPromptDate] = useState<string | null>(null);
 
   // ── Day-close state ────────────────────────────────────────
   // dayCloseStatus: result of getDayCloseStatus() — last-closed date,
@@ -1215,6 +1219,9 @@ export default function CashbookClient({
             if (result.ok) {
               setSuccessMsg(`Day ${displayDate} closed at ${formatBdt(result.row.closingBalance)}.`);
               await loadDayCloseStatus();
+              // Offer the printable report only once the close has fully
+              // succeeded and status is refreshed.
+              setPrintPromptDate(displayDate);
             } else {
               setCloseDayError(result.message);
             }
@@ -1564,6 +1571,53 @@ export default function CashbookClient({
           </div>
         );
       })()}
+
+      {/* ══════════════════════════════════════════════════════
+          PRINT-REPORT PROMPT (after a successful day close)
+      ══════════════════════════════════════════════════════ */}
+      {printPromptDate && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+          onClick={e => { if (e.target === e.currentTarget) setPrintPromptDate(null); }}
+        >
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-9 h-9 rounded-lg bg-emerald-50 flex items-center justify-center flex-shrink-0">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 text-emerald-600">
+                  <polyline points="6 9 6 2 18 2 18 9"/>
+                  <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>
+                  <rect x="6" y="14" width="12" height="8"/>
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-[15px] font-semibold text-slate-800 leading-snug">Day closed</h2>
+                <p className="text-[13px] text-slate-500 mt-1">
+                  Would you like to print the Cashbook report for <span className="font-semibold text-slate-700">{printPromptDate}</span>?
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setPrintPromptDate(null)}
+                className="min-h-11 md:min-h-0 px-4 py-2 text-[13px] font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors"
+              >
+                No
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  window.open(`/accounts/cashbook/report/${printPromptDate}`, "_blank");
+                  setPrintPromptDate(null);
+                }}
+                className="min-h-11 md:min-h-0 px-4 py-2 text-[13px] font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors"
+              >
+                Yes, open report
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ══════════════════════════════════════════════════════
           DELETE CONFIRM DIALOG
