@@ -191,13 +191,24 @@ function ItemCombobox({
       if (wrapRef.current?.contains(t) || panelRef.current?.contains(t)) return;
       setOpen(false);
     };
-    // The panel is fixed, so any outer scroll would detach it from the
-    // field — close instead. Scrolls inside the panel itself are fine.
+    // Desktop: any outer scroll/resize would detach the fixed panel from
+    // the field — close it. Mobile (<md): the soft keyboard fires exactly
+    // these events the moment the user types, so closing would make the
+    // picker unusable — re-measure and follow the field instead.
+    const isDesktop = () => window.matchMedia("(min-width: 768px)").matches;
+    const remeasure = () => {
+      const r = wrapRef.current?.getBoundingClientRect();
+      if (r) setRect({ top: r.bottom + 6, left: r.left, width: r.width });
+    };
     const onScroll = (e: Event) => {
       if (panelRef.current && e.target instanceof Node && panelRef.current.contains(e.target)) return;
-      setOpen(false);
+      if (isDesktop()) setOpen(false);
+      else remeasure();
     };
-    const onResize = () => setOpen(false);
+    const onResize = () => {
+      if (isDesktop()) setOpen(false);
+      else remeasure();
+    };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onResize);
@@ -275,7 +286,7 @@ function ItemCombobox({
           aria-label="Clear selection"
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => { onSelect(null); onQueryChange(""); setOpen(false); }}
-          className="absolute right-8 top-1/2 -translate-y-1/2 p-0.5 rounded text-slate-300 hover:text-slate-500 transition-colors"
+          className="absolute right-8 top-1/2 -translate-y-1/2 w-11 h-11 md:w-auto md:h-auto flex items-center justify-center p-0.5 rounded text-slate-300 hover:text-slate-500 transition-colors"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3.5 h-3.5">
             <path d="M6 6l12 12M18 6L6 18" />
@@ -1101,9 +1112,9 @@ export default function ExpenseClient() {
     <div className="p-8 space-y-5">
 
       {/* ── Header ──────────────────────────────────────────── */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold text-slate-800">Expense</h1>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={openCategoryModal}
@@ -1246,7 +1257,7 @@ export default function ExpenseClient() {
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           placeholder="Search item, note, payee, category…"
-          className="ml-auto w-64 px-3 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400"
+          className="ml-auto w-full sm:w-64 px-3 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400"
         />
       </div>
 
@@ -1342,7 +1353,7 @@ export default function ExpenseClient() {
                               onClick={() => rowKind === "remuneration" ? openEditRemun(e) : openEditExpense(e)}
                               disabled={closed}
                               title={closed ? "This day is closed — editing is locked" : "Edit"}
-                              className="px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11.5px] font-semibold uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                              className="inline-flex items-center min-h-11 md:min-h-0 px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11.5px] font-semibold uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               Edit
                             </button>
@@ -1350,7 +1361,7 @@ export default function ExpenseClient() {
                         })()}
                         <a
                           href={`/accounts/voucher/${e.id}`}
-                          className="px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11.5px] font-semibold uppercase tracking-wider transition-colors"
+                          className="inline-flex items-center min-h-11 md:min-h-0 px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11.5px] font-semibold uppercase tracking-wider transition-colors"
                           title="View voucher (Phase 4D)"
                         >
                           Voucher
@@ -1369,7 +1380,7 @@ export default function ExpenseClient() {
       {/* MANAGE CATEGORIES MODAL (Phase 4B)                     */}
       {/* ────────────────────────────────────────────────────── */}
       {categoryModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeCategoryModal}>
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-4 md:p-6" onClick={closeCategoryModal}>
           <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
               <h2 className="text-[15px] font-semibold text-slate-800">Manage Categories</h2>
@@ -1377,7 +1388,7 @@ export default function ExpenseClient() {
                 type="button"
                 onClick={closeCategoryModal}
                 disabled={!!(savingEdit || creatingCategory || togglingId)}
-                className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="w-11 h-11 md:w-auto md:h-auto flex items-center justify-center text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 aria-label="Close"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
@@ -1500,7 +1511,7 @@ export default function ExpenseClient() {
       {/* MANAGE ITEMS MODAL (mirrors Manage Categories)          */}
       {/* ────────────────────────────────────────────────────── */}
       {itemModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeItemModal}>
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-4 md:p-6" onClick={closeItemModal}>
           <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
               <h2 className="text-[15px] font-semibold text-slate-800">Manage Items</h2>
@@ -1508,7 +1519,7 @@ export default function ExpenseClient() {
                 type="button"
                 onClick={closeItemModal}
                 disabled={!!(savingItemEdit || creatingItem || itemTogglingId)}
-                className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="w-11 h-11 md:w-auto md:h-auto flex items-center justify-center text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 aria-label="Close"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
@@ -1668,7 +1679,7 @@ export default function ExpenseClient() {
       {/* ADD EXPENSE MODAL (Phase 4C — NEW)                      */}
       {/* ────────────────────────────────────────────────────── */}
       {expenseModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={closeExpenseModal}>
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-4 md:p-6" onClick={closeExpenseModal}>
           <div className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
 
             {/* Header */}
@@ -1678,7 +1689,7 @@ export default function ExpenseClient() {
                 type="button"
                 onClick={closeExpenseModal}
                 disabled={creatingExpense}
-                className="text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="w-11 h-11 md:w-auto md:h-auto flex items-center justify-center text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 aria-label="Close"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
@@ -1689,7 +1700,7 @@ export default function ExpenseClient() {
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
 
               {/* Date + Amount */}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Date</label>
                   <input
@@ -2021,7 +2032,7 @@ export default function ExpenseClient() {
                   )}
 
                   {/* Quantity + Unit price */}
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="space-y-1">
                       <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">
                         Quantity{inventoryItems.find((i) => i.id === exInvItemId)?.unitsPerPack != null
@@ -2148,15 +2159,15 @@ export default function ExpenseClient() {
 
       {/* ── ADD REMUNERATION MODAL ──────────────────────────── */}
       {remunModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-6" onClick={() => { if (!savingRemun) setRemunModalOpen(false); }}>
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md flex flex-col" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-4 md:p-6" onClick={() => { if (!savingRemun) setRemunModalOpen(false); }}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 flex-shrink-0">
               <h2 className="text-[15px] font-semibold text-slate-800">{editingRemunId ? "Edit Remuneration" : "Add Remuneration"}</h2>
-              <button type="button" onClick={() => { if (!savingRemun) setRemunModalOpen(false); }} disabled={savingRemun} className="text-slate-400 hover:text-slate-700 disabled:opacity-40" aria-label="Close">
+              <button type="button" onClick={() => { if (!savingRemun) setRemunModalOpen(false); }} disabled={savingRemun} className="w-11 h-11 md:w-auto md:h-auto flex items-center justify-center text-slate-400 hover:text-slate-700 disabled:opacity-40" aria-label="Close">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5"><path d="M18 6L6 18M6 6l12 12" /></svg>
               </button>
             </div>
-            <div className="px-5 py-4 space-y-4">
+            <div className="px-5 py-4 space-y-4 overflow-y-auto flex-1">
               <p className="text-[11.5px] text-slate-400">
                 Director/MD/Chairman payment — paid from <span className="font-semibold text-slate-600">Cash in Hand</span>, recorded as cash out but kept out of operating expenses and profit (appropriation of profit).
               </p>
@@ -2174,7 +2185,7 @@ export default function ExpenseClient() {
                 )}
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Amount (৳)</label>
                   <input type="number" min={0} step="0.01" value={remunAmount} onChange={(e) => setRemunAmount(e.target.value)} onWheel={(e) => (e.target as HTMLInputElement).blur()} disabled={savingRemun} placeholder="0.00" className={inputCls(false)} />

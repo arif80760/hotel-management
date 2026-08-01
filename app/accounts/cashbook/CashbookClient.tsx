@@ -260,7 +260,7 @@ function DatePickerField({
 
       {/* ── Dropdown panel ─────────────────────────────────── */}
       {open && (
-        <div className={`absolute left-0 z-30 bg-white border border-slate-200 rounded-xl shadow-2xl p-4 w-[272px] ${
+        <div className={`absolute left-0 z-30 bg-white border border-slate-200 rounded-xl shadow-2xl p-4 w-[272px] max-w-[calc(100vw-2rem)] ${
           openUpward ? "bottom-full mb-2" : "top-full mt-2"
         }`}>
 
@@ -965,9 +965,9 @@ export default function CashbookClient({
   // ── Loaded ─────────────────────────────────────────────────
   return (
     <div className="p-8 space-y-5">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold text-slate-800">Accounts</h1>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <LoanEntryActions onRecorded={reloadAll} />
           <button
             type="button"
@@ -1312,11 +1312,11 @@ export default function CashbookClient({
             <div className="flex items-end justify-between gap-4 flex-wrap">
               <p style={{ fontFamily: archivoFamily, fontSize: 13, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#3F3F3F" }}>Transactions</p>
               <div className="flex items-end gap-3 flex-wrap">
-                <div className="w-[200px]">
+                <div className="w-full sm:w-[200px]">
                   <label className="block mb-1.5" style={{ fontFamily: archivoFamily, fontSize: 10.5, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#8A8A8A" }}>From</label>
                   <DatePickerField value={filterFromDate} onChange={setFilterFromDate} />
                 </div>
-                <div className="w-[200px]">
+                <div className="w-full sm:w-[200px]">
                   <label className="block mb-1.5" style={{ fontFamily: archivoFamily, fontSize: 10.5, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#8A8A8A" }}>To</label>
                   <DatePickerField value={filterToDate} onChange={setFilterToDate} />
                 </div>
@@ -1390,8 +1390,8 @@ export default function CashbookClient({
                       const isDeleted = t.deletedAt !== null;
 
                       return (
-                        <div key={t.id} className={`px-5 py-3.5 flex items-start gap-4 ${isDeleted ? "opacity-50 bg-rose-50/40" : ""}`}>
-                          <div className="flex-1 min-w-0">
+                        <div key={t.id} className={`px-5 py-3.5 flex flex-wrap sm:flex-nowrap items-start gap-4 ${isDeleted ? "opacity-50 bg-rose-50/40" : ""}`}>
+                          <div className="w-full sm:w-auto flex-none sm:flex-1 min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
                               <span style={{ fontFamily: archivoFamily }} className={`text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full ${meta.badgeCls}`}>
                                 {meta.label}
@@ -1459,7 +1459,7 @@ export default function CashbookClient({
                                 disabled={isClosedDay}
                                 aria-label="Edit transaction"
                                 title={isClosedDay ? "This day is closed — edit not allowed" : "Edit"}
-                                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-slate-400"
+                                className="w-11 h-11 md:w-8 md:h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-slate-400"
                               >
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
                                   <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
@@ -1472,7 +1472,7 @@ export default function CashbookClient({
                                 disabled={isClosedDay}
                                 aria-label="Delete transaction"
                                 title={isClosedDay ? "This day is closed — delete not allowed" : "Delete"}
-                                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-slate-400"
+                                className="w-11 h-11 md:w-8 md:h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-slate-400"
                               >
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
                                   <path d="M3 6h18" />
@@ -1485,7 +1485,7 @@ export default function CashbookClient({
                             </>
                           )}
 
-                          <p style={{ fontFamily: oswaldFamily, fontSize: 16, fontWeight: 600 }} className={`tabular-nums whitespace-nowrap ${amountCls} ${isDeleted ? "line-through decoration-current" : ""}`}>{amountSign}{formatBdt(t.amount)}</p>
+                          <p style={{ fontFamily: oswaldFamily, fontSize: 16, fontWeight: 600 }} className={`ml-auto tabular-nums whitespace-nowrap ${amountCls} ${isDeleted ? "line-through decoration-current" : ""}`}>{amountSign}{formatBdt(t.amount)}</p>
                         </div>
                       );
                     })}
@@ -1522,10 +1522,10 @@ export default function CashbookClient({
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
             onClick={e => { if (e.target === e.currentTarget) cancelDelete(); }}
           >
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col max-h-[90vh]">
 
               {/* Body */}
-              <div className="px-6 py-5">
+              <div className="px-6 py-5 overflow-y-auto flex-1">
                 <div className="flex items-start gap-3">
                   <div className="w-9 h-9 rounded-lg bg-rose-50 flex items-center justify-center flex-shrink-0">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4.5 h-4.5 text-rose-600">
