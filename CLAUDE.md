@@ -166,6 +166,13 @@ Pages that must print cleanly are excluded from Sidebar + TopBar via `isStandalo
 
 ### Known Issues / Technical Debt
 
+#### Known Behaviour (DELIBERATE, not a bug) — staff can zero a booking via "More Discount" at checkout; write-offs are financially invisible
+Read this FIRST when investigating "missing revenue" or "checkout bypassed the balance guard".
+
+The "More Discount" field in both checkout modals (`BookingsClient.tsx` ~:5390 and `FrontDeskClient.tsx` ~:1329) is available to **all roles**, requires **no reason** (blank passes `null` — see `moreDiscountReason.trim() || null` at BookingsClient:2538/:2612, FrontDeskClient:449/:519), and is capped only at **100% of the billable total** (`validateAndBuildDiscount`, BookingsClient:2464-2479 / FrontDeskClient:385-396). Because the discount is subtracted into `finalPayable` **before** the outstanding-balance guard evaluates (`finalPayableBeforeCapture = remaining − discount.amount` at BookingsClient:2496 → guard :2518; FrontDeskClient:410 → :429), a full-total discount lets any user complete checkout on an unpaid booking through the ordinary confirm path — the admin override never fires, so `override_checkout` stays FALSE and `override_by`/`override_at` stay NULL. **This is understood and accepted**: office staff use the field to adjust bookings that should not be billed. Nine bookings totalling ৳33,900 were zeroed this way between 2026-07-31 and 2026-08-02 and are intentionally left as-is.
+
+Consequence to know: a checkout discount creates **NO `account_transactions` row** (the `checkout_booking` RPC writes only `bookings.additional_discount_*`, step 3.6 of `2026-06-15-early-checkout-min-one-night-floor.sql`; `update_booking_total` ignores it). Written-off revenue is therefore **invisible in the Cashbook, Revenue Report and P&L** — indistinguishable from a booking that never happened. The only traces are `bookings.additional_discount_amount/_reason/_by/_at` (rendered on the invoice and reservation pages) and a generic `booking.updated` activity-log row whose details carry `total_amount` only, not the discount figure. If reporting of write-offs is ever wanted, that is a new feature (e.g. a discounts line in P&L or an admin discounts audit view), not a bug fix.
+
 #### Synthetic optimistic IDs in checkout guards
 Location: `contexts/HotelContext.tsx` — `checkoutNormal` / `checkoutWithOverride`
 
