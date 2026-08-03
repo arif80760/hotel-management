@@ -73,7 +73,11 @@ function formatDateDisplay(isoDate: string): string {
 // CONTEXT TYPE
 // ─────────────────────────────────────────────────────────────
 type HotelContextType = {
+  /** ACTIVE rooms only — what pickers, the room board, availability and
+   *  every count should use. Deactivated rooms are excluded here. */
   rooms:               MockRoom[];
+  /** Every room including deactivated — for the Rooms management page. */
+  allRooms:            MockRoom[];
   bookings:            MockBooking[];
   loading:             boolean;           // true while initial data is being fetched
   nextBookingId:       number;
@@ -84,7 +88,9 @@ type HotelContextType = {
   changeBookingStatus: (id: string, status: BookingStatus)                        => void;
   addRoom:             (room: MockRoom)                                            => void;
   updateRoom:          (id: string, updates: Partial<Omit<MockRoom, "id"|"status">>) => void;
-  deleteRoom:          (id: string)                                                => void;
+  /** Deactivate/reactivate a room (rooms are never deleted — FK RESTRICT).
+   *  Rejects with a clear message when an active booking blocks deactivation. */
+  setRoomActive:       (id: string, isActive: boolean)                             => Promise<void>;
   /** Flip a room back to Available (legacy helper retained for compatibility). */
   markRoomAvailable:   (roomNumber: string)                                        => Promise<void>;
   recordPayment:       (id: string, additionalAmount: number, method: PaymentMethod, callerRole?: string) => void;
@@ -1222,7 +1228,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
 
     // 2. Persist to Supabase, then replace the placeholder id with the real UUID.
     //
-    // WHY this matters: every subsequent updateRoom / deleteRoom call uses room.id
+    // WHY this matters: every subsequent updateRoom / setRoomActive call uses room.id
     // as the Supabase WHERE clause. If the placeholder id stays in state, those calls
     // send "pending-..." to Supabase, which rejects it as an invalid UUID.
     roomsService.addRoom(room)
@@ -1260,13 +1266,12 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     });
   }
 
-  function deleteRoom(id: string) {
-    // 1. Optimistic: remove from list immediately
-    setRooms(prev => prev.filter(r => r.id !== id));
-    // 2. Persist to Supabase in the background
-    roomsService.deleteRoom(id).catch(err =>
-      console.error("[deleteRoom] Supabase error:", err)
-    );
+  async function setRoomActive(id: string, isActive: boolean) {
+    // Service-FIRST, not optimistic: deactivation can be rejected by the
+    // active-booking guard and the caller must receive that message. State
+    // flips only after the write succeeds.
+    await roomsService.setRoomActive(id, isActive);
+    setRooms(prev => prev.map(r => (r.id === id ? { ...r, isActive } : r)));
   }
 
   // Legacy helper — sets a room to Available via Supabase.
@@ -1279,9 +1284,15 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     );
   }
 
+  // Deactivated rooms are invisible to every consumer except the Rooms
+  // management page (which reads allRooms). Exposing the filtered list as
+  // `rooms` means pickers/board/counts exclude inactive rooms by default.
+  const activeRooms = useMemo(() => rooms.filter(r => r.isActive), [rooms]);
+
   return (
     <HotelContext.Provider value={{
-      rooms,
+      rooms: activeRooms,
+      allRooms: rooms,
       bookings,
       loading,
       nextBookingId,
@@ -1303,7 +1314,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       markBookingNoShow,
       addRoom,
       updateRoom,
-      deleteRoom,
+      setRoomActive,
       markRoomAvailable,
       recordPayment,
       categoryName,

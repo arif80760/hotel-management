@@ -30,6 +30,7 @@ type RoomRow = {
   status:      string;
   capacity:    number;
   amenities:   string[];
+  is_active:   boolean;
   created_at:  string;
   updated_at:  string;
 };
@@ -62,6 +63,7 @@ function mapRoom(row: RoomRow): MockRoom {
     price:      0,  // placeholder — actual price from room_categories
     capacity:   row.capacity,
     amenities:  row.amenities ?? [],
+    isActive:   row.is_active,
   };
 }
 
@@ -196,37 +198,63 @@ export async function setRoomStatus(
 }
 
 // ─────────────────────────────────────────────────────────────
-// DELETE
+// DEACTIVATE / REACTIVATE
+// Rooms are never deleted — five FK RESTRICT constraints reference
+// them (bookings.room_id, booking_rooms.room_id, inventory_movements
+// .from_room_id/.to_room_id, inventory_assignments.room_id).
+// Lifecycle is is_active, mirroring room categories / expense items.
 // ─────────────────────────────────────────────────────────────
 
-export async function deleteRoom(id: string): Promise<void> {
+export async function setRoomActive(id: string, isActive: boolean): Promise<void> {
+  // Deactivation guard: refuse while any booking_rooms row on this room
+  // is still confirmed/checked_in — name the blocking booking so the UI
+  // can show a clear message instead of a raw error. Reactivation is
+  // always allowed (no guard).
+  if (!isActive) {
+    const { data: blockers, error: guardErr } = await supabase
+      .from("booking_rooms")
+      .select("status, check_out_date, bookings!booking_id(booking_ref)")
+      .eq("room_id", id)
+      .in("status", ["confirmed", "checked_in"])
+      .limit(1);
+
+    if (guardErr) {
+      console.error("──────────── [setRoomActive] guard query failed ────────────");
+      console.error("  message:", guardErr.message, "| code:", guardErr.code);
+      throw new Error(`[setRoomActive] Could not verify active bookings — ${guardErr.message}`);
+    }
+    if (blockers && blockers.length > 0) {
+      const b = blockers[0];
+      // Embedded relation may be array OR object — handle both.
+      const bk  = Array.isArray(b.bookings) ? b.bookings[0] : b.bookings;
+      const ref = (bk as { booking_ref: string | null } | null)?.booking_ref ?? "an active booking";
+      const state = b.status === "checked_in" ? "checked in" : "confirmed";
+      const until = b.check_out_date ? ` until ${b.check_out_date}` : "";
+      throw new Error(
+        `Cannot deactivate — booking ${ref} is ${state}${until} on this room. Check it out or cancel it first.`
+      );
+    }
+  }
+
   const { error, status, statusText } = await supabase
     .from("rooms")
-    .delete()
+    .update({ is_active: isActive })
     .eq("id", id);
 
   if (error) {
-    console.error("──────────────── [deleteRoom] Supabase DELETE failed ────────────────");
+    console.error("──────────────── [setRoomActive] Supabase UPDATE failed ────────────────");
     console.error("  message    :", error.message);
     console.error("  details    :", error.details);
     console.error("  hint       :", error.hint);
     console.error("  code       :", error.code);
     console.error("  HTTP status:", status, statusText);
-    console.error("  room id    :", id);
-    console.error("─────────────────────────────────────────────────────────────────────");
+    console.error("  room id    :", id, "| is_active →", isActive);
+    console.error("────────────────────────────────────────────────────────────────────────");
     throw new Error(
-      `[deleteRoom] Delete failed — ${error.message}` +
+      `[setRoomActive] Update failed — ${error.message}` +
       (error.code    ? ` (code: ${error.code})`       : "") +
       (error.hint    ? ` | hint: ${error.hint}`        : "") +
       (error.details ? ` | details: ${error.details}`  : "")
     );
   }
-}
-
-// ─────────────────────────────────────────────────────────────
-// VALIDATION HELPER
-// ─────────────────────────────────────────────────────────────
-
-export function canDeleteRoom(room: MockRoom): boolean {
-  return room.status !== "Occupied" && room.status !== "Reserved";
 }

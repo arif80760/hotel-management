@@ -44,9 +44,6 @@ const ALL_STATUSES: RoomStatus[] = [
   "Available", "Occupied", "Reserved",
 ];
 
-// Statuses that booking logic owns — delete blocked in these states
-const BOOKING_LOCKED: RoomStatus[] = ["Occupied", "Reserved"];
-
 // ─────────────────────────────────────────────────────────────
 // FORM TYPE  (all strings so <input> bindings are simple)
 // ─────────────────────────────────────────────────────────────
@@ -107,17 +104,17 @@ function categoryBadge(c: string): string {
 // ─────────────────────────────────────────────────────────────
 export default function RoomsClient() {
   const {
-    rooms,
+    allRooms,
     addRoom,
     updateRoom,
-    deleteRoom,
+    setRoomActive,
     categories,
     refreshCategories,
     loading: hotelLoading,
   } = useHotel();
 
   const { role } = useAuth();
-  const isAdmin = role === "admin";   // only admins may add / edit / delete rooms
+  const isAdmin = role === "admin";   // only admins may add / edit / deactivate rooms
 
   // ── Room categories (from the session-level cache in HotelContext) ──
   // Loaded once at sign-in; mutations below call refreshCategories() so new
@@ -245,7 +242,11 @@ export default function RoomsClient() {
   const [errors,      setErrors]      = useState<FormErrors>({});
 
   // ── Delete confirmation (inline 2-step) ────────────────────
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  // Deactivate/reactivate state (rooms are never deleted — FK RESTRICT).
+  // "room" prefix: togglingId/handleToggleActive already exist for categories.
+  const [showInactive,   setShowInactive]   = useState(false);
+  const [roomTogglingId, setRoomTogglingId] = useState<string | null>(null);
+  const [actionError,    setActionError]    = useState<string | null>(null);
 
   // ── Success / info banner ───────────────────────────────────
   const [successMsg, setSuccessMsg] = useState("");
@@ -266,32 +267,39 @@ export default function RoomsClient() {
     return () => document.removeEventListener("keydown", onKey);
   }, [modalOpen]);
 
+  // ── Derived: visible rooms (active by default; toggle shows inactive) ──
+  const visibleRooms = useMemo(
+    () => allRooms.filter(r => showInactive || r.isActive),
+    [allRooms, showInactive],
+  );
+  const inactiveCount = useMemo(() => allRooms.filter(r => !r.isActive).length, [allRooms]);
+
   // ── Derived: filtered room list ─────────────────────────────
   const filteredRooms = useMemo(() => {
-    return rooms.filter(r => {
+    return visibleRooms.filter(r => {
       const floorOk  = floorFilter  === "All" || r.floor  === floorFilter;
       const statusOk = statusFilter === "All" || r.status === statusFilter;
       return floorOk && statusOk;
     });
-  }, [rooms, floorFilter, statusFilter]);
+  }, [visibleRooms, floorFilter, statusFilter]);
 
   // ── Derived: status counts (for filter pills) ───────────────
   const statusCounts = useMemo(() => {
-    const base: Record<string, number> = { All: rooms.length };
+    const base: Record<string, number> = { All: visibleRooms.length };
     ALL_STATUSES.forEach(s => {
-      base[s] = rooms.filter(r => r.status === s).length;
+      base[s] = visibleRooms.filter(r => r.status === s).length;
     });
     return base;
-  }, [rooms]);
+  }, [visibleRooms]);
 
   // ── Derived: floor counts ───────────────────────────────────
   const floorCounts = useMemo(() => {
-    const base: Record<string, number> = { All: rooms.length };
+    const base: Record<string, number> = { All: visibleRooms.length };
     FLOOR_OPTIONS.forEach(f => {
-      base[f] = rooms.filter(r => r.floor === f).length;
+      base[f] = visibleRooms.filter(r => r.floor === f).length;
     });
     return base;
-  }, [rooms]);
+  }, [visibleRooms]);
 
   // ── Modal helpers ───────────────────────────────────────────
   function openAdd() {
@@ -334,7 +342,7 @@ export default function RoomsClient() {
       e.roomNumber = "Room number is required.";
     } else {
       // Check for duplicate room number (exclude the room being edited)
-      const duplicate = rooms.find(
+      const duplicate = allRooms.find(
         r => r.roomNumber === form.roomNumber.trim() && r.id !== editingId
       );
       if (duplicate) e.roomNumber = `Room ${form.roomNumber.trim()} already exists.`;
@@ -385,6 +393,7 @@ export default function RoomsClient() {
         price:      0,   // placeholder — pricing lives on room_categories
         capacity:   parseInt(form.capacity),
         amenities:  amenitiesArr,
+        isActive:   true,
       };
       addRoom(newRoom);
       setSuccessMsg(`Room ${newRoom.roomNumber} added to inventory.`);
@@ -393,17 +402,22 @@ export default function RoomsClient() {
     closeModal();
   }
 
-  // ── Delete ──────────────────────────────────────────────────
-  function handleDeleteClick(room: MockRoom) {
-    if (BOOKING_LOCKED.includes(room.status)) return; // safety guard
-    if (deleteConfirmId === room.id) {
-      // Second click — confirmed
-      deleteRoom(room.id);
-      setSuccessMsg(`Room ${room.roomNumber} removed from inventory.`);
-      setDeleteConfirmId(null);
-    } else {
-      // First click — ask for confirmation
-      setDeleteConfirmId(room.id);
+  // ── Deactivate / Reactivate ─────────────────────────────────
+  // Deletion is impossible (five FK RESTRICT constraints reference rooms).
+  // The service blocks deactivation while a confirmed/checked-in booking
+  // occupies the room and throws a message naming it; reactivation is
+  // always allowed.
+  async function handleToggleRoomActive(room: MockRoom) {
+    setActionError(null);
+    setSuccessMsg("");
+    setRoomTogglingId(room.id);
+    try {
+      await setRoomActive(room.id, !room.isActive);
+      setSuccessMsg(`Room ${room.roomNumber} ${room.isActive ? "deactivated" : "reactivated"}.`);
+    } catch (e) {
+      setActionError(`Room ${room.roomNumber}: ${e instanceof Error ? e.message : "could not update the room."}`);
+    } finally {
+      setRoomTogglingId(null);
     }
   }
 
@@ -422,8 +436,9 @@ export default function RoomsClient() {
             Rooms
           </h1>
           <p className="text-[13px] text-slate-500 mt-1">
-            {rooms.length} room{rooms.length !== 1 ? "s" : ""} across{" "}
-            {new Set(rooms.map(r => r.floor)).size} floors
+            {allRooms.length - inactiveCount} active room{allRooms.length - inactiveCount !== 1 ? "s" : ""} across{" "}
+            {new Set(allRooms.filter(r => r.isActive).map(r => r.floor)).size} floors
+            {inactiveCount > 0 ? ` · ${inactiveCount} inactive` : ""}
           </p>
         </div>
         {isAdmin && (
@@ -459,6 +474,18 @@ export default function RoomsClient() {
             <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
           </svg>
           <p className="text-[13px] font-medium text-emerald-800">{successMsg}</p>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════
+          ACTION ERROR BANNER (deactivate blocked etc.)
+      ══════════════════════════════════════════════════════ */}
+      {actionError && (
+        <div className="flex items-start gap-3 bg-rose-50 border border-rose-200 rounded-xl px-5 py-3.5">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5 text-rose-500 flex-shrink-0 mt-0.5">
+            <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
+          </svg>
+          <p className="text-[13px] font-medium text-rose-700">{actionError}</p>
         </div>
       )}
 
@@ -541,6 +568,23 @@ export default function RoomsClient() {
             </button>
           ))}
         </div>
+
+        <div className="w-px h-5 bg-slate-200" />
+
+        {/* Inactive rooms toggle — active-only by default */}
+        <button
+          onClick={() => setShowInactive(v => !v)}
+          className={`px-3 py-1.5 rounded-lg text-[12.5px] font-medium transition-colors ${
+            showInactive
+              ? "bg-slate-900 text-white shadow-sm"
+              : "bg-white border border-slate-200 text-slate-500 hover:text-slate-700 hover:border-slate-300"
+          }`}
+        >
+          {showInactive ? "Hide Inactive" : "Show Inactive"}
+          <span className={`ml-1.5 text-[11px] font-bold ${showInactive ? "text-white/70" : "text-slate-400"}`}>
+            {inactiveCount}
+          </span>
+        </button>
       </div>
 
       {/* ══════════════════════════════════════════════════════
@@ -566,19 +610,10 @@ export default function RoomsClient() {
                   </td>
                 </tr>
               ) : filteredRooms.map(room => {
-                const isLocked  = BOOKING_LOCKED.includes(room.status);
-                const isConfirm = deleteConfirmId === room.id;
-
                 return (
                   <tr
                     key={room.id}
-                    className="hover:bg-slate-50/70 transition-colors"
-                    onClick={() => {
-                      // Clicking elsewhere clears a pending delete confirmation
-                      if (deleteConfirmId && deleteConfirmId !== room.id) {
-                        setDeleteConfirmId(null);
-                      }
-                    }}
+                    className={`hover:bg-slate-50/70 transition-colors ${!room.isActive ? "opacity-60" : ""}`}
                   >
                     {/* Room number */}
                     <td className="px-5 py-3.5">
@@ -631,6 +666,11 @@ export default function RoomsClient() {
                         <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusDot(room.status)}`} />
                         {room.status}
                       </span>
+                      {!room.isActive && (
+                        <span className="ml-1.5 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-200 text-slate-600">
+                          Inactive
+                        </span>
+                      )}
                     </td>
 
                     {/* Price — from room_categories (single source of truth) */}
@@ -651,38 +691,25 @@ export default function RoomsClient() {
                             Edit
                           </button>
 
-                          {/* Delete — disabled while booking-locked */}
-                          {isLocked ? (
-                            <span
-                              title={`Room is ${room.status} — cannot delete while a booking is active`}
-                              className="text-[12px] font-medium text-slate-300 border border-slate-100 px-3 py-1.5 rounded-lg cursor-not-allowed select-none"
+                          {/* Deactivate / Reactivate — rooms are never deleted
+                              (FK RESTRICT). The service blocks deactivation while
+                              a confirmed/checked-in booking occupies the room and
+                              its message surfaces in the banner above. */}
+                          {room.isActive ? (
+                            <button
+                              onClick={() => handleToggleRoomActive(room)}
+                              disabled={roomTogglingId === room.id}
+                              className="text-[12px] font-medium text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-200 hover:bg-rose-50 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
                             >
-                              Delete
-                            </span>
-                          ) : isConfirm ? (
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-[11.5px] text-rose-600 font-semibold whitespace-nowrap">
-                                Confirm?
-                              </span>
-                              <button
-                                onClick={() => handleDeleteClick(room)}
-                                className="text-[12px] font-semibold text-white bg-rose-500 hover:bg-rose-600 px-3 py-1.5 rounded-lg transition-colors"
-                              >
-                                Yes
-                              </button>
-                              <button
-                                onClick={() => setDeleteConfirmId(null)}
-                                className="text-[12px] font-medium text-slate-500 border border-slate-200 hover:bg-slate-50 px-3 py-1.5 rounded-lg transition-colors"
-                              >
-                                No
-                              </button>
-                            </div>
+                              {roomTogglingId === room.id ? "Deactivating…" : "Deactivate"}
+                            </button>
                           ) : (
                             <button
-                              onClick={() => handleDeleteClick(room)}
-                              className="text-[12px] font-medium text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-200 hover:bg-rose-50 px-3 py-1.5 rounded-lg transition-colors"
+                              onClick={() => handleToggleRoomActive(room)}
+                              disabled={roomTogglingId === room.id}
+                              className="text-[12px] font-medium text-emerald-600 hover:text-emerald-700 border border-emerald-200 hover:bg-emerald-50 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
                             >
-                              Delete
+                              {roomTogglingId === room.id ? "Reactivating…" : "Reactivate"}
                             </button>
                           )}
                         </div>
@@ -698,7 +725,7 @@ export default function RoomsClient() {
         {/* Table footer */}
         <div className="px-5 py-3 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
           <p className="text-[12px] text-slate-400">
-            Showing {filteredRooms.length} of {rooms.length} rooms
+            Showing {filteredRooms.length} of {visibleRooms.length} rooms
             {(floorFilter !== "All" || statusFilter !== "All") && (
               <button
                 onClick={() => { setFloorFilter("All"); setStatusFilter("All"); }}
