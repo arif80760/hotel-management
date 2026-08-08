@@ -87,6 +87,7 @@ export type AccountTransaction = {
   expenseItemId:     string | null;   // FK to expense_items (2026-07-31+); read here for display only
   employeeId:        string | null;   // FK to employees; set when the expense was paid to a staff member; display only
   payee:             string | null;   // free-text vendor/receiver (exclusive with employee_id); display only here
+  carriedForwardFrom: string | null;  // original date when the row was date-shifted past a closed day (trigger-set); txn_date = booked day
   createdBy:         string | null;   // auth.users(id) of the recorder
   createdAt:         string;
   editedAt:          string | null;   // ISO timestamp of most recent edit; null if never edited
@@ -147,6 +148,7 @@ type AccountTransactionRow = {
   expense_item_id?:     string | null;
   employee_id?:         string | null;
   payee?:               string | null;
+  carried_forward_from?: string | null;
   created_by:         string | null;
   created_at:         string;
   edited_at:          string | null;
@@ -194,6 +196,7 @@ function mapTransaction(row: AccountTransactionRow): AccountTransaction {
     expenseItemId:     row.expense_item_id ?? null,
     employeeId:        row.employee_id ?? null,
     payee:             row.payee ?? null,
+    carriedForwardFrom: row.carried_forward_from ?? null,
     createdBy:         row.created_by,
     createdAt:         row.created_at,
     editedAt:          row.edited_at,
@@ -252,7 +255,7 @@ export async function getTransactions(
 ): Promise<AccountTransaction[]> {
   let query = supabase
     .from("account_transactions")
-    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, category_id, revenue_category_id, expense_item_id, employee_id, payee, created_by, created_at, edited_at, edited_by, deleted_at, deleted_by, loans(lender_name)")
+    .select("id, txn_date, type, amount, from_account_id, to_account_id, note, booking_payment_id, category_id, revenue_category_id, expense_item_id, employee_id, payee, carried_forward_from, created_by, created_at, edited_at, edited_by, deleted_at, deleted_by, loans(lender_name)")
     .order("txn_date", { ascending: false })
     .order("created_at", { ascending: false });
 

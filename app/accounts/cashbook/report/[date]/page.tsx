@@ -100,7 +100,7 @@ export default async function CashbookReportPage({ params }: PageProps) {
   // ── The day's transactions (voided rows excluded, like the cashbook) ──
   const { data: dayRows, error: dayErr } = await sc
     .from("account_transactions")
-    .select("id, type, amount, from_account_id, to_account_id, note, voucher_number, booking_payment_id, category_id, revenue_category_id, expense_item_id, employee_id, payee")
+    .select("id, type, amount, from_account_id, to_account_id, note, voucher_number, booking_payment_id, category_id, revenue_category_id, expense_item_id, employee_id, payee, carried_forward_from")
     .eq("txn_date", date)
     .is("deleted_at", null)
     .order("created_at", { ascending: true });
@@ -236,13 +236,14 @@ export default async function CashbookReportPage({ params }: PageProps) {
         const incoming = t.to_account_id === id;
         if (incoming) totalIn += amt; else totalOut += amt;
         return {
-          id:      t.id as string,
-          voucher: (t.voucher_number as string | null) ?? "",
-          label:   deriveLabel(t),
-          note:    (t.note as string | null) ?? "",
-          flow:    flowText(t),
-          sign:    incoming ? "+" : "−",
-          amount:  amt,
+          id:          t.id as string,
+          voucher:     (t.voucher_number as string | null) ?? "",
+          label:       deriveLabel(t),
+          note:        (t.note as string | null) ?? "",
+          flow:        flowText(t),
+          sign:        incoming ? "+" : "−",
+          amount:      amt,
+          carriedFrom: (t.carried_forward_from as string | null) ?? null,
         };
       });
     return {
@@ -261,12 +262,16 @@ export default async function CashbookReportPage({ params }: PageProps) {
   // ── Grand totals over UNIQUE transactions (transfers are internal —
   //    counted once, separately, so they can't inflate in/out) ──
   let grandIn = 0, grandOut = 0, grandTransfers = 0;
+  // Carried-forward rows: recorded after their natural day was closed and
+  // date-shifted here by the DB trigger. Counted over unique transactions.
+  let carriedCount = 0, carriedTotal = 0;
   for (const t of dayTxns) {
     const amt = num(t.amount);
     const dir = txnDirection(String(t.type));
     if (dir === "in") grandIn += amt;
     else if (dir === "out") grandOut += amt;
     else grandTransfers += amt;
+    if (t.carried_forward_from) { carriedCount += 1; carriedTotal += amt; }
   }
 
   const report: ReportData = {
@@ -279,6 +284,8 @@ export default async function CashbookReportPage({ params }: PageProps) {
     grandOut:       +grandOut.toFixed(2),
     grandTransfers: +grandTransfers.toFixed(2),
     txnCount:       dayTxns.length,
+    carriedCount,
+    carriedTotal:   +carriedTotal.toFixed(2),
   };
 
   return <CashbookReportClient report={report} />;

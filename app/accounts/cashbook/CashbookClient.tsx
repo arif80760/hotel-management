@@ -474,6 +474,14 @@ function formatDayHeader(yyyyMmDd: string): string {
   });
 }
 
+// "7 Aug" — compact original-date label for carried-forward markers.
+// (The DB shifts post-close INSERTs onto the next open day; txn_date is
+// where the row was booked, carried_forward_from is where it happened.)
+function carriedFromLabel(iso: string): string {
+  const d = new Date(`${iso}T12:00:00`);
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
 // ── Group transactions by txn_date, preserving newest-first order ──
 function groupByDay(txns: AccountTransaction[]): [string, AccountTransaction[]][] {
   const map = new Map<string, AccountTransaction[]>();
@@ -1104,7 +1112,7 @@ export default function CashbookClient({
         // For "today" mode: pull from the already-loaded transactions state.
         // For "catchup" mode: use pastActivity (a separate service fetch).
         // For "closed" mode: show today's opening, no activity list.
-        type DerivedRow = { id: string; label: string; title?: string; note: string | null; amount: number; sign: "+" | "−"; color: string };
+        type DerivedRow = { id: string; label: string; title?: string; note: string | null; amount: number; sign: "+" | "−"; color: string; carriedFrom: string | null };
 
         /** Full-list tooltip for rows whose label truncates the room list (3+ rooms). */
         const deriveTitle = (t: { type: string; bookingPaymentId?: string | null }): string | undefined => {
@@ -1159,6 +1167,7 @@ export default function CashbookClient({
               id:     t.id,
               note:   t.note,
               label,
+              carriedFrom: t.carriedForwardFrom,
               // Truncation bites often on phones — the full label (+ note,
               // matching the visible text) is always hoverable on desktop.
               title:  deriveTitle(t) ?? (t.note && t.note !== label ? `${label} · ${t.note}` : label),
@@ -1192,6 +1201,7 @@ export default function CashbookClient({
               id:     t.id,
               note:   t.note,
               label,
+              carriedFrom: t.carriedForwardFrom,
               title:  deriveTitle(t) ?? (t.note && t.note !== label ? `${label} · ${t.note}` : label),
               amount: t.amount,
               sign:   t.toAccountId === cashId ? "+" : "−",
@@ -1301,6 +1311,15 @@ export default function CashbookClient({
                       {/* fontSize lives in classes (not style) so the sm: step-down
                           can apply — an inline fontSize would override it. */}
                       <span style={{ fontFamily: archivoFamily, color: "#5F5F5F" }} className="min-w-0 flex-1 truncate pr-2 sm:pr-3 text-[12px] sm:text-[13px]" title={r.title}>{r.label}{r.note && r.note !== r.label ? ` · ${r.note}` : ""}</span>
+                      {r.carriedFrom && (
+                        <span
+                          style={{ fontFamily: archivoFamily }}
+                          title={`Carried forward from ${r.carriedFrom} — that day was already closed when this was recorded`}
+                          className="flex-shrink-0 mr-2 text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700 whitespace-nowrap"
+                        >
+                          ↩ {carriedFromLabel(r.carriedFrom)}
+                        </span>
+                      )}
                       <span style={{ fontFamily: oswaldFamily, fontWeight: 600 }} className={`tabular-nums whitespace-nowrap flex-shrink-0 text-[13px] sm:text-[15px] ${r.color}`}>{r.sign}{formatBdt(r.amount)}</span>
                     </li>
                   ))}
@@ -1460,6 +1479,14 @@ export default function CashbookClient({
                                 </span>
                               )}
                               <p className="text-[13px] font-medium text-slate-700">{flow}</p>
+                              {t.carriedForwardFrom && (
+                                <span
+                                  title={`Carried forward from ${t.carriedForwardFrom} — that day was already closed when this was recorded`}
+                                  className="text-[10.5px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 whitespace-nowrap"
+                                >
+                                  ↩ carried from {carriedFromLabel(t.carriedForwardFrom)}
+                                </span>
+                              )}
                               {/* Room revenue: room number(s) + booking ref, resolved via
                                   payments -> booking_rooms (NEVER bookings.room_id — that
                                   legacy column holds only the first room). Rows without a

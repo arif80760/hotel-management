@@ -24,6 +24,10 @@ function formatDateLong(iso: string): string {
   const d = new Date(iso + "T12:00:00");
   return d.toLocaleDateString("en-GB", { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
 }
+function carriedFromLabel(iso: string): string {
+  const d = new Date(iso + "T12:00:00");
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
 function formatTimestamp(iso: string): string {
   return new Date(iso).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
@@ -46,6 +50,7 @@ export interface ReportAccountSection {
     flow:    string;
     sign:    string;     // "+" | "−" relative to this account
     amount:  number;
+    carriedFrom: string | null;  // original date of a post-close date-shifted row
   }>;
 }
 
@@ -59,6 +64,8 @@ export interface ReportData {
   grandOut:       number;
   grandTransfers: number;
   txnCount:       number;
+  carriedCount:   number;   // rows date-shifted in from a closed previous day
+  carriedTotal:   number;
 }
 
 export default function CashbookReportClient({ report }: { report: ReportData }) {
@@ -136,6 +143,17 @@ export default function CashbookReportClient({ report }: { report: ReportData })
               ))}
             </tbody>
           </table>
+          {/* Carried-forward reconciliation note — the GM checks this page
+              against the physical drawer, so date-shifted money must be
+              called out on paper, not only on screen. */}
+          {report.carriedCount > 0 && (
+            <p className="mt-2 text-[11px] text-sky-800">
+              ↩ {report.carriedCount} transaction{report.carriedCount === 1 ? "" : "s"} totalling
+              ৳{formatAmount(report.carriedTotal)} {report.carriedCount === 1 ? "was" : "were"} carried
+              in from a previous, already-closed day (marked below). Each row's note records when the
+              money actually moved.
+            </p>
+          )}
         </div>
 
         {/* ── Transactions grouped by account ──────────────── */}
@@ -160,7 +178,14 @@ export default function CashbookReportClient({ report }: { report: ReportData })
                     {s.rows.map((r) => (
                       <tr key={`${s.accountId}-${r.id}`} className="border-b border-slate-100 align-top">
                         <td className="py-1.5 pr-3 font-mono text-[11px] text-slate-500 whitespace-nowrap">{r.voucher || "—"}</td>
-                        <td className="py-1.5 px-3 text-slate-800">{r.label}</td>
+                        <td className="py-1.5 px-3 text-slate-800">
+                          {r.label}
+                          {r.carriedFrom && (
+                            <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider bg-sky-50 text-sky-700 border border-sky-200 whitespace-nowrap align-middle">
+                              ↩ carried from {carriedFromLabel(r.carriedFrom)}
+                            </span>
+                          )}
+                        </td>
                         <td className="py-1.5 px-3 text-slate-500">{r.note || ""}</td>
                         <td className="py-1.5 px-3 text-slate-500 whitespace-nowrap">{r.flow}</td>
                         <td className={`py-1.5 pl-3 text-right tabular-nums whitespace-nowrap ${r.sign === "+" ? "text-emerald-700" : "text-rose-700"}`}>
