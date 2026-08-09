@@ -1004,6 +1004,21 @@ export default function BookingsClient({ initialRoom }: Props) {
     [form.rooms]
   );
 
+  /** Actual stay length for the summary strip: nights from the earliest
+   *  check-in to the latest check-out across room rows — 4 rooms booked
+   *  6→8 Aug is a 2-night stay, not 8. Rows without valid dates are
+   *  ignored. totalNights (the per-room sum) still drives the grand-total
+   *  maths and the "Auto-computed from all room rows" helper text. */
+  const stayNights = useMemo(() => {
+    let minIn = "", maxOut = "";
+    for (const r of form.rooms) {
+      if (!r.checkIn || !r.checkOut || rowNights(r) <= 0) continue;
+      if (!minIn  || r.checkIn  < minIn)  minIn  = r.checkIn;   // ISO strings — lexicographic compare is date order
+      if (!maxOut || r.checkOut > maxOut) maxOut = r.checkOut;
+    }
+    return minIn && maxOut ? calcNights(minIn, maxOut) : 0;
+  }, [form.rooms]);
+
   /** Grand total charge: Σ bookingRate (or fixedRate or room price) × nights per row. */
   const grandTotal = useMemo(
     () => form.rooms.reduce((sum, r) => {
@@ -3902,7 +3917,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 <div className="h-8 w-px bg-slate-200" />
                 <div className="text-center">
                   <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Total Nights</p>
-                  <p className="text-[18px] font-bold text-slate-800">{totalNights}</p>
+                  <p className="text-[18px] font-bold text-slate-800">{stayNights}</p>
                 </div>
                 <div className="h-8 w-px bg-slate-200" />
                 <div className="text-center">
