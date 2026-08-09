@@ -497,6 +497,16 @@ const EMPTY_EDIT_FORM: EditFormData = {
 const BLOCKING_STATUSES = new Set<BookingStatus>(["Confirmed", "Checked In"]);
 
 /**
+ * Room-row-level counterpart — mirrors the live DB overlap guard in
+ * create_booking_with_rooms / add_room_to_booking, which whitelists
+ * x.status IN ('confirmed','checked_in') on booking_rooms. A whitelist
+ * (not a blocklist) so any future room status defaults to NON-blocking,
+ * matching the server: Cancelled / Checked Out / Checked Out Early rows
+ * release their dates even while the parent booking stays Confirmed.
+ */
+const ROOM_BLOCKING_STATUSES = new Set<BookingRoomStatus>(["Confirmed", "Checked In"]);
+
+/**
  * Normalise any date string to "YYYY-MM-DD" for safe lexicographic comparison.
  * Accepts ISO dates ("2026-04-22") and display dates ("Apr 22, 2026").
  * Returns "" on parse failure so callers can skip the overlap test safely.
@@ -556,7 +566,10 @@ function findRoomConflict(
     if (!BLOCKING_STATUSES.has(b.status)) return false;
     // Iterate all rooms in the booking — the legacy shim b.roomNumber only
     // reflects rooms[0] and silently misses conflicts against rooms 2+.
+    // Each row must ALSO be blocking in its own right: a partially-cancelled
+    // booking stays "Confirmed", but its cancelled rows release their dates.
     return b.rooms.some(br =>
+      ROOM_BLOCKING_STATUSES.has(br.status) &&
       br.roomNumber.trim() === roomNumber.trim() &&
       bookingDatesOverlap(br.checkInISO, br.checkOutISO, checkIn, checkOut)
     );
