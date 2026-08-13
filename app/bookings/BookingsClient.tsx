@@ -2557,15 +2557,22 @@ export default function BookingsClient({ initialRoom }: Props) {
       });
       return;
     }
-    await checkoutNormal(
-      bookingId,
-      charge.amount,
-      charge.reason,
-      actualDateISO,
-      discount.amount,
-      moreDiscountReason.trim() || null,
-      capturedMethod,
-    );
+    try {
+      await checkoutNormal(
+        bookingId,
+        charge.amount,
+        charge.reason,
+        actualDateISO,
+        discount.amount,
+        moreDiscountReason.trim() || null,
+        capturedMethod,
+      );
+    } catch (err) {
+      // Server-side balance guard (or any RPC failure): state already rolled
+      // back in HotelContext — keep the modal open and show why.
+      setOverrideError(err instanceof Error ? err.message : "Check-out failed — please try again.");
+      return;
+    }
     // Soft-fail payment step — DB scalar committed by checkoutNormal, trueDue guard passes.
     // callerRole="admin" bypasses the "Checked In" status guard (optimistic state is "Checked Out").
     if (capturedPayAmt > 0) {
@@ -2630,16 +2637,21 @@ export default function BookingsClient({ initialRoom }: Props) {
       return;
     }
 
-    await checkoutWithOverride(
-      bookingId,
-      overrideReason,
-      charge.amount,
-      charge.reason,
-      actualDateISO,
-      discount.amount,
-      moreDiscountReason.trim() || null,
-      capturedMethod,
-    );
+    try {
+      await checkoutWithOverride(
+        bookingId,
+        overrideReason,
+        charge.amount,
+        charge.reason,
+        actualDateISO,
+        discount.amount,
+        moreDiscountReason.trim() || null,
+        capturedMethod,
+      );
+    } catch (err) {
+      setOverrideError(err instanceof Error ? err.message : "Override check-out failed — please try again.");
+      return;
+    }
 
     // Soft-fail payment step — DB now has extra_charge_amount written (Step 2 in
     // bookingsService), so recordPayment's trueDue guard will pass.
@@ -5615,6 +5627,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 {/* ── CONFIRM CHECKOUT ────────────────────────────── */}
                 {finalPayable <= 0 && (
                   <div>
+                    {overrideError && <p className="mb-3 text-[11.5px] text-rose-600">{overrideError}</p>}
                     {isOverpayment && (
                       <p className="mb-3 text-[11.5px] text-rose-600">
                         Payment amount exceeds outstanding balance of ৳{finalPayableBeforeModalPay.toLocaleString()}. Reduce the payment amount.

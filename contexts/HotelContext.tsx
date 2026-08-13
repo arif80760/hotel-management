@@ -550,6 +550,10 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       setBookings(previousBookings);
       setRooms(previousRooms);
       console.error("[HotelContext checkoutNormal] failed — rolled back:", err instanceof Error ? err.message : err);
+      // Rethrow so the modal can show the failure (the server-side balance
+      // guard now rejects unsettled checkouts) — swallowing it here would
+      // close the modal as if the checkout succeeded.
+      throw err;
     });
   }
 
@@ -634,6 +638,9 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       setBookings(previousBookings);
       setRooms(previousRooms);
       console.error("[HotelContext checkoutWithOverride] failed — rolled back:", err instanceof Error ? err.message : err);
+      // Rethrow — same rationale as checkoutNormal: the guard can reject
+      // (e.g. non-admin caller), and the modal must show that.
+      throw err;
     });
   }
 

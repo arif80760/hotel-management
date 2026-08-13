@@ -1555,6 +1555,8 @@ export async function checkoutNormal(
     console.error("  bookingUUID :", bookingUUID);
     console.error("  booking_ref :", id);
     console.error("────────────────────────────────────────────────────────────────────────────────");
+    // assert_checkout_allowed raises user-facing messages — surface clean.
+    if (rpcErr.message.startsWith("Cannot check out")) throw new Error(rpcErr.message);
     throw new Error(
       `[checkoutNormal] checkout_booking RPC failed — ${rpcErr.message}` +
       (rpcErr.code    ? ` (code: ${rpcErr.code})`       : "") +
@@ -1733,6 +1735,10 @@ export async function checkoutWithOverride(
     p_additional_discount_amount:   additionalDiscountAmount   ?? 0,
     p_additional_discount_reason:   additionalDiscountReason   ?? null,
     p_additional_discount_by:       additionalDiscountBy       ?? null,
+    // Server-side balance guard (assert_checkout_allowed): the ONLY caller
+    // that passes true. The RPC re-verifies the caller is an admin via
+    // auth.uid() -> profiles.role, so this is a request, not a grant.
+    p_override:                     true,
   });
 
   if (rpcErr) {
@@ -1744,6 +1750,8 @@ export async function checkoutWithOverride(
     console.error("  bookingUUID :", bookingUUID);
     console.error("  booking_ref :", id);
     console.error("────────────────────────────────────────────────────────────────────────────────────");
+    // assert_checkout_allowed raises user-facing messages — surface clean.
+    if (rpcErr.message.startsWith("Cannot check out")) throw new Error(rpcErr.message);
     throw new Error(
       `[checkoutWithOverride] checkout_booking RPC failed — ${rpcErr.message}` +
       (rpcErr.code    ? ` (code: ${rpcErr.code})`       : "") +
@@ -2116,6 +2124,8 @@ export async function checkoutBookingRoomNormal(
     console.error("  actualCheckout:", actualCheckoutDate);
     console.error("  message      :", rpcErr.message);
     console.error("  code         :", rpcErr.code);
+    // assert_checkout_allowed raises user-facing messages — surface clean.
+    if (rpcErr.message.startsWith("Cannot check out")) throw new Error(rpcErr.message);
     throw new Error(
       `[checkoutBookingRoomNormal] ${rpcErr.message}` +
       (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),
