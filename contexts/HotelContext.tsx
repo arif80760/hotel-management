@@ -588,7 +588,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     const discountBy = user?.id ?? null;
     const override: CheckoutOverride = {
       used:           true,
-      reason:         overrideReason.trim() || "No reason provided",
+      reason:         overrideReason.trim(),   // non-empty — modal validates; service throws on blank
       by:             overrideBy,
       overrideUsedAt: now,
     };

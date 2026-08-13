@@ -2599,6 +2599,12 @@ export default function BookingsClient({ initialRoom }: Props) {
       setOverrideError("Only admins can use this override.");
       return;
     }
+    // The reason is the sole record of why the balance was released —
+    // never optional (the old "No reason provided" fallback is gone).
+    if (!overrideReason.trim()) {
+      setOverrideError("An override reason is required — record why the outstanding balance is being released.");
+      return;
+    }
     const charge = validateAndBuildCharge();
     if (charge === undefined) return;
     const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =

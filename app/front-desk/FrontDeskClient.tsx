@@ -478,6 +478,12 @@ export default function FrontDeskClient() {
       setOverrideError("Admin access is required to override checkout.");
       return;
     }
+    // The reason is the sole record of why the balance was released —
+    // never optional (the old "No reason provided" fallback is gone).
+    if (!overrideReason.trim()) {
+      setOverrideError("An override reason is required — record why the outstanding balance is being released.");
+      return;
+    }
     const charge = validateAndBuildCharge();
     if (charge === undefined) return;
     const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =

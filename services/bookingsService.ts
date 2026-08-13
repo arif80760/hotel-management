@@ -1698,6 +1698,15 @@ export async function checkoutWithOverride(
   additionalDiscountReason?: string | null,
   additionalDiscountBy?: string | null,
 ): Promise<void> {
+  // The override reason is the SOLE record of why money was released past
+  // the server-side balance guard — a blank must never be silently
+  // substituted (four of the five historical overrides carry the old
+  // "No reason provided" fallback). Client handlers validate first; this
+  // is the backstop.
+  if (!overrideReason.trim()) {
+    throw new Error("An override reason is required — record why the outstanding balance is being released.");
+  }
+
   // ── Step 0 — Resolve booking_ref → UUID ──────────────────────────────────
   // checkout_booking RPC takes p_booking_id (UUID), not booking_ref.
   // Mirrors the cancelBooking pattern.
@@ -1767,7 +1776,7 @@ export async function checkoutWithOverride(
   // override_by, override_at). Extra charges and additional discount are conditional.
   const updatePayload: Record<string, unknown> = {
     override_checkout: true,
-    override_reason:   overrideReason.trim() || "No reason provided",
+    override_reason:   overrideReason.trim(),   // non-empty — validated above and in the modal
     override_by:       overrideBy,
     override_at:       new Date().toISOString(),
   };
