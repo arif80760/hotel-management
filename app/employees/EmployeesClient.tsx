@@ -817,14 +817,20 @@ export default function EmployeesClient() {
         const hasLogin      = !!original?.authUserId;
         const newEmail      = form.email.trim();
         const wantPassword  = form.canAccessApp && !!form.tempPassword.trim();
+        // App-role change must reach profiles.role (the sole isAdmin gate) —
+        // employees.app_role alone grants nothing (EMP-010 bug). Only a set
+        // role syncs; toggling access off leaves the profile untouched.
+        const newRole     = form.canAccessApp ? (empData.appRole as "admin" | "staff" | null) : null;
+        const roleChanged = !!newRole && newRole !== (original?.appRole ?? null);
 
-        let loginChange: { emailChanged: boolean; passwordChanged: boolean } | null = null;
+        let loginChange: { emailChanged: boolean; passwordChanged: boolean; roleChanged: boolean } | null = null;
 
         // Fire on ANY edit-save of an employee that has a login (with an email to
-        // sync, or a password to set). The route no-ops when nothing differs, so
-        // accounts whose auth email drifted from the displayed email self-heal on
-        // the next save. The email is always sent; the route skips a blank one.
-        if (hasLogin && (newEmail || wantPassword)) {
+        // sync, a password to set, or a role change to mirror into profiles).
+        // The route no-ops when nothing differs, so accounts whose auth email
+        // drifted from the displayed email self-heal on the next save. The email
+        // is always sent; the route skips a blank one.
+        if (hasLogin && (newEmail || wantPassword || roleChanged)) {
           const { data: { session } } = await supabase.auth.getSession();
           if (!session) throw new Error("No active session — please sign in again.");
 
@@ -838,11 +844,12 @@ export default function EmployeesClient() {
               id:          editingId,
               newEmail:    newEmail || undefined,
               newPassword: wantPassword ? form.tempPassword : undefined,
+              appRole:     roleChanged ? newRole : undefined,
             }),
           });
 
           const rawText = await res.text();
-          type UpdateLoginResp = { ok?: boolean; emailChanged?: boolean; passwordChanged?: boolean; error?: string };
+          type UpdateLoginResp = { ok?: boolean; emailChanged?: boolean; passwordChanged?: boolean; roleChanged?: boolean; error?: string };
           let json: UpdateLoginResp | null = null;
           try { json = JSON.parse(rawText) as UpdateLoginResp; }
           catch { console.error("[update-login] non-JSON response:", rawText.slice(0, 500)); }
@@ -853,21 +860,29 @@ export default function EmployeesClient() {
             // login update failed — never let it look silent.
             const msg = json?.error ?? `Login update failed (HTTP ${res.status}).`;
             console.error("[update-login] failed:", msg);
-            setErrors(prev => ({ ...prev, [wantPassword ? "tempPassword" : "email"]: msg }));
+            if (wantPassword || newEmail) {
+              setErrors(prev => ({ ...prev, [wantPassword ? "tempPassword" : "email"]: msg }));
+            }
             setActionError(`Login not updated for ${form.fullName.trim()}: ${msg}`);
             setSaving(false);
             return;
           }
-          loginChange = { emailChanged: !!json.emailChanged, passwordChanged: !!json.passwordChanged };
+          loginChange = { emailChanged: !!json.emailChanged, passwordChanged: !!json.passwordChanged, roleChanged: !!json.roleChanged };
         }
 
         const changedBits: string[] = [];
         if (loginChange?.emailChanged)    changedBits.push("login email synced");
         if (loginChange?.passwordChanged) changedBits.push("password changed");
+        if (loginChange?.roleChanged)     changedBits.push(`app access role set to ${newRole}`);
+        // No linked login: the role change reached ONLY the employees row —
+        // say so plainly rather than silently no-opping (profiles.role is
+        // what actually grants access, and there is no profile yet).
         setSuccessMsg(
-          changedBits.length
-            ? `${form.fullName.trim()} updated — ${changedBits.join(" & ")}.`
-            : `${form.fullName.trim()} updated successfully.`,
+          !hasLogin && roleChanged
+            ? `${form.fullName.trim()} updated — note: no app login is linked, so the ${newRole} role is recorded but takes effect only when a login is provisioned.`
+            : changedBits.length
+              ? `${form.fullName.trim()} updated — ${changedBits.join(" & ")}.`
+              : `${form.fullName.trim()} updated successfully.`,
         );
 
       // ── ADD with app access → provision endpoint ────────────
