@@ -2598,6 +2598,43 @@ export async function getRoomsForBookingPayments(
   return out;
 }
 
+/**
+ * Batched READ for the MD Fund view: payment id → booking_ref + primary
+ * guest name. One query; embedded relations may come back array OR
+ * object (handled both). Display only — a miss just leaves the receipt
+ * row without booking context.
+ */
+export async function getBookingGuestForPayments(
+  paymentIds: string[],
+): Promise<Map<string, { bookingRef: string; guestName: string }>> {
+  const out = new Map<string, { bookingRef: string; guestName: string }>();
+  const unique = [...new Set(paymentIds)].filter(Boolean);
+  if (unique.length === 0) return out;
+
+  const { data, error } = await supabase
+    .from("payments")
+    .select("id, bookings!booking_id ( booking_ref, guests ( name ) )")
+    .in("id", unique);
+
+  if (error) {
+    console.error("[getBookingGuestForPayments] fetch FAILED:", error.message, "| code:", error.code);
+    throw new Error(`[getBookingGuestForPayments] ${error.message}`);
+  }
+
+  type GuestEmbed   = { name: string | null } | { name: string | null }[] | null;
+  type BookingEmbed = { booking_ref: string | null; guests: GuestEmbed } | { booking_ref: string | null; guests: GuestEmbed }[] | null;
+  for (const row of (data ?? []) as { id: string; bookings: BookingEmbed }[]) {
+    const booking = Array.isArray(row.bookings) ? row.bookings[0] : row.bookings;
+    if (!booking) continue;
+    const guest = Array.isArray(booking.guests) ? booking.guests[0] : booking.guests;
+    out.set(row.id, {
+      bookingRef: booking.booking_ref ?? "",
+      guestName:  guest?.name ?? "",
+    });
+  }
+  return out;
+}
+
 export async function getBookingPaymentMap(
   paymentIds: string[],
 ): Promise<Map<string, { bookingRef: string; method: PaymentMethod }>> {

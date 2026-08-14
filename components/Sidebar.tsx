@@ -168,6 +168,7 @@ const navItems: NavItem[] = [
       { label: "Revenue Report",     href: "/accounts/revenue-report" },
       { label: "Profit & Loss",      href: "/accounts/profit-loss" },
       { label: "Loans",              href: "/accounts/loans" },
+      { label: "MD Fund",            href: "/accounts/md-fund" },
     ],
   },
   { label: "Activity Log", href: "/activity", icon: Icons.activity, activityLog: true },
