@@ -1282,17 +1282,20 @@ export default function FrontDeskClient() {
                   <button
                     type="button"
                     onClick={() => setShowChargeSection(true)}
-                    className="w-full flex items-center justify-center gap-1.5 px-4 py-2.5 text-[12.5px] font-medium text-slate-500 bg-white border border-dashed border-slate-300 rounded-lg hover:text-slate-700 hover:border-slate-400 transition-colors"
+                    className="w-full flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-[12.5px] font-semibold text-violet-700 bg-violet-50 border border-violet-200 rounded-xl hover:bg-violet-100 transition-colors"
                   >
-                    + Add Additional Charge
-                    <span className="text-[11px] font-normal text-slate-400">damage, mini-bar, etc.</span>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 flex-shrink-0">
+                      <circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/>
+                    </svg>
+                    Add Additional Charge
+                    <span className="text-[11px] font-normal text-violet-600/80">damage, mini-bar, etc.</span>
                   </button>
                 ) : (
-                <div>
-                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
+                <div className="rounded-xl border border-violet-200 bg-violet-50/50 p-3.5">
+                  <p className="text-[11px] font-bold text-violet-600 uppercase tracking-wider mb-2 flex items-center justify-between">
                     <span>
                       Additional Charges
-                      <span className="ml-1.5 font-normal normal-case text-slate-400 text-[11px]">optional — damage, mini-bar, etc.</span>
+                      <span className="ml-1.5 font-normal normal-case text-violet-500/80 text-[11px]">optional — damage, mini-bar, etc.</span>
                     </span>
                     <button
                       type="button"
@@ -1311,7 +1314,7 @@ export default function FrontDeskClient() {
                           value={chargeType}
                           onChange={e => { setChargeType(e.target.value); setChargeError(""); }}
                           className="w-full px-3 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
-                            focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition appearance-none cursor-pointer"
+                            focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition appearance-none cursor-pointer"
                         >
                           <option value="">— Select type —</option>
                           {CHARGE_TYPES.map(t => (
@@ -1333,7 +1336,7 @@ export default function FrontDeskClient() {
                             onWheel={e => (e.target as HTMLInputElement).blur()}
                             disabled={!chargeType}
                             className="w-full pl-6 pr-3 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
-                              placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                              placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition
                               disabled:bg-slate-50 disabled:cursor-not-allowed
                               [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                           />
@@ -1359,7 +1362,7 @@ export default function FrontDeskClient() {
                         onChange={e => { setChargeNote(e.target.value); setChargeError(""); }}
                         disabled={!chargeType}
                         className="w-full px-3.5 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
-                          placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
+                          placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition
                           disabled:bg-slate-50 disabled:cursor-not-allowed"
                       />
                     </div>
@@ -1373,11 +1376,11 @@ export default function FrontDeskClient() {
                     )}
                     {/* Formatted preview */}
                     {chargeType && parseFloat(chargeAmount) > 0 && (
-                      <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3.5 py-2.5">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-amber-600 flex-shrink-0">
+                      <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded-lg px-3.5 py-2.5">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-violet-600 flex-shrink-0">
                           <path d="M9 12l2 2 4-4M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
                         </svg>
-                        <span className="text-[12px] text-amber-800 font-medium">
+                        <span className="text-[12px] text-violet-800 font-medium">
                           {formatChargeReason(chargeType, chargeNote) ?? chargeType} — ৳{parseFloat(chargeAmount).toLocaleString()}
                         </span>
                       </div>
@@ -1393,17 +1396,20 @@ export default function FrontDeskClient() {
                   <button
                     type="button"
                     onClick={() => setShowDiscountSection(true)}
-                    className="w-full flex items-center justify-center gap-1.5 px-4 py-2.5 text-[12.5px] font-medium text-slate-500 bg-white border border-dashed border-slate-300 rounded-lg hover:text-slate-700 hover:border-slate-400 transition-colors"
+                    className="w-full flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-[12.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-xl hover:bg-amber-100 transition-colors"
                   >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 flex-shrink-0">
+                      <path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"/><path d="M7 7h.01"/>
+                    </svg>
                     Apply Discount
-                    <span className="text-[11px] font-normal text-slate-400">e.g. loyalty, manager approval</span>
+                    <span className="text-[11px] font-normal text-amber-600/80">e.g. loyalty, manager approval</span>
                   </button>
                 ) : (
-                <div>
-                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
+                <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3.5">
+                  <p className="text-[11px] font-bold text-amber-600 uppercase tracking-wider mb-2 flex items-center justify-between">
                     <span>
                       More Discount
-                      <span className="ml-1.5 font-normal normal-case text-slate-400 text-[11px]">optional — e.g. loyalty, manager approval</span>
+                      <span className="ml-1.5 font-normal normal-case text-amber-600/80 text-[11px]">optional — e.g. loyalty, manager approval</span>
                     </span>
                     <button
                       type="button"
@@ -1428,7 +1434,7 @@ export default function FrontDeskClient() {
                             onChange={e => { setMoreDiscountAmt(e.target.value); setDiscountError(""); }}
                             onWheel={e => (e.target as HTMLInputElement).blur()}
                             className="w-full pl-6 pr-3 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
-                              placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition
+                              placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition
                               [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                           />
                         </div>
@@ -1443,7 +1449,7 @@ export default function FrontDeskClient() {
                           value={moreDiscountReason}
                           onChange={e => { setMoreDiscountReason(e.target.value); setDiscountError(""); }}
                           className="w-full px-3.5 py-2.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-lg
-                            placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent transition"
+                            placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
                         />
                       </div>
                     </div>
@@ -1456,11 +1462,11 @@ export default function FrontDeskClient() {
                       </p>
                     )}
                     {parseFloat(moreDiscountAmt) > 0 && (
-                      <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded-lg px-3.5 py-2.5">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-violet-600 flex-shrink-0">
+                      <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3.5 py-2.5">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-amber-600 flex-shrink-0">
                           <path d="M9 12l2 2 4-4M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
                         </svg>
-                        <span className="text-[12px] text-violet-800 font-medium">
+                        <span className="text-[12px] text-amber-800 font-medium">
                           Discount of ৳{parseFloat(moreDiscountAmt).toLocaleString()} will be applied
                           {moreDiscountReason.trim() && ` — ${moreDiscountReason.trim()}`}
                         </span>
@@ -1470,22 +1476,32 @@ export default function FrontDeskClient() {
                 </div>
                 )}
 
-                {/* ── ADD PAYMENT ─────────────────────────────────── */}
+                {/* ── ADD PAYMENT — the common case; solid emerald, the most
+                       prominent of the three sibling actions ─────────── */}
                 <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Add Payment</p>
+                  {!showModalPay ? (
                     <button
                       type="button"
-                      onClick={() => { setShowModalPay(v => !v); setModalPayAmt(""); setModalPayError(""); }}
-                      className={`text-[12px] font-semibold px-3 py-1 rounded-lg border transition-colors ${
-                        showModalPay
-                          ? "bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200"
-                          : "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
-                      }`}
+                      onClick={() => { setShowModalPay(true); setModalPayAmt(""); setModalPayError(""); }}
+                      className="w-full flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-[13px] font-semibold text-white bg-emerald-600 rounded-xl hover:bg-emerald-700 transition-colors shadow-sm"
                     >
-                      {showModalPay ? "Cancel" : "+ Add Payment"}
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 flex-shrink-0">
+                        <rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 12h.01M18 12h.01"/>
+                      </svg>
+                      Add Payment
+                    </button>
+                  ) : (
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider">Add Payment</p>
+                    <button
+                      type="button"
+                      onClick={() => { setShowModalPay(false); setModalPayAmt(""); setModalPayError(""); }}
+                      className="text-[12px] font-semibold px-3 py-1 rounded-lg border bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200 transition-colors"
+                    >
+                      Cancel
                     </button>
                   </div>
+                  )}
                   {showModalPay && (
                     <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-4 space-y-3">
                       <p className="text-[12px] text-emerald-700 font-medium">
