@@ -5389,7 +5389,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     <button
                       type="button"
                       onClick={collapseChargeSection}
-                      className="font-semibold normal-case tracking-normal text-[11.5px] text-slate-400 hover:text-rose-600 underline transition-colors"
+                      className="inline-flex items-center min-h-11 px-2 -my-2 font-bold normal-case tracking-normal text-[12px] text-violet-700 hover:text-rose-600 underline transition-colors"
                     >
                       Remove
                     </button>
@@ -5503,7 +5503,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     <button
                       type="button"
                       onClick={collapseDiscountSection}
-                      className="font-semibold normal-case tracking-normal text-[11.5px] text-slate-400 hover:text-rose-600 underline transition-colors"
+                      className="inline-flex items-center min-h-11 px-2 -my-2 font-bold normal-case tracking-normal text-[12px] text-amber-700 hover:text-rose-600 underline transition-colors"
                     >
                       Remove
                     </button>
@@ -5572,7 +5572,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     <button
                       type="button"
                       onClick={() => { setShowModalPay(true); setModalPayAmt(""); setModalPayError(""); }}
-                      className="w-full flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-[13px] font-semibold text-white bg-emerald-600 rounded-xl hover:bg-emerald-700 transition-colors shadow-sm"
+                      className="w-full flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-[13px] font-semibold text-white bg-emerald-500 rounded-xl hover:bg-emerald-600 transition-colors shadow-sm"
                     >
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 flex-shrink-0">
                         <rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 12h.01M18 12h.01"/>
