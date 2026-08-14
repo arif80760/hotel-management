@@ -68,6 +68,11 @@ export type NewExpense = {
   employeeId?:  string;        // required if payeeMode === 'employee'
   payee?:       string;        // required if payeeMode === 'vendor'
   note?:        string;
+  // Paying account. Omitted -> Cash in Hand (the historical default; the
+  // Add Expense form never sets it). The remuneration form passes it so
+  // MD payments can be drawn from Bank/bKash/Nagad — the only way those
+  // MD-held balances are ever drawn down.
+  fromAccountId?: string | null;
 };
 
 export type ExpenseFilters = {
@@ -211,8 +216,10 @@ export async function getExpenseById(id: string): Promise<Expense | null> {
  * Create a new user expense. Generates voucher_number via RPC, validates
  * exclusive-payee, inserts. Returns the new Expense.
  *
- * The from_account_id is hardcoded to Cash in Hand (per architecture §4 —
- * "always funded from Cash in Hand").
+ * from_account_id defaults to Cash in Hand (architecture §4) but callers
+ * may pass fromAccountId — the remuneration form uses this to pay from
+ * Bank/bKash/Nagad. expense_out shape (from set, to null) satisfies
+ * chk_txn_accounts either way.
  *
  * Throws on validation failure or DB error. DB-level CHECK provides the
  * final safety net.
@@ -251,7 +258,7 @@ export async function createExpense(input: NewExpense): Promise<Expense> {
     type:               "expense_out" as const,
     txn_date:           input.txnDate,
     amount:             input.amount,
-    from_account_id:    ACCOUNT_IDS.cash,
+    from_account_id:    input.fromAccountId ?? ACCOUNT_IDS.cash,
     to_account_id:      null,
     voucher_number:     voucherNumber,
     category_id:        input.categoryId,
