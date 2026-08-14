@@ -964,11 +964,19 @@ export default function CashbookClient({
   // revenue/expense follow the current date-range (transactions are already
   // filtered to [filterFromDate, filterToDate]); dues are a live snapshot.
   const summary = useMemo(() => {
-    let revenueIn = 0, expenseOut = 0;
+    let revenueIn = 0, expenseOut = 0, remunerationOut = 0;
     for (const t of transactions) {
       if (t.deletedAt !== null) continue;   // same guard the ledger uses to grey out deleted rows
       if (t.type === "revenue_in") revenueIn += t.amount;
-      else if (t.type === "expense_out") expenseOut += t.amount;
+      else if (t.type === "expense_out") {
+        // Remuneration is an appropriation of profit, not an operating
+        // expense — same kind-based rule as the expense list and P&L
+        // (resolved by expense_categories.kind, never by name; unknown/
+        // missing kind counts as operating, matching the list).
+        const kind = t.categoryId ? expenseCatMap.get(t.categoryId)?.kind : undefined;
+        if (kind === "remuneration") remunerationOut += t.amount;
+        else expenseOut += t.amount;
+      }
     }
     const outstandingDues = bookings.reduce(
       (s, b) =>
@@ -977,8 +985,8 @@ export default function CashbookClient({
           : s,
       0,
     );
-    return { revenueIn, expenseOut, netCash: revenueIn - expenseOut, outstandingDues };
-  }, [transactions, bookings]);
+    return { revenueIn, expenseOut, remunerationOut, netCash: revenueIn - expenseOut, outstandingDues };
+  }, [transactions, bookings, expenseCatMap]);
 
   // ── Loading state ──────────────────────────────────────────
   if (fetching) {
@@ -1040,7 +1048,7 @@ export default function CashbookClient({
       </div>
 
       {/* ── P&L-style cash summary strip ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #4F8B36", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#4F8B36" }}>Revenue received</div>
           <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.revenueIn)}</div>
@@ -1049,12 +1057,17 @@ export default function CashbookClient({
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #C5302A", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#C5302A" }}>Expense paid</div>
           <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.expenseOut)}</div>
-          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Cash out · expenses</div>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Cash out · operating expenses</div>
+        </div>
+        <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #8A8A8A", borderRadius: 10, padding: "15px 18px" }}>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#8A8A8A" }}>Remuneration paid</div>
+          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.remunerationOut)}</div>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Appropriation of profit · not an expense</div>
         </div>
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #3F3F3F", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#3F3F3F" }}>Net cash</div>
           <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: summary.netCash >= 0 ? "#4F8B36" : "#C5302A", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.netCash)}</div>
-          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Revenue − expense for this range</div>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Revenue − operating expense for this range</div>
         </div>
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #E89A3C", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#E89A3C" }}>Outstanding dues</div>
