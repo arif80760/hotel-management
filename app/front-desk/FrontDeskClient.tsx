@@ -246,6 +246,13 @@ export default function FrontDeskClient() {
   const [moreDiscountAmt,    setMoreDiscountAmt]    = useState<string>("");
   const [moreDiscountReason, setMoreDiscountReason] = useState<string>("");
   const [discountError,      setDiscountError]      = useState<string>("");
+  // Disclosure state — charge/discount fields are hidden behind quiet
+  // buttons so Add Payment stays the obvious path. Staff typing a payment
+  // amount into the always-visible discount field is the likely cause of
+  // nine full-total write-offs (৳33,900). Collapsing CLEARS the fields, so
+  // a hidden value can never be submitted.
+  const [showChargeSection,   setShowChargeSection]   = useState<boolean>(false);
+  const [showDiscountSection, setShowDiscountSection] = useState<boolean>(false);
 
   // ── Checkout timing — time captured when modal opens ────────
   const [checkoutOpenedAt, setCheckoutOpenedAt] = useState<Date | null>(null);
@@ -345,6 +352,7 @@ export default function FrontDeskClient() {
     setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
     setOverrideReason(""); setOverrideError("");
     setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
+    setShowChargeSection(false); setShowDiscountSection(false);   // collapsed every open
     setCheckoutPayMethod("cash");
   }
 
@@ -355,7 +363,20 @@ export default function FrontDeskClient() {
     setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
     setOverrideReason(""); setOverrideError("");
     setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
+    setShowChargeSection(false); setShowDiscountSection(false);
     setCheckoutPayMethod("cash");
+  }
+
+  /** Collapse + CLEAR the charge section — a hidden value must never submit. */
+  function collapseChargeSection() {
+    setShowChargeSection(false);
+    setChargeType(""); setChargeAmount(""); setChargeNote(""); setChargeError("");
+  }
+
+  /** Collapse + CLEAR the discount section — same rule. */
+  function collapseDiscountSection() {
+    setShowDiscountSection(false);
+    setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
   }
 
   /**
@@ -1255,11 +1276,31 @@ export default function FrontDeskClient() {
                   </div>
                 </div>
 
-                {/* ── EXTRA CHARGES ───────────────────────────────── */}
+                {/* ── EXTRA CHARGES — hidden behind a quiet outline button so
+                       Add Payment stays the obvious action ──────────── */}
+                {!showChargeSection ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowChargeSection(true)}
+                    className="w-full flex items-center justify-center gap-1.5 px-4 py-2.5 text-[12.5px] font-medium text-slate-500 bg-white border border-dashed border-slate-300 rounded-lg hover:text-slate-700 hover:border-slate-400 transition-colors"
+                  >
+                    + Add Additional Charge
+                    <span className="text-[11px] font-normal text-slate-400">damage, mini-bar, etc.</span>
+                  </button>
+                ) : (
                 <div>
-                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">
-                    Additional Charges
-                    <span className="ml-1.5 font-normal normal-case text-slate-400 text-[11px]">optional — damage, mini-bar, etc.</span>
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
+                    <span>
+                      Additional Charges
+                      <span className="ml-1.5 font-normal normal-case text-slate-400 text-[11px]">optional — damage, mini-bar, etc.</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={collapseChargeSection}
+                      className="font-semibold normal-case tracking-normal text-[11.5px] text-slate-400 hover:text-rose-600 underline transition-colors"
+                    >
+                      Remove
+                    </button>
                   </p>
                   <div className="space-y-3">
                     {/* Charge type + amount */}
@@ -1343,12 +1384,34 @@ export default function FrontDeskClient() {
                     )}
                   </div>
                 </div>
+                )}
 
-                {/* ── MORE DISCOUNT ───────────────────────────────── */}
+                {/* ── MORE DISCOUNT — deliberate detour behind a quiet button;
+                       collapsing clears the fields so a hidden discount can
+                       never be submitted ─────────────────────────────── */}
+                {!showDiscountSection ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowDiscountSection(true)}
+                    className="w-full flex items-center justify-center gap-1.5 px-4 py-2.5 text-[12.5px] font-medium text-slate-500 bg-white border border-dashed border-slate-300 rounded-lg hover:text-slate-700 hover:border-slate-400 transition-colors"
+                  >
+                    Apply Discount
+                    <span className="text-[11px] font-normal text-slate-400">e.g. loyalty, manager approval</span>
+                  </button>
+                ) : (
                 <div>
-                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">
-                    More Discount
-                    <span className="ml-1.5 font-normal normal-case text-slate-400 text-[11px]">optional — e.g. loyalty, manager approval</span>
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
+                    <span>
+                      More Discount
+                      <span className="ml-1.5 font-normal normal-case text-slate-400 text-[11px]">optional — e.g. loyalty, manager approval</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={collapseDiscountSection}
+                      className="font-semibold normal-case tracking-normal text-[11.5px] text-slate-400 hover:text-rose-600 underline transition-colors"
+                    >
+                      Remove
+                    </button>
                   </p>
                   <div className="space-y-3">
                     <div className="grid grid-cols-2 gap-3">
@@ -1405,6 +1468,7 @@ export default function FrontDeskClient() {
                     )}
                   </div>
                 </div>
+                )}
 
                 {/* ── ADD PAYMENT ─────────────────────────────────── */}
                 <div>
