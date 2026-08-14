@@ -6,7 +6,9 @@
 // server-side RPCs (room_analytics_by_room, room_occupancy_trend).
 // No additional npm packages — charts are dependency-free SVG/CSS.
 //
-// KPI denominators EXCLUDE maintenance rooms (where room_status = 'maintenance').
+// KPI denominators EXCLUDE deactivated rooms (rooms.is_active = false, via
+// HotelContext's active-only rooms list — matches the Dashboard). The old
+// "maintenance" filter matched a status that no longer exists and was a no-op.
 // Per-room occupancy% in the table is NOT capped — values > 100 surface
 // genuine double-bookings recorded in the DB.
 // ─────────────────────────────────────────────────────────────
@@ -198,7 +200,11 @@ function sortNumVal(row: RoomAnalyticsRow, key: SortKey, dir: "asc" | "desc"): n
 export default function RoomAnalyticsClient() {
   // Central room-category name resolver (display only; badge colour + grouping
   // keys below stay on the raw slug).
-  const { categoryName } = useHotel();
+  // rooms (NOT allRooms) is the context's ACTIVE-only list — deactivated
+  // rooms cannot be sold, so they are excluded from occupancy/RevPAR
+  // denominators and the Room Performance table. Using the context list
+  // (rather than re-filtering locally) keeps this from drifting.
+  const { categoryName, rooms: activeRooms } = useHotel();
 
   // ── Data state ───────────────────────────────────────────
   const [rows,    setRows]    = useState<RoomAnalyticsRow[]>([]);
@@ -254,12 +260,20 @@ export default function RoomAnalyticsClient() {
   }
 
   // ── KPI derivations ──────────────────────────────────────
-  const nonMaint    = useMemo(() => rows.filter(r => r.roomStatus !== "maintenance"), [rows]);
+  // Sellable rooms only. The old filter here removed roomStatus ===
+  // "maintenance" — a status that no longer exists in the rooms enum
+  // (available/reserved/occupied), so it filtered nothing and the
+  // denominators included deactivated rooms (59 vs the Dashboard's 53).
+  const activeRoomNumbers = useMemo(
+    () => new Set(activeRooms.map(r => r.roomNumber)),
+    [activeRooms],
+  );
+  const activeRows  = useMemo(() => rows.filter(r => activeRoomNumbers.has(r.roomNumber)), [rows, activeRoomNumbers]);
   const allBookings = useMemo(() => rows.reduce((s, r) => s + r.bookings, 0),        [rows]);
   const totalRev    = useMemo(() => rows.reduce((s, r) => s + r.revenue, 0),         [rows]);
 
-  const sumOccNights  = useMemo(() => nonMaint.reduce((s, r) => s + r.occupiedNights,  0), [nonMaint]);
-  const sumAvailNight = useMemo(() => nonMaint.reduce((s, r) => s + r.availableNights, 0), [nonMaint]);
+  const sumOccNights  = useMemo(() => activeRows.reduce((s, r) => s + r.occupiedNights,  0), [activeRows]);
+  const sumAvailNight = useMemo(() => activeRows.reduce((s, r) => s + r.availableNights, 0), [activeRows]);
 
   const kpiOccupancy     = sumAvailNight > 0 ? (100 * sumOccNights) / sumAvailNight : 0;
   const kpiRevpar        = sumAvailNight > 0 ? totalRev / sumAvailNight              : 0;
@@ -273,7 +287,7 @@ export default function RoomAnalyticsClient() {
 
   // ── Sorted table rows ────────────────────────────────────
   const sortedRows = useMemo(() => {
-    const copy = [...rows];
+    const copy = [...activeRows];
     copy.sort((a, b) => {
       if (sortKey === "roomNumber") {
         const cmp = a.roomNumber.localeCompare(b.roomNumber, undefined, { numeric: true });
@@ -288,7 +302,7 @@ export default function RoomAnalyticsClient() {
       return sortDir === "asc" ? av - bv : bv - av;
     });
     return copy;
-  }, [rows, sortKey, sortDir]);
+  }, [activeRows, sortKey, sortDir]);
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) setSortDir(d => (d === "asc" ? "desc" : "asc"));
@@ -329,12 +343,14 @@ export default function RoomAnalyticsClient() {
     const map = new Map<string, { occ: number; avail: number; rev: number; cnt: number }>();
     for (const r of rows) {
       const prev = map.get(r.category) ?? { occ: 0, avail: 0, rev: 0, cnt: 0 };
-      const isNonMaint = r.roomStatus !== "maintenance";
+      // Occupancy % and room counts cover sellable (active) rooms only;
+      // revenue keeps every room so historical earnings stay visible.
+      const isActive = activeRoomNumbers.has(r.roomNumber);
       map.set(r.category, {
-        occ:   prev.occ   + (isNonMaint ? r.occupiedNights  : 0),
-        avail: prev.avail + (isNonMaint ? r.availableNights : 0),
+        occ:   prev.occ   + (isActive ? r.occupiedNights  : 0),
+        avail: prev.avail + (isActive ? r.availableNights : 0),
         rev:   prev.rev   + r.revenue,
-        cnt:   prev.cnt   + 1,
+        cnt:   prev.cnt   + (isActive ? 1 : 0),
       });
     }
     return [...map.entries()]
@@ -345,7 +361,7 @@ export default function RoomAnalyticsClient() {
         revenue:      rev,
       }))
       .sort((a, b) => b.revenue - a.revenue);
-  }, [rows]);
+  }, [rows, activeRoomNumbers]);
 
   // ── Revenue chart data (all rooms, sorted desc) ──────────
   const revChartData = useMemo(
@@ -487,7 +503,7 @@ export default function RoomAnalyticsClient() {
           <p className="mt-2 text-[26px] font-semibold text-blue-700 tabular-nums leading-none">
             {fmtPct(kpiOccupancy)}
           </p>
-          <p className="mt-1 text-[11px] text-slate-400">excl. maintenance rooms</p>
+          <p className="mt-1 text-[11px] text-slate-400">excl. deactivated rooms</p>
         </div>
 
         {/* Total Revenue */}
@@ -557,7 +573,7 @@ export default function RoomAnalyticsClient() {
       <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
         <div className="px-5 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
           <h3 className="text-[13.5px] font-semibold text-slate-700">Room Performance</h3>
-          <span className="text-[12px] text-slate-400">{rows.length} rooms</span>
+          <span className="text-[12px] text-slate-400">{sortedRows.length} rooms</span>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-[13px]">
@@ -689,7 +705,7 @@ export default function RoomAnalyticsClient() {
       <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
         <div className="px-5 py-3 bg-slate-50 border-b border-slate-200">
           <h3 className="text-[13.5px] font-semibold text-slate-700">Room Type Performance</h3>
-          <p className="text-[11.5px] text-slate-400 mt-0.5">Occupancy excludes maintenance rooms from the denominator.</p>
+          <p className="text-[11.5px] text-slate-400 mt-0.5">Occupancy excludes deactivated rooms from the denominator.</p>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-[13px]">
