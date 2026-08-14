@@ -1,4 +1,13 @@
 -- =============================================================
+-- ⚠ PARTIALLY SUPERSEDED (2026-08-15): the checkout_booking body below
+--   is no longer the live one — the guard placement was deliberately
+--   REVERSED (moved AFTER step 3.6) so a discount counts toward
+--   clearing the balance. See
+--   2026-08-15-checkout-guard-after-discount.sql for the live body and
+--   rationale. assert_checkout_allowed and checkout_booking_room below
+--   remain current. Executable SQL in this file is unchanged — history
+--   only.
+-- =============================================================
 -- 2026-08-14-checkout-balance-guard.sql
 -- Server-side outstanding-balance guard on checkout.
 --
