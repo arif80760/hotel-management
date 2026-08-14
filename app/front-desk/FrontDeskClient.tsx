@@ -1476,14 +1476,17 @@ export default function FrontDeskClient() {
                 </div>
                 )}
 
-                {/* ── ADD PAYMENT — the common case; solid emerald, the most
-                       prominent of the three sibling actions ─────────── */}
+                {/* ── ADD PAYMENT — the common case; the most prominent of the
+                       three sibling actions. Solid forest green #2E6F40 (hover
+                       #255A34) is Arif's chosen colour — a DELIBERATE exception
+                       to the "existing Tailwind palette only" rule. Do not
+                       "correct" it back to an emerald token. ──────────── */}
                 <div>
                   {!showModalPay ? (
                     <button
                       type="button"
                       onClick={() => { setShowModalPay(true); setModalPayAmt(""); setModalPayError(""); }}
-                      className="w-full flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-[13px] font-semibold text-white bg-gradient-to-b from-emerald-400 to-emerald-500 rounded-xl hover:from-emerald-500 hover:to-emerald-600 transition-colors shadow-md shadow-emerald-500/40"
+                      className="w-full flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-[13px] font-semibold text-white bg-[#2E6F40] rounded-xl hover:bg-[#255A34] transition-colors shadow-sm"
                     >
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 flex-shrink-0">
                         <rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 12h.01M18 12h.01"/>
