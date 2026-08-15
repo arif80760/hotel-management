@@ -390,7 +390,7 @@ export default function ExpenseClient() {
   // Expense categories come from the session-level reference cache; aliased to
   // `categories` so existing reads are unchanged. Category mutations below call
   // refreshExpenseCategories() so edits propagate here and to other pages.
-  const { expenseCategories: categories, refreshExpenseCategories, accountDefs } = useReferenceData();
+  const { expenseCategories: categories, refreshExpenseCategories } = useReferenceData();
   const [expenses,        setExpenses]        = useState<Expense[]>([]);
   const [employees,       setEmployees]       = useState<Employee[]>([]);
   const [payeesHistory,   setPayeesHistory]   = useState<string[]>([]);
@@ -461,11 +461,11 @@ export default function ExpenseClient() {
   const [remunDate, setRemunDate] = useState<string>(todayISO());
   const [remunNote, setRemunNote] = useState<string>("");
   const [savingRemun, setSavingRemun] = useState(false);
-  // "Paid from" account for remuneration — defaults to Cash in Hand,
-  // resolved from the accounts table as the spendable account (never by
-  // hardcoded name/id). Paying from Bank/bKash/Nagad is how MD-held
-  // balances are drawn down.
-  const [remunFromAccountId, setRemunFromAccountId] = useState<string>("");
+  // NOTE (2026-08-16): a "Paid from" account selector lived here for one
+  // day and was REMOVED — staff read it as how the MD *received* the
+  // money, not which account it leaves, and recorded six entries against
+  // Bank/bKash (overdrawing them ৳15,936). Remuneration is Cash in Hand
+  // only; MD-account drawdowns need a dedicated admin action instead.
   const [remunError, setRemunError] = useState<string | null>(null);
 
   const REMUN_DESIGNATIONS = ["Chairman", "Managing Director", "Director"];
@@ -710,9 +710,6 @@ export default function ExpenseClient() {
     setRemunAmount(String(e.amount));
     setRemunDate(e.txnDate);
     setRemunNote(e.note ?? "");
-    // Edit mode: the selector is disabled (editExpense never touches the
-    // account); show the default rather than pretending it is editable.
-    setRemunFromAccountId(accountDefs.find(a => a.isSpendable)?.id ?? "");
     setRemunError(null);
     setRemunModalOpen(true);
   }
@@ -1043,7 +1040,6 @@ export default function ExpenseClient() {
     setRemunAmount("");
     setRemunDate(todayISO());
     setRemunNote("");
-    setRemunFromAccountId(accountDefs.find(a => a.isSpendable)?.id ?? "");   // default: Cash in Hand
     setRemunError(null);
     setRemunModalOpen(true);
   }
@@ -1051,7 +1047,6 @@ export default function ExpenseClient() {
   async function handleRecordRemuneration() {
     const amt = parseFloat(remunAmount);
     if (!remunRecipientId)              { setRemunError("Select a recipient."); return; }
-    if (!editingRemunId && !remunFromAccountId) { setRemunError("Select the account to pay from."); return; }
     if (!remunAmount.trim() || isNaN(amt) || amt <= 0) { setRemunError("Amount must be a positive number."); return; }
     setRemunError(null);
     setSavingRemun(true);
@@ -1086,7 +1081,6 @@ export default function ExpenseClient() {
         payeeMode:  "employee",
         employeeId: remunRecipientId,
         note:       remunNote.trim() || undefined,
-        fromAccountId: remunFromAccountId,   // chosen paying account (defaults to Cash in Hand)
       });
       const exps = await getExpenses();
       setExpenses(exps);
@@ -2225,7 +2219,7 @@ export default function ExpenseClient() {
             </div>
             <div className="px-5 py-4 space-y-4 overflow-y-auto flex-1">
               <p className="text-[11.5px] text-slate-400">
-                Director/MD/Chairman payment — paid from <span className="font-semibold text-slate-600">{accountDefs.find(a => a.id === remunFromAccountId)?.name ?? "Cash in Hand"}</span>, recorded as cash out but kept out of operating expenses and profit (appropriation of profit).
+                Director/MD/Chairman payment — paid from <span className="font-semibold text-slate-600">Cash in Hand</span>, recorded as cash out but kept out of operating expenses and profit (appropriation of profit).
               </p>
 
               <div>
@@ -2238,25 +2232,6 @@ export default function ExpenseClient() {
                 </select>
                 {remunRecipients.length === 0 && (
                   <p className="mt-1 text-[11.5px] text-amber-700">No active Chairman / Managing Director / Director employees found.</p>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Paid From</label>
-                <select
-                  value={remunFromAccountId}
-                  onChange={(e) => setRemunFromAccountId(e.target.value)}
-                  disabled={savingRemun || !!editingRemunId}
-                  className={inputCls(false)}
-                >
-                  {accountDefs.map(a => (
-                    <option key={a.id} value={a.id}>{a.name}</option>
-                  ))}
-                </select>
-                {editingRemunId ? (
-                  <p className="mt-1 text-[11px] text-slate-400">The paying account cannot be changed after recording.</p>
-                ) : (
-                  <p className="mt-1 text-[11px] text-slate-400">Paying from Bank / bKash / Nagad records that the money has reached the MD from those accounts.</p>
                 )}
               </div>
 

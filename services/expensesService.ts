@@ -68,10 +68,12 @@ export type NewExpense = {
   employeeId?:  string;        // required if payeeMode === 'employee'
   payee?:       string;        // required if payeeMode === 'vendor'
   note?:        string;
-  // Paying account. Omitted -> Cash in Hand (the historical default; the
-  // Add Expense form never sets it). The remuneration form passes it so
-  // MD payments can be drawn from Bank/bKash/Nagad — the only way those
-  // MD-held balances are ever drawn down.
+  // Paying account. Omitted -> Cash in Hand. NO form passes this today:
+  // the remuneration form briefly did (2026-08-15/16) and it was removed
+  // after staff read "Paid from" as how the MD received the money,
+  // overdrawing Bank/bKash by ৳15,936 in one day. Retained for a future
+  // ADMIN-ONLY MD-account drawdown action (planned on the MD Fund page,
+  // with balance check + confirmation) — do not wire it into staff forms.
   fromAccountId?: string | null;
 };
 
