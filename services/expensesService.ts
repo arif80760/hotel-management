@@ -68,12 +68,13 @@ export type NewExpense = {
   employeeId?:  string;        // required if payeeMode === 'employee'
   payee?:       string;        // required if payeeMode === 'vendor'
   note?:        string;
-  // Paying account. Omitted -> Cash in Hand. NO form passes this today:
-  // the remuneration form briefly did (2026-08-15/16) and it was removed
-  // after staff read "Paid from" as how the MD received the money,
-  // overdrawing Bank/bKash by ৳15,936 in one day. Retained for a future
-  // ADMIN-ONLY MD-account drawdown action (planned on the MD Fund page,
-  // with balance check + confirmation) — do not wire it into staff forms.
+  // Paying (source) account. Omitted -> Cash in Hand (the Add Expense
+  // form never sets it). The remuneration form passes it — restored
+  // 2026-08-16 WITH safeguards after its first bare one-day life
+  // overdrew Bank/bKash ৳15,936: overdraw block, non-cash confirmation,
+  // balances shown in the selector, non-cash options admin-only. Any new
+  // caller must carry equivalent guards; a DB-side overdraw backstop is
+  // still pending (see the MD-fund drawdown design note).
   fromAccountId?: string | null;
 };
 

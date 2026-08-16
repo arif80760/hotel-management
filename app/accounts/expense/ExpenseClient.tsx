@@ -32,6 +32,8 @@ import {
   type ExpenseCategory,
 } from "@/services/expenseCategoriesService";
 import { useReferenceData } from "@/contexts/ReferenceDataContext";
+import { useAuth } from "@/contexts/AuthContext";
+import { getBalances } from "@/services/accountsService";
 
 import {
   getExpenseItems,
@@ -390,7 +392,11 @@ export default function ExpenseClient() {
   // Expense categories come from the session-level reference cache; aliased to
   // `categories` so existing reads are unchanged. Category mutations below call
   // refreshExpenseCategories() so edits propagate here and to other pages.
-  const { expenseCategories: categories, refreshExpenseCategories } = useReferenceData();
+  const { expenseCategories: categories, refreshExpenseCategories, accountDefs } = useReferenceData();
+  // Non-cash source accounts (MD drawdowns) are admin-only — same
+  // profiles.role gate as everywhere else. Staff see Cash in Hand only.
+  const { role } = useAuth();
+  const isAdmin = role === "admin";
   const [expenses,        setExpenses]        = useState<Expense[]>([]);
   const [employees,       setEmployees]       = useState<Employee[]>([]);
   const [payeesHistory,   setPayeesHistory]   = useState<string[]>([]);
@@ -461,11 +467,17 @@ export default function ExpenseClient() {
   const [remunDate, setRemunDate] = useState<string>(todayISO());
   const [remunNote, setRemunNote] = useState<string>("");
   const [savingRemun, setSavingRemun] = useState(false);
-  // NOTE (2026-08-16): a "Paid from" account selector lived here for one
-  // day and was REMOVED — staff read it as how the MD *received* the
-  // money, not which account it leaves, and recorded six entries against
-  // Bank/bKash (overdrawing them ৳15,936). Remuneration is Cash in Hand
-  // only; MD-account drawdowns need a dedicated admin action instead.
+  // Source-account selector, RESTORED 2026-08-16 with safeguards. Its
+  // first one-day life shipped bare and staff read "Paid from" as how
+  // the MD *received* the money (notes: "bkash 01842112755", "Card
+  // payment"), overdrawing Bank/bKash ৳15,936. Now: labelled "Source
+  // Account — which account the money leaves", balances shown in the
+  // options, entries that would push the source negative are BLOCKED,
+  // non-cash needs an explicit amber confirmation, and non-cash options
+  // are admin-only. Do not strip these guards.
+  const [remunFromAccountId,  setRemunFromAccountId]  = useState<string>("");
+  const [remunBalances,       setRemunBalances]       = useState<Map<string, number>>(new Map());
+  const [remunNonCashPending, setRemunNonCashPending] = useState(false);
   const [remunError, setRemunError] = useState<string | null>(null);
 
   const REMUN_DESIGNATIONS = ["Chairman", "Managing Director", "Director"];
@@ -710,6 +722,10 @@ export default function ExpenseClient() {
     setRemunAmount(String(e.amount));
     setRemunDate(e.txnDate);
     setRemunNote(e.note ?? "");
+    // Edit mode: the selector is disabled (editExpense never touches the
+    // account); show the default rather than pretending it is editable.
+    setRemunFromAccountId(accountDefs.find(a => a.isSpendable)?.id ?? "");
+    setRemunNonCashPending(false);
     setRemunError(null);
     setRemunModalOpen(true);
   }
@@ -1040,14 +1056,48 @@ export default function ExpenseClient() {
     setRemunAmount("");
     setRemunDate(todayISO());
     setRemunNote("");
+    setRemunFromAccountId(accountDefs.find(a => a.isSpendable)?.id ?? "");   // default: Cash in Hand
+    setRemunNonCashPending(false);
     setRemunError(null);
     setRemunModalOpen(true);
+    // Fresh balances for the selector labels + the overdraw guard.
+    // Display/validation only — a failed fetch empties the map, which the
+    // guard treats as "unknown" (cash proceeds, non-cash is blocked).
+    getBalances()
+      .then(b => setRemunBalances(new Map(b.map(x => [x.accountId, x.balance]))))
+      .catch(err => {
+        console.error("[openRemunModal] balance fetch failed:", err instanceof Error ? err.message : err);
+        setRemunBalances(new Map());
+      });
   }
 
-  async function handleRecordRemuneration() {
+  async function handleRecordRemuneration(confirmedNonCash = false) {
     const amt = parseFloat(remunAmount);
     if (!remunRecipientId)              { setRemunError("Select a recipient."); return; }
     if (!remunAmount.trim() || isNaN(amt) || amt <= 0) { setRemunError("Amount must be a positive number."); return; }
+    if (!editingRemunId) {
+      if (!remunFromAccountId) { setRemunError("Select the source account."); return; }
+      const acct     = accountDefs.find(a => a.id === remunFromAccountId);
+      const acctName = acct?.name ?? "the selected account";
+      const bal      = remunBalances.get(remunFromAccountId);
+      // Overdraw BLOCK — the safeguard whose absence let ৳15,936 go
+      // unnoticed. Never record an entry that pushes the source negative.
+      if (bal !== undefined && amt > bal) {
+        setRemunError(
+          `Cannot pay ৳${formatAmount(amt)} from ${acctName} — its balance is ৳${formatAmount(bal)}, short by ৳${formatAmount(amt - bal)}.`
+        );
+        return;
+      }
+      const isCashSource = acct?.isSpendable ?? true;
+      if (!isCashSource && bal === undefined) {
+        setRemunError(`${acctName}'s balance could not be loaded, so this entry cannot be verified — close and reopen the form to retry.`);
+        return;
+      }
+      // Non-cash sources need an explicit confirmation (amber block in
+      // the modal). Cash in Hand is the common case — no confirmation.
+      if (!isCashSource && !confirmedNonCash) { setRemunNonCashPending(true); return; }
+    }
+    setRemunNonCashPending(false);
     setRemunError(null);
     setSavingRemun(true);
     try {
@@ -1081,6 +1131,7 @@ export default function ExpenseClient() {
         payeeMode:  "employee",
         employeeId: remunRecipientId,
         note:       remunNote.trim() || undefined,
+        fromAccountId: remunFromAccountId,   // guarded above: balance-checked, non-cash confirmed + admin-only
       });
       const exps = await getExpenses();
       setExpenses(exps);
@@ -2219,7 +2270,7 @@ export default function ExpenseClient() {
             </div>
             <div className="px-5 py-4 space-y-4 overflow-y-auto flex-1">
               <p className="text-[11.5px] text-slate-400">
-                Director/MD/Chairman payment — paid from <span className="font-semibold text-slate-600">Cash in Hand</span>, recorded as cash out but kept out of operating expenses and profit (appropriation of profit).
+                Director/MD/Chairman payment — paid from <span className="font-semibold text-slate-600">{accountDefs.find(a => a.id === remunFromAccountId)?.name ?? "Cash in Hand"}</span>, recorded as cash out but kept out of operating expenses and profit (appropriation of profit).
               </p>
 
               <div>
@@ -2235,10 +2286,35 @@ export default function ExpenseClient() {
                 )}
               </div>
 
+              <div>
+                <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                  Source Account <span className="normal-case font-normal text-slate-400">— which account the money leaves</span>
+                </label>
+                <select
+                  value={remunFromAccountId}
+                  onChange={(e) => { setRemunFromAccountId(e.target.value); setRemunNonCashPending(false); setRemunError(null); }}
+                  disabled={savingRemun || !!editingRemunId}
+                  className={inputCls(false)}
+                >
+                  {(isAdmin ? accountDefs : accountDefs.filter(a => a.isSpendable)).map(a => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}{remunBalances.has(a.id) ? ` — ৳${formatAmount(remunBalances.get(a.id)!)} available` : ""}
+                    </option>
+                  ))}
+                </select>
+                {editingRemunId ? (
+                  <p className="mt-1 text-[11px] text-slate-400">The source account cannot be changed after recording.</p>
+                ) : (
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    Where the money is physically taken from. If you paid the MD in cash, leave this as Cash in Hand and note the delivery method below.
+                  </p>
+                )}
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Amount (৳)</label>
-                  <input type="number" min={0} step="0.01" value={remunAmount} onChange={(e) => setRemunAmount(e.target.value)} onWheel={(e) => (e.target as HTMLInputElement).blur()} disabled={savingRemun} placeholder="0.00" className={inputCls(false)} />
+                  <input type="number" min={0} step="0.01" value={remunAmount} onChange={(e) => { setRemunAmount(e.target.value); setRemunNonCashPending(false); }} onWheel={(e) => (e.target as HTMLInputElement).blur()} disabled={savingRemun} placeholder="0.00" className={inputCls(false)} />
                 </div>
                 <div>
                   <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Date</label>
@@ -2252,10 +2328,47 @@ export default function ExpenseClient() {
               </div>
 
               {remunError && <p className="text-[12px] text-rose-600">{remunError}</p>}
+
+              {/* Non-cash confirmation — an MD-account drawdown must be a
+                  conscious act, never a slip of the dropdown. */}
+              {remunNonCashPending && (
+                <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3.5 py-3">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                    <path d="M12 9v4M12 17h.01"/>
+                  </svg>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[12px] text-amber-800">
+                      This records <span className="font-semibold">৳{formatAmount(parseFloat(remunAmount) || 0)}</span> leaving{" "}
+                      <span className="font-semibold">{accountDefs.find(a => a.id === remunFromAccountId)?.name ?? "the selected account"}</span>, not the cash till. Continue?
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleRecordRemuneration(true)}
+                        disabled={savingRemun}
+                        className="min-h-11 md:min-h-0 px-3 py-1.5 rounded-lg bg-amber-500 text-white text-[12px] font-semibold hover:bg-amber-600 transition-colors disabled:opacity-40"
+                      >
+                        Yes, record it
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRemunNonCashPending(false)}
+                        disabled={savingRemun}
+                        className="min-h-11 md:min-h-0 px-3 py-1.5 rounded-lg bg-white border border-amber-200 text-amber-700 text-[12px] font-semibold hover:bg-amber-100 transition-colors disabled:opacity-40"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-200">
               <button type="button" onClick={() => setRemunModalOpen(false)} disabled={savingRemun} className="px-4 py-2 rounded-lg text-slate-600 text-[13px] font-medium hover:bg-slate-100 transition-colors disabled:opacity-40">Cancel</button>
-              <button type="button" onClick={handleRecordRemuneration} disabled={savingRemun || !remunRecipientId || !remunAmount.trim()} className="px-4 py-2 rounded-lg bg-amber-500 text-white text-[13px] font-semibold hover:bg-amber-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+              {/* Explicit arrow — the handler's first param is a boolean and
+                  must never receive the click event (event-as-boolean hazard). */}
+              <button type="button" onClick={() => handleRecordRemuneration()} disabled={savingRemun || !remunRecipientId || !remunAmount.trim()} className="px-4 py-2 rounded-lg bg-amber-500 text-white text-[13px] font-semibold hover:bg-amber-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                 {savingRemun ? "Saving…" : editingRemunId ? "Save Changes" : "Record Remuneration"}
               </button>
             </div>
