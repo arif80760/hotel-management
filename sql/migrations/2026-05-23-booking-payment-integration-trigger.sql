@@ -1,3 +1,10 @@
+-- ⚠ SUPERSEDED (2026-08-16): the fn_sync_account_transactions body
+--   below is no longer live. The method→account CASE mapping was
+--   replaced by central-fund resolution (all payment-driven rows use
+--   the is_spendable account, both revenue_in and refund expense_out).
+--   See 2026-08-16-central-fund-payment-trigger.sql for the live body
+--   and rationale. Executable SQL here is unchanged — history only.
+--
 -- sql/migrations/2026-05-23-booking-payment-integration-trigger.sql
 -- Booking-payment integration — Stage 2 of 2: install the auto-sync trigger.
 --

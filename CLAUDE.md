@@ -161,6 +161,9 @@ Pages that must print cleanly are excluded from Sidebar + TopBar via `isStandalo
 - `toBaseQty` pattern: `upp != null && unit === "pack" ? packQty * upp : packQty`
 - Never store pack quantities in `inventory_movements.quantity`
 
+### Central Fund model (2026-08-16 — Arif + GM)
+Cash in Hand is the SINGLE central fund. Every revenue receipt — booking/checkout payments (via the `fn_sync_account_transactions` trigger on `payments`), Revenue Management manual entries, any source — credits it; payment method is DESCRIPTIVE only and never picks the account (the old method→bucket CASE mapping is gone). Refund disbursements and negative payments also debit Cash in Hand. The central fund is always resolved from the accounts table as the `is_spendable = true` account — never by hardcoded id or name. Bank/bKash/Nagad now change ONLY via explicit transfers and the guarded remuneration source-account drawdowns; their balances no longer rise passively. Live body: `2026-08-16-central-fund-payment-trigger.sql` (supersedes the 2026-05-23 mapping); client half in `18b06fc`. KNOWN one-off artifact: a refund on a PRE-changeover payment whose revenue landed in Bank/bKash debits Cash in Hand while the original credit stays put — opposite misstatements of the same amount, hotel-total correct; clean up with a matching explicit transfer. FOLLOW-UP pending: the MD Fund page's "received into MD accounts" stream goes to zero for new dates and should pivot to transfers-in/drawdowns-out per-account statements.
+
 ### Resolved Issues
 - **[Resolved Day 2 Block 3] `recordPayment()` cap now uses true-due formula**: Mirrors `calcTrueDue()`. Previous naive formula (`total_amount − paid_amount`) silently dropped payments when `extra_charge_amount` existed.
 
