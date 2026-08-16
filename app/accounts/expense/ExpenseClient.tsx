@@ -2296,7 +2296,12 @@ export default function ExpenseClient() {
                   disabled={savingRemun || !!editingRemunId}
                   className={inputCls(false)}
                 >
-                  {(isAdmin ? accountDefs : accountDefs.filter(a => a.isSpendable)).map(a => (
+                  {/* Cash in Hand (the spendable account) always FIRST — it is
+                      the overwhelmingly common case; stable sort keeps the
+                      rest in their existing order. */}
+                  {[...(isAdmin ? accountDefs : accountDefs.filter(a => a.isSpendable))]
+                    .sort((a, b) => (a.isSpendable === b.isSpendable ? 0 : a.isSpendable ? -1 : 1))
+                    .map(a => (
                     <option key={a.id} value={a.id}>
                       {a.name}{remunBalances.has(a.id) ? ` — ৳${formatAmount(remunBalances.get(a.id)!)} available` : ""}
                     </option>
@@ -2330,39 +2335,49 @@ export default function ExpenseClient() {
               {remunError && <p className="text-[12px] text-rose-600">{remunError}</p>}
 
               {/* Non-cash confirmation — an MD-account drawdown must be a
-                  conscious act, never a slip of the dropdown. */}
-              {remunNonCashPending && (
-                <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3.5 py-3">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5">
-                    <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-                    <path d="M12 9v4M12 17h.01"/>
-                  </svg>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[12px] text-amber-800">
-                      This records <span className="font-semibold">৳{formatAmount(parseFloat(remunAmount) || 0)}</span> leaving{" "}
-                      <span className="font-semibold">{accountDefs.find(a => a.id === remunFromAccountId)?.name ?? "the selected account"}</span>, not the cash till. Continue?
-                    </p>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleRecordRemuneration(true)}
-                        disabled={savingRemun}
-                        className="min-h-11 md:min-h-0 px-3 py-1.5 rounded-lg bg-amber-500 text-white text-[12px] font-semibold hover:bg-amber-600 transition-colors disabled:opacity-40"
-                      >
-                        Yes, record it
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setRemunNonCashPending(false)}
-                        disabled={savingRemun}
-                        className="min-h-11 md:min-h-0 px-3 py-1.5 rounded-lg bg-white border border-amber-200 text-amber-700 text-[12px] font-semibold hover:bg-amber-100 transition-colors disabled:opacity-40"
-                      >
-                        Cancel
-                      </button>
+                  conscious act, never a slip of the dropdown. Cancel is the
+                  PROMINENT action (solid, first); confirm is deliberately
+                  the quiet one, so the safe path is the easy one. */}
+              {remunNonCashPending && (() => {
+                const acctName = accountDefs.find(a => a.id === remunFromAccountId)?.name ?? "the selected account";
+                const bal      = remunBalances.get(remunFromAccountId);
+                const amt      = parseFloat(remunAmount) || 0;
+                return (
+                  <div className="flex items-start gap-2.5 bg-amber-50 border-2 border-amber-300 rounded-lg px-3.5 py-3">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                      <path d="M12 9v4M12 17h.01"/>
+                    </svg>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[12.5px] font-semibold text-amber-900">
+                        You are recording ৳{formatAmount(amt)} leaving {acctName}. This is NOT the cash till.
+                        {bal !== undefined ? ` ${acctName} currently holds ৳${formatAmount(bal)}.` : ""}
+                      </p>
+                      <p className="mt-1 text-[12px] text-amber-800">
+                        Only use this when money genuinely left the {acctName} account. If you paid in cash, cancel and choose Cash in Hand.
+                      </p>
+                      <div className="mt-2.5 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setRemunNonCashPending(false)}
+                          disabled={savingRemun}
+                          className="min-h-11 md:min-h-0 px-4 py-2 rounded-lg bg-amber-500 text-white text-[12.5px] font-semibold hover:bg-amber-600 transition-colors shadow-sm disabled:opacity-40"
+                        >
+                          Cancel — use Cash in Hand
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRecordRemuneration(true)}
+                          disabled={savingRemun}
+                          className="min-h-11 md:min-h-0 px-3 py-2 rounded-lg bg-transparent border border-amber-300 text-amber-700 text-[12px] font-medium hover:bg-amber-100 transition-colors disabled:opacity-40"
+                        >
+                          Yes — money left {acctName}
+                        </button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
             <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-200">
               <button type="button" onClick={() => setRemunModalOpen(false)} disabled={savingRemun} className="px-4 py-2 rounded-lg text-slate-600 text-[13px] font-medium hover:bg-slate-100 transition-colors disabled:opacity-40">Cancel</button>
