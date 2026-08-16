@@ -115,7 +115,6 @@ export default function RevenueManagementClient() {
   const [revenueModalOpen, setRevenueModalOpen] = useState(false);
   const [rvTxnDate,     setRvTxnDate]     = useState<string>(todayISO());
   const [rvAmount,      setRvAmount]      = useState<string>("");
-  const [rvAccountId,   setRvAccountId]   = useState<string>("");
   const [rvCategoryId,  setRvCategoryId]  = useState<string>("");
   const [rvPayee,       setRvPayee]       = useState<string>("");
   const [rvNote,        setRvNote]        = useState<string>("");
@@ -202,8 +201,12 @@ export default function RevenueManagementClient() {
   const accountById  = new Map(accounts.map(a => [a.id, a]));
 
   const activeCategories = categories.filter(c => c.isActive);
-  const spendableAccounts = accounts; // for revenue, all accounts are valid receivers
-                                       // (is_spendable applies to expense source only)
+  // ALL revenue lands in Cash in Hand — the single central fund (decision
+  // by Arif + GM, 2026-08-16). Resolved from the accounts table as the
+  // spendable account, never by name/id. Movements to Bank/bKash/Nagad
+  // are explicit transfers made separately; the old per-entry account
+  // picker is gone.
+  const cashAccount = accounts.find((a) => a.isSpendable);
 
   // ── Category Modal helpers (Phase R-B logic, unchanged) ────
   function openCategoryModal() {
@@ -224,7 +227,6 @@ export default function RevenueManagementClient() {
     setRevenueModalOpen(true);
     setRvTxnDate(todayISO());
     setRvAmount("");
-    setRvAccountId("");
     setRvCategoryId("");
     setRvPayee("");
     setRvNote("");
@@ -323,7 +325,7 @@ export default function RevenueManagementClient() {
     if (!rvAmount.trim() || isNaN(amountNum) || amountNum <= 0) {
       fieldErrors.amount = "Amount must be a positive number.";
     }
-    if (!rvAccountId)   fieldErrors.account  = "Choose where the money was received.";
+    if (!cashAccount)   fieldErrors.account  = "No central-fund account found — reload the page.";
     if (!rvCategoryId)  fieldErrors.category = "Category is required.";
     if (!rvPayee.trim()) fieldErrors.payee   = "Payee is required.";
 
@@ -339,7 +341,7 @@ export default function RevenueManagementClient() {
       const input: NewRevenue = {
         txnDate:           rvTxnDate,
         amount:            amountNum,
-        toAccountId:       rvAccountId,
+        toAccountId:       cashAccount!.id,   // guarded above — always the central fund
         revenueCategoryId: rvCategoryId,
         payee:             rvPayee.trim(),
         note:              rvNote.trim() || undefined,
@@ -680,20 +682,12 @@ export default function RevenueManagementClient() {
                 </div>
               </div>
 
-              {/* Received to (bucket) */}
+              {/* Received in — fixed: all revenue lands in the central fund */}
               <div className="space-y-1">
                 <label className="block text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Received in</label>
-                <select
-                  value={rvAccountId}
-                  onChange={(e) => setRvAccountId(e.target.value)}
-                  disabled={creatingRevenue}
-                  className={inputCls(!!createRevenueFieldErrors.account)}
-                >
-                  <option value="">Select bucket…</option>
-                  {spendableAccounts.map((a) => (
-                    <option key={a.id} value={a.id}>{a.name}</option>
-                  ))}
-                </select>
+                <div className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg">
+                  {cashAccount?.name ?? "Cash in Hand"} <span className="text-[11.5px] text-slate-400">— central fund; all revenue lands here</span>
+                </div>
                 {createRevenueFieldErrors.account && (
                   <p className="text-[11.5px] text-rose-600">{createRevenueFieldErrors.account}</p>
                 )}
