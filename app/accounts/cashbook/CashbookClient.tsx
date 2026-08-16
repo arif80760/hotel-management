@@ -985,7 +985,7 @@ export default function CashbookClient({
           : s,
       0,
     );
-    return { revenueIn, expenseOut, remunerationOut, netCash: revenueIn - expenseOut, outstandingDues };
+    return { revenueIn, expenseOut, remunerationOut, outstandingDues };
   }, [transactions, bookings, expenseCatMap]);
 
   // ── Loading state ──────────────────────────────────────────
@@ -1048,7 +1048,7 @@ export default function CashbookClient({
       </div>
 
       {/* ── P&L-style cash summary strip ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #4F8B36", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#4F8B36" }}>Revenue received</div>
           <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.revenueIn)}</div>
@@ -1063,11 +1063,6 @@ export default function CashbookClient({
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#8A8A8A" }}>Remuneration paid</div>
           <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.remunerationOut)}</div>
           <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Appropriation of profit · not an expense</div>
-        </div>
-        <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #3F3F3F", borderRadius: 10, padding: "15px 18px" }}>
-          <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#3F3F3F" }}>Net cash</div>
-          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: summary.netCash >= 0 ? "#4F8B36" : "#C5302A", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.netCash)}</div>
-          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Revenue − operating expense for this range</div>
         </div>
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #E89A3C", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#E89A3C" }}>Outstanding dues</div>
