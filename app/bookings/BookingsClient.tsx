@@ -253,9 +253,17 @@ type EditFormErrors = {
 // HELPERS
 // ─────────────────────────────────────────────────────────────
 function calcNights(checkIn: string, checkOut: string): number {
-  if (!checkIn || !checkOut) return 0;
+  // Normalise to ISO first (tolerates display-format strings), then anchor
+  // BOTH operands at noon per CLAUDE.md's date rule. The previous bare
+  // new Date(str) parse mixed UTC-midnight (ISO) with LOCAL-midnight
+  // (display format): in Dhaka (+6) one display-format operand shrank a
+  // 3-day span to 2.75 days and floor() ate a night — BK-1400 was stored
+  // with nights=2 for a 16→19 stay and billed one night short.
+  const inISO  = toISODate(checkIn);
+  const outISO = toISODate(checkOut);
+  if (!inISO || !outISO) return 0;
   return Math.max(0, Math.floor(
-    (new Date(checkOut).getTime() - new Date(checkIn).getTime()) / 86_400_000
+    (new Date(`${outISO}T12:00:00`).getTime() - new Date(`${inISO}T12:00:00`).getTime()) / 86_400_000
   ));
 }
 
@@ -438,7 +446,9 @@ function calcEarlyDeduction(
   const actualMidnight = new Date(actualAt);
   actualMidnight.setHours(0, 0, 0, 0);
 
-  const plannedMidnight = new Date(`${checkOut} 00:00:00`);
+  // Noon anchor (CLAUDE.md date rule); setHours below still normalises
+  // both sides to local midnight for the whole-day diff.
+  const plannedMidnight = new Date(`${checkOut} 12:00:00`);
   plannedMidnight.setHours(0, 0, 0, 0);
 
   const earlyDays = Math.max(0, Math.round(
@@ -7574,7 +7584,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       {extendRoomModal && (() => {
         const m = extendRoomModal;
         const extraNights = m.newCheckOut > m.currentCheckOut
-          ? Math.floor((new Date(m.newCheckOut).getTime() - new Date(m.currentCheckOut).getTime()) / 86_400_000)
+          ? Math.floor((new Date(`${m.newCheckOut}T12:00:00`).getTime() - new Date(`${m.currentCheckOut}T12:00:00`).getTime()) / 86_400_000)
           : 0;
         const extraCost = extraNights * m.bookingRate;
         // Client-side conflict preview (server does authoritative check)
@@ -8472,7 +8482,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                   {roomDetails.map(r => {
                     const isFuture = r.checkInISO > today;
                     const nights = Math.round(
-                      (new Date(r.checkOutISO).getTime() - new Date(r.checkInISO).getTime()) / 86_400_000
+                      (new Date(`${r.checkOutISO}T12:00:00`).getTime() - new Date(`${r.checkInISO}T12:00:00`).getTime()) / 86_400_000
                     );
                     return (
                       <div key={r.id} className="flex items-center gap-2 px-3 py-2.5">
