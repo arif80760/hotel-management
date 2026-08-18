@@ -57,7 +57,13 @@ import {
   getAccountBalances,
 } from "./financialTools";
 
-export const maxDuration = 60;
+// 300s is the Fluid Compute ceiling on every Vercel plan (legacy non-fluid
+// Hobby clamps this to its own 60s max — if 504s persist, enable Fluid
+// Compute in Vercel → Project → Settings → Functions). The 2026-08-18 504 on
+// a valid two-call question was most likely the gateway timing out a stream
+// that had sent no bytes yet — see the start/ping events below, which
+// guarantee an immediate first byte and a live connection throughout.
+export const maxDuration = 300;
 
 const MAX_TOOL_ITERATIONS = 5;
 
@@ -184,6 +190,14 @@ export async function POST(req: NextRequest) {
       async start(controller) {
         const send = (obj: unknown) =>
           controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+
+        // First byte IMMEDIATELY + a ping every 5s until the answer starts —
+        // the gateway must never see an idle, byte-less stream while the
+        // model works (the 504 class). The client ignores unknown event types.
+        send({ type: "start" });
+        const heartbeat = setInterval(() => {
+          try { send({ type: "ping" }); } catch { clearInterval(heartbeat); }
+        }, 5000);
 
         const timings: Record<string, number> = { tools_ms: 0 };
         const t0 = Date.now();
@@ -324,6 +338,7 @@ export async function POST(req: NextRequest) {
           console.error("[assistant] stream error:", message);
           send({ type: "error", error: `Assistant failed: ${message}` });
         } finally {
+          clearInterval(heartbeat);
           controller.close();
         }
       },
