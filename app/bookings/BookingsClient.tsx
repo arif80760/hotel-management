@@ -48,6 +48,7 @@ import {
   deleteDocument,
 } from "@/services/documentsService";
 import { type RoomCategory } from "@/services/roomCategoriesService";
+import { getRatePeriods, findRatePeriod, type RatePeriod } from "@/services/ratePeriodsService";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
 import { calcBookingLevelDeductions, earlyNights } from "@/lib/checkoutUtils";
 import ConfirmDialog from "@/components/ConfirmDialog";
@@ -899,6 +900,17 @@ export default function BookingsClient({ initialRoom }: Props) {
   const [showDiscountSection, setShowDiscountSection] = useState<boolean>(false);
 
   const [bookingPayMethod,  setBookingPayMethod]  = useState<PaymentMethod>("cash");
+
+  // ── Rate calendar (prefill only) ───────────────────────────
+  // Active periods change the PREFILLED rate at room-selection time;
+  // a typed rate always wins. Silent failure degrades to category price.
+  const [ratePeriods, setRatePeriods] = useState<RatePeriod[]>([]);
+  const [ratePeriodLabels, setRatePeriodLabels] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    getRatePeriods()
+      .then(setRatePeriods)
+      .catch((err) => console.warn("[BookingsClient] rate periods unavailable (prefill uses category price):", err?.message));
+  }, []);
   const [payMethod,         setPayMethod]         = useState<PaymentMethod>("cash");
   const [checkoutPayMethod, setCheckoutPayMethod] = useState<PaymentMethod>("cash");
 
@@ -1514,14 +1526,34 @@ export default function BookingsClient({ initialRoom }: Props) {
       if ("room" in patch) {
         const found = rooms.find(x => x.roomNumber === updated.room.trim());
         if (found) {
-          updated.fixedRate   = String(getCategoryPrice(found.category?.toLowerCase() ?? "", categories));
-          updated.bookingRate = String(getCategoryPrice(found.category?.toLowerCase() ?? "", categories));
+          // PREFILL ONLY (rate calendar, 2026-08-19). Resolution order:
+          // manual entry > active rate period covering the row's CHECK-IN
+          // date > category default. This fires solely at room-selection
+          // time — typing a rate afterwards always wins, the min-rate
+          // floor below is untouched, and existing bookings never
+          // recalculate. fixedRate stays the published category price.
+          const catPrice = getCategoryPrice(found.category?.toLowerCase() ?? "", categories);
+          const period   = findRatePeriod(ratePeriods, found.category?.toLowerCase() ?? "", updated.checkIn);
+          updated.fixedRate   = String(catPrice);
+          updated.bookingRate = String(period ? period.rate : catPrice);
         }
       }
       return updated;
     };
 
     setForm(prev => ({ ...prev, rooms: prev.rooms.map(applyPatch) }));
+
+    // Rate-period label bookkeeping (display only, under the rate field).
+    if ("room" in patch) {
+      const sel  = rooms.find(x => x.roomNumber === (patch.room ?? "").trim());
+      const per  = sel ? findRatePeriod(ratePeriods, sel.category?.toLowerCase() ?? "",
+        (form.rooms.find(r => r.id === id)?.checkIn ?? (patch as { checkIn?: string }).checkIn ?? "")) : null;
+      setRatePeriodLabels(prev => {
+        const next = new Map(prev);
+        if (per) next.set(id, per.label); else next.delete(id);
+        return next;
+      });
+    }
 
     // ── Row-error housekeeping + ENTRY-TIME floor check ───────
     // 1. Clear errors for the fields just edited (existing behaviour).
@@ -3456,6 +3488,11 @@ export default function BookingsClient({ initialRoom }: Props) {
                                     ${rowErr?.bookingRate ? "border-rose-300 bg-rose-50" : "border-slate-200"}`}
                                 />
                               </div>
+                              {ratePeriodLabels.get(r.id) && (
+                                <p className="mt-1 text-[11px] font-medium text-violet-700">
+                                  {ratePeriodLabels.get(r.id)} rate applied — edit to override
+                                </p>
+                              )}
                               {r.fixedRate && r.fixedRate !== r.bookingRate && (
                                 <p className="mt-1 text-[11px] text-slate-400">Published: ৳{r.fixedRate}</p>
                               )}
