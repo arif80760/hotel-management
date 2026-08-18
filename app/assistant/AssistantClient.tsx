@@ -27,7 +27,8 @@ type ToolResult = { tool: string; input: unknown; result: unknown };
 type Exchange = {
   id: string;
   question: string;
-  status: "loading" | "done" | "error";
+  // loading → (streaming, once answer text starts arriving) → done | error
+  status: "loading" | "streaming" | "done" | "error";
   answer?: string;
   toolResults?: ToolResult[];
   error?: string;
@@ -88,14 +89,54 @@ export default function AssistantClient() {
         body: JSON.stringify({ question }),
       });
 
-      const body = await res.json().catch(() => null);
+      // Auth/validation failures arrive as plain JSON with a non-200 status;
+      // success is an NDJSON stream (deltas → done).
       if (!res.ok) {
+        const body = await res.json().catch(() => null);
         throw new Error(body?.error ?? `Request failed (${res.status}).`);
       }
+      if (!res.body) throw new Error("Empty response from the assistant.");
 
-      setItems((prev) => prev.map((it) => it.id === id
-        ? { ...it, status: "done", answer: body.answer ?? "", toolResults: body.tool_results ?? [] }
-        : it));
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let streamed = "";
+      let finished = false;
+
+      const handleEvent = (evt: { type: string; [k: string]: unknown }) => {
+        if (evt.type === "delta") {
+          streamed += String(evt.text ?? "");
+          const answer = streamed;
+          setItems((prev) => prev.map((it) => it.id === id
+            ? { ...it, status: "streaming", answer }
+            : it));
+        } else if (evt.type === "done") {
+          finished = true;
+          setItems((prev) => prev.map((it) => it.id === id
+            ? {
+                ...it,
+                status: "done",
+                answer: String(evt.answer ?? streamed),
+                toolResults: (evt.tool_results as ToolResult[]) ?? [],
+              }
+            : it));
+        } else if (evt.type === "error") {
+          throw new Error(String(evt.error ?? "Assistant failed."));
+        }
+      };
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (line) handleEvent(JSON.parse(line));
+        }
+      }
+      if (!finished) throw new Error("The connection dropped before the answer finished.");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setItems((prev) => prev.map((it) => it.id === id
@@ -159,6 +200,17 @@ export default function AssistantClient() {
                       <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 [animation-delay:300ms]" />
                     </span>
                   </span>
+                </div>
+              </div>
+            )}
+
+            {it.status === "streaming" && (
+              <div className="flex justify-start">
+                <div className="max-w-[92%] rounded-2xl rounded-bl-md border border-slate-200 bg-white px-4 py-3">
+                  <p className="whitespace-pre-wrap text-[13.5px] leading-relaxed text-slate-800">
+                    {it.answer}
+                    <span className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulse bg-emerald-500 align-middle" />
+                  </p>
                 </div>
               </div>
             )}

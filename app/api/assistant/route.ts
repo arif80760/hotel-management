@@ -2,25 +2,41 @@
 //
 // ─── AI ASSISTANT (SERVER-ONLY) ──────────────────────────────────────────────
 //
-// POST { question: string } → { answer, tool_results, model }
+// POST { question: string } → NDJSON stream:
+//   {type:"delta", text}   — final-answer text as it is generated
+//   {type:"done", answer, tool_results, model, timings}
+//   {type:"error", error}
+// (Auth/validation failures return plain JSON with a non-200 status before
+// any stream starts — the client branches on content-type.)
 //
 // Staff ask natural-language questions; the model answers ONLY by calling the
 // fixed query tools in ./tools.ts (it never writes SQL, never reads a table).
-// Design approved by Arif 2026-08-17. Step 1: the two staff-safe tools.
+// Step 1+3 scope: the two staff-safe tools. Financial tools (admin-only menu)
+// come later.
 //
-// AUTH — enforced SERVER-SIDE (the browser only holds the anon key):
-//   Bearer token → auth.getUser → profiles row required. Any authenticated
-//   staff member may use the step-1 tools. When financial tools land, they
-//   are added to the tool list ONLY for profiles.role === 'admin' — the model
-//   never even sees their schemas for staff, so it cannot call them.
+// SPEED (2026-08-18, after live testing on Sonnet 5):
+//   • No Models API capability lookup. Thinking is OFF by default — choosing
+//     between two tools needs no extended reasoning and Sonnet would actually
+//     spend time on it. ASSISTANT_THINKING=on enables it for testing; when on
+//     it is sent optimistically and the specific 400 for models that don't
+//     support adaptive thinking triggers ONE retry without it, remembered per
+//     process. The common path never pays a lookup.
+//   • The final answer is STREAMED (NDJSON deltas) so text appears as it is
+//     generated. Calls made BEFORE any tool result are buffered — that is
+//     where the no-guessing backstop applies (an answer with money-like
+//     figures and zero tool calls is discarded), and buffering keeps the
+//     backstop airtight; those replies are short (a tool call or a one-line
+//     refusal/clarification) so nothing meaningful is delayed.
+//   • Prompt caching: cache_control on the last system block caches tools +
+//     system together. NOTE: Sonnet 5's minimum cacheable prefix is 2048
+//     tokens and this prompt currently sits near that line, so the marker may
+//     silently no-op today — it is harmless, costs nothing when it misses,
+//     and starts paying as the tool set grows (financial tools, step 2).
+//   • System prompt + tool schemas trimmed to the minimum that preserves the
+//     rules (Banglish vocabulary and language mirroring included — d88c539).
 //
-// NO-GUESSING BACKSTOP (design §5): if the model produced money-like figures
-// without ANY successful tool call this exchange, the route discards its text
-// and returns a canned refusal — numbers can only come from tool results.
-// Clarifying questions (which may contain years/dates) pass through.
-//
-// Model: ASSISTANT_MODEL env override, default claude-opus-4-8.
-// Requires ANTHROPIC_API_KEY in the server environment (.env.local + Vercel).
+// Stage timings are measured, logged, and returned in "done" so live
+// questions show where time goes.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { NextRequest, NextResponse } from "next/server";
@@ -33,73 +49,56 @@ import {
   dhakaTodayISO,
 } from "./tools";
 
-export const maxDuration = 60; // Vercel: allow the tool-use loop room to finish
+export const maxDuration = 60;
 
 const MAX_TOOL_ITERATIONS = 5;
-
-// ── Adaptive-thinking capability, resolved from the Models API ──────────────
-// ASSISTANT_MODEL is a pure config switch: some models (e.g. Haiku 4.5)
-// reject `thinking: {type: "adaptive"}` with a 400, so the parameter is sent
-// only when the live model capabilities say it is supported. No hardcoded
-// model list — the Models API is the source of truth, so future models work
-// without a code change. Cached per server process (the model doesn't change
-// between requests); a failed lookup falls back to omitting thinking, which
-// is valid on every model, and is NOT cached so a transient error can't
-// permanently disable thinking for the process.
-const adaptiveSupportCache = new Map<string, boolean>();
-
-async function supportsAdaptiveThinking(anthropic: Anthropic, model: string): Promise<boolean> {
-  const cached = adaptiveSupportCache.get(model);
-  if (cached !== undefined) return cached;
-  try {
-    const info = await anthropic.models.retrieve(model);
-    const caps = (info as unknown as {
-      capabilities?: { thinking?: { types?: { adaptive?: { supported?: boolean } } } };
-    }).capabilities;
-    const supported = caps?.thinking?.types?.adaptive?.supported === true;
-    adaptiveSupportCache.set(model, supported);
-    return supported;
-  } catch (err) {
-    console.warn(
-      "[assistant] model capability lookup failed; omitting thinking this request:",
-      err instanceof Error ? err.message : String(err),
-    );
-    return false;
-  }
-}
 
 const CANT_ANSWER =
   "I can't answer that from the hotel's data I have access to. " +
   "I can currently answer questions about room availability, and the daily " +
   "sheet (check-ins, check-outs, in-house guests, occupancy, dues of in-house guests).";
 
-function systemPrompt(role: string): string {
-  return [
-    "You are the in-app assistant for Hotel Albatross's management system. Staff ask you questions about hotel operations.",
-    "",
-    "HARD RULES:",
-    "1. Every figure, count, name, or date you state MUST come from a tool result in THIS conversation. You have no other knowledge of this hotel's data. Never estimate, never fill gaps from general knowledge.",
-    `2. If no tool can answer the question, reply that you cannot answer it from the available data and say what you CAN answer. Do not guess.`,
-    "3. If the question is ambiguous (which date? which category?), ask ONE short clarifying question instead of assuming — except 'today', which always means today's Dhaka date.",
-    "4. Amounts are in Bangladeshi Taka; write them like ৳2,500. Dates are hotel-local (Asia/Dhaka).",
-    "5. Answer concisely and lead with the number or fact asked for. Mention the exact period/date the figures cover. The raw tool figures are shown to the user alongside your answer, so do not repeat long lists — summarise and point out what matters (e.g. overdue checkouts, large dues).",
-    "6. Questions about revenue, expenses, remuneration, profit, or any money totals beyond an individual booking's balance are OUT OF SCOPE for the current tools — say so plainly" +
-      (role === "admin" ? " (financial tools are planned but not yet available)." : " (that information is admin-only)."),
-    "7. Staff ask in THREE forms, all first-class: Bengali script, English, or ROMANISED Bengali (Banglish — Bengali typed in Latin letters on an English keyboard; very common). Romanised-Bengali vocabulary you must recognise: khali / faka = free/available; ache = is there; room khali ache / room khali hobe = is/will the room be available (this IS a room-availability question — call check_room_availability); tarik = date; theke = from; prjnto / porjonto / porzonto = until; aj / ajke = today; kal / kalke = tomorrow OR yesterday (decide from context; ask if genuinely unclear); koto = how many; kobe = when; kon = which. Example: '104 number room khali hobe september 4 tarik theke september 6 tarik prjnto' means 'will room 104 be free from Sep 4 until Sep 6' — call check_room_availability for 2026-09-04 to 2026-09-06 and report on room 104.",
-    "8. Reply in the SAME language AND SCRIPT as the question. English question → English answer. Bengali-script question → Bengali-script answer. Romanised-Bengali question → romanised-Bengali answer in Latin letters (NEVER Bengali script — the user typing Banglish may not read Bengali script comfortably). Booking references (BK-XXXX), room numbers, and dates always stay in Latin/ISO form.",
-    "",
-    `Today's date (Asia/Dhaka): ${dhakaTodayISO()}`,
-    `The user's role: ${role}.`,
-  ].join("\n");
+// ── Thinking: off by default; optimistic send + retry-on-400 when enabled ──
+const thinkingUnsupported = new Set<string>();
+
+function thinkingParams(model: string): Pick<Anthropic.MessageCreateParams, "thinking"> {
+  if ((process.env.ASSISTANT_THINKING ?? "off") !== "on") return {};
+  if (thinkingUnsupported.has(model)) return {};
+  return { thinking: { type: "adaptive" } };
 }
 
-/** True when text contains money-like figures: a ৳ amount, a thousands-
- *  separated number, or a 3+ digit run that is not a year or an ISO date part.
- *  Used only when NO tool ran — clarifying questions with years pass. */
+function isThinkingUnsupported400(err: unknown): boolean {
+  return err instanceof Anthropic.BadRequestError &&
+    /thinking.*not supported|not supported.*thinking/i.test(err.message);
+}
+
+// ── System prompt (static part first for the cache; date/role at the end) ──
+function systemBlocks(role: string): Anthropic.TextBlockParam[] {
+  const staticPart = [
+    "You are the in-app assistant for Hotel Albatross's management system. Staff ask about hotel operations.",
+    "",
+    "RULES:",
+    "1. Every figure, name, or date you state MUST come from a tool result in this conversation — you have no other knowledge of this hotel's data. Never estimate or guess.",
+    "2. If no tool can answer, say you cannot answer from the available data and say what you CAN answer (availability; the daily sheet: check-ins/check-outs, in-house guests, occupancy, dues). Financial totals (revenue, expenses, remuneration, profit) are out of scope — admin-only reporting, not yet available here.",
+    "3. If the date or category is ambiguous, ask ONE short clarifying question. 'Today' always means today's Dhaka date.",
+    "4. Amounts in Taka like ৳2,500; dates are hotel-local (Asia/Dhaka).",
+    "5. Lead with the answer and name the period it covers. The raw figures are shown to the user alongside your reply — summarise, don't repeat long lists; point out overdue checkouts and large dues.",
+    "6. Questions arrive in Bengali script, English, or ROMANISED Bengali (Banglish — Bengali in Latin letters; very common). Banglish vocabulary: khali/faka = free/available; ache = is there; 'room khali ache/hobe' = is/will the room be available — that IS a room-availability question, call check_room_availability; tarik = date; theke = from; prjnto/porjonto = until; aj/ajke = today; kal/kalke = tomorrow OR yesterday by context (ask if unclear); koto = how many; kobe = when; kon = which. Example: '104 number room khali hobe september 4 tarik theke september 6 tarik prjnto' → check_room_availability 2026-09-04 to 2026-09-06, report on room 104.",
+    "7. Reply in the SAME language and script as the question: English → English; Bengali script → Bengali script; Banglish → Banglish in Latin letters (NEVER Bengali script). Booking refs (BK-XXXX), room numbers, and dates stay Latin/ISO.",
+  ].join("\n");
+
+  return [
+    // cache_control caches tools + this block together (prefix ends here)
+    { type: "text", text: staticPart, cache_control: { type: "ephemeral" } },
+    { type: "text", text: `Today (Asia/Dhaka): ${dhakaTodayISO()}. User role: ${role}.` },
+  ];
+}
+
+/** Money-like figures with no tool call → discard (years/ISO dates/refs scrubbed). */
 function containsMoneyLikeFigures(text: string): boolean {
   const scrubbed = text
-    .replace(/\b(19|20)\d{2}(-\d{2}){0,2}\b/g, "") // years + ISO dates
-    .replace(/\bBK-\d+\b/gi, "");                  // booking refs
+    .replace(/\b(19|20)\d{2}(-\d{2}){0,2}\b/g, "")
+    .replace(/\bBK-\d+\b/gi, "");
   return /৳\s?[\d,.]+/.test(scrubbed) || /\b\d{1,3}(,\d{3})+\b/.test(scrubbed) || /\b\d{3,}\b/.test(scrubbed);
 }
 
@@ -129,7 +128,6 @@ export async function POST(req: NextRequest) {
     if (!question || question.length > 1000) {
       return NextResponse.json({ error: "Provide a question (1–1000 characters)." }, { status: 400 });
     }
-
     if (!process.env.ANTHROPIC_API_KEY) {
       return NextResponse.json(
         { error: "Assistant is not configured (missing ANTHROPIC_API_KEY on the server)." },
@@ -137,118 +135,146 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Tool menu by role. Step 1: both tools are staff-safe. Financial tools
-    //    will be appended here ONLY when role === 'admin'. ──
+    // Step-1 tool menu (both staff-safe). Financial tools: appended here for
+    // role === 'admin' only, when they exist.
     const tools = TOOL_SCHEMAS;
-
     const anthropic = new Anthropic();
     const model = process.env.ASSISTANT_MODEL ?? "claude-opus-4-8";
+    const system = systemBlocks(role);
 
-    // ── Stage timings (diagnosing live latency, 2026-08-18). Logged AND
-    //    returned in the response so a single live question yields real
-    //    numbers from the deployed environment. ──
-    const timings: Record<string, number> = {};
-    const t0 = Date.now();
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const send = (obj: unknown) =>
+          controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
 
-    let mark = Date.now();
-    const thinking: Pick<Anthropic.MessageCreateParams, "thinking"> =
-      (await supportsAdaptiveThinking(anthropic, model))
-        ? { thinking: { type: "adaptive" } }
-        : {};
-    timings.capability_lookup_ms = Date.now() - mark;
+        const timings: Record<string, number> = { tools_ms: 0 };
+        const t0 = Date.now();
+        let modelCalls = 0;
 
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: question }];
-    const toolResults: { tool: string; input: unknown; result: unknown }[] = [];
-    let modelCalls = 0;
-    timings.tools_ms = 0;
-
-    mark = Date.now();
-    let response = await anthropic.messages.create({
-      model,
-      max_tokens: 2000,
-      ...thinking,
-      system: systemPrompt(role),
-      tools,
-      messages,
-    });
-    modelCalls++;
-    timings[`model_call_${modelCalls}_ms`] = Date.now() - mark;
-
-    for (let i = 0; i < MAX_TOOL_ITERATIONS && response.stop_reason === "tool_use"; i++) {
-      const toolUses = response.content.filter(
-        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
-      );
-      messages.push({ role: "assistant", content: response.content });
-
-      const resultBlocks: Anthropic.ToolResultBlockParam[] = [];
-      const toolsStart = Date.now();
-      for (const tu of toolUses) {
-        try {
-          let result: unknown;
-          if (tu.name === "check_room_availability") {
-            result = await checkRoomAvailability(
-              adminClient,
-              tu.input as { check_in: string; check_out: string; category: string | null },
-            );
-          } else if (tu.name === "get_day_sheet") {
-            result = await getDaySheet(adminClient, tu.input as { date: string });
-          } else {
-            throw new Error(`Unknown tool: ${tu.name}`);
+        // One model call. Streams deltas to the client only when `emit` —
+        // i.e. after at least one tool result exists (keeps the no-guessing
+        // backstop airtight on the zero-tool path). Retries once without
+        // thinking on the specific unsupported-thinking 400.
+        const callModel = async (
+          messages: Anthropic.MessageParam[],
+          emit: boolean,
+        ): Promise<Anthropic.Message> => {
+          const base: Anthropic.MessageCreateParams = {
+            model,
+            max_tokens: 2000,
+            ...thinkingParams(model),
+            system,
+            tools,
+            messages,
+          };
+          const mark = Date.now();
+          try {
+            const s = anthropic.messages.stream(base);
+            if (emit) s.on("text", (delta) => send({ type: "delta", text: delta }));
+            const msg = await s.finalMessage();
+            modelCalls++;
+            timings[`model_call_${modelCalls}_ms`] = Date.now() - mark;
+            return msg;
+          } catch (err) {
+            if (!isThinkingUnsupported400(err) || !("thinking" in base)) throw err;
+            thinkingUnsupported.add(model);
+            console.warn(`[assistant] ${model} rejected adaptive thinking; retrying without (remembered).`);
+            const { thinking: _drop, ...withoutThinking } = base;
+            const s = anthropic.messages.stream(withoutThinking);
+            if (emit) s.on("text", (delta) => send({ type: "delta", text: delta }));
+            const msg = await s.finalMessage();
+            modelCalls++;
+            timings[`model_call_${modelCalls}_ms`] = Date.now() - mark;
+            return msg;
           }
-          toolResults.push({ tool: tu.name, input: tu.input, result });
-          resultBlocks.push({
-            type: "tool_result",
-            tool_use_id: tu.id,
-            content: JSON.stringify(result),
-          });
-        } catch (toolErr) {
-          const message = toolErr instanceof Error ? toolErr.message : String(toolErr);
-          resultBlocks.push({
-            type: "tool_result",
-            tool_use_id: tu.id,
-            content: `Tool error: ${message}`,
-            is_error: true,
-          });
+        };
+
+        try {
+          const messages: Anthropic.MessageParam[] = [{ role: "user", content: question }];
+          const toolResults: { tool: string; input: unknown; result: unknown }[] = [];
+
+          let response = await callModel(messages, false);
+
+          for (let i = 0; i < MAX_TOOL_ITERATIONS && response.stop_reason === "tool_use"; i++) {
+            const toolUses = response.content.filter(
+              (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+            );
+            messages.push({ role: "assistant", content: response.content });
+
+            const resultBlocks: Anthropic.ToolResultBlockParam[] = [];
+            const toolsStart = Date.now();
+            for (const tu of toolUses) {
+              try {
+                let result: unknown;
+                if (tu.name === "check_room_availability") {
+                  result = await checkRoomAvailability(
+                    adminClient,
+                    tu.input as { check_in: string; check_out: string; category: string | null },
+                  );
+                } else if (tu.name === "get_day_sheet") {
+                  result = await getDaySheet(adminClient, tu.input as { date: string });
+                } else {
+                  throw new Error(`Unknown tool: ${tu.name}`);
+                }
+                toolResults.push({ tool: tu.name, input: tu.input, result });
+                resultBlocks.push({
+                  type: "tool_result",
+                  tool_use_id: tu.id,
+                  content: JSON.stringify(result),
+                });
+              } catch (toolErr) {
+                const message = toolErr instanceof Error ? toolErr.message : String(toolErr);
+                resultBlocks.push({
+                  type: "tool_result",
+                  tool_use_id: tu.id,
+                  content: `Tool error: ${message}`,
+                  is_error: true,
+                });
+              }
+            }
+            timings.tools_ms += Date.now() - toolsStart;
+
+            messages.push({ role: "user", content: resultBlocks });
+            // Tool results exist → the answer that follows may stream live.
+            response = await callModel(messages, true);
+          }
+
+          let answer = response.content
+            .filter((b): b is Anthropic.TextBlock => b.type === "text")
+            .map((b) => b.text)
+            .join("\n")
+            .trim();
+
+          // No-guessing backstop (zero-tool path only — that path was buffered,
+          // so nothing wrong was ever shown).
+          if (toolResults.length === 0 && containsMoneyLikeFigures(answer)) {
+            console.warn("[assistant] discarded figure-bearing answer with no tool call; question:", question);
+            answer = CANT_ANSWER;
+          }
+          if (!answer) answer = CANT_ANSWER;
+
+          // Zero-tool replies were never streamed — deliver the text now.
+          if (toolResults.length === 0) send({ type: "delta", text: answer });
+
+          timings.total_ms = Date.now() - t0;
+          console.log("[assistant] timings:", JSON.stringify(timings), "model:", model);
+          send({ type: "done", answer, tool_results: toolResults, model, timings });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error("[assistant] stream error:", message);
+          send({ type: "error", error: `Assistant failed: ${message}` });
+        } finally {
+          controller.close();
         }
-      }
+      },
+    });
 
-      timings.tools_ms += Date.now() - toolsStart;
-
-      messages.push({ role: "user", content: resultBlocks });
-      mark = Date.now();
-      response = await anthropic.messages.create({
-        model,
-        max_tokens: 2000,
-        ...thinking,
-        system: systemPrompt(role),
-        tools,
-        messages,
-      });
-      modelCalls++;
-      timings[`model_call_${modelCalls}_ms`] = Date.now() - mark;
-    }
-
-    const answer = response.content
-      .filter((b): b is Anthropic.TextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("\n")
-      .trim();
-
-    // ── No-guessing backstop: figures without any successful tool call → refuse ──
-    const anyToolRan = toolResults.length > 0;
-    if (!anyToolRan && containsMoneyLikeFigures(answer)) {
-      console.warn("[assistant] discarded figure-bearing answer with no tool call; question:", question);
-      return NextResponse.json({ answer: CANT_ANSWER, tool_results: [], model });
-    }
-
-    timings.total_ms = Date.now() - t0;
-    console.log("[assistant] timings:", JSON.stringify(timings), "model:", model);
-
-    return NextResponse.json({
-      answer: answer || CANT_ANSWER,
-      tool_results: toolResults,
-      model,
-      timings,
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

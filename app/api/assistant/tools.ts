@@ -68,7 +68,7 @@ export const TOOL_SCHEMAS = [
   {
     name: "check_room_availability",
     description:
-      "Check which rooms are free for a stay between two dates. Use for any question about availability, free rooms, or whether the hotel can take a booking for specific dates. Dates are hotel-local (Asia/Dhaka) ISO dates; check_out must be after check_in (nights = span). Optionally filter to one room category — pass the category name or slug as the guest/staff said it; it is matched against the live category list.",
+      "Which rooms are free between two dates. Call for ANY question about availability, free/khali rooms, or whether a booking fits given dates. Dhaka-local ISO dates; check_out is the departure day (must be after check_in). Optional category filter — pass the name as said; it's matched against the live category list.",
     strict: true,
     input_schema: {
       type: "object" as const,
@@ -84,7 +84,7 @@ export const TOOL_SCHEMAS = [
   {
     name: "get_day_sheet",
     description:
-      "The front-desk day sheet for one hotel-local date: arrivals due and actually checked in, departures due and actually checked out, current in-house guests with room numbers and outstanding dues, overdue checkouts, and occupancy. Use for questions about today's (or any day's) check-ins, check-outs, who is in the hotel, occupancy, or dues of in-house guests.",
+      "Front-desk day sheet for one Dhaka-local date: arrivals due vs actually checked in, departures due vs checked out, in-house guests with rooms and outstanding dues, overdue checkouts, occupancy. Call for check-ins/check-outs, who is in the hotel, occupancy, or in-house dues.",
     strict: true,
     input_schema: {
       type: "object" as const,
