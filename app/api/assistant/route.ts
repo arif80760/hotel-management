@@ -144,6 +144,16 @@ function containsMoneyLikeFigures(text: string): boolean {
   return /৳\s?[\d,.]+/.test(scrubbed) || /\b\d{1,3}(,\d{3})+\b/.test(scrubbed) || /\b\d{3,}\b/.test(scrubbed);
 }
 
+// ── Keep-warm ping (Vercel cron, every 5 min) ───────────────────────────────
+// No auth, no model call, no DB query — the sole purpose is to keep a
+// function instance warm so real questions skip the cold start (measured
+// live 2026-08-19: 90s cold → 20s warm). Note what this does NOT keep warm:
+// the Anthropic prompt cache has its own 5-minute TTL and only survives
+// between real questions, since the ping never touches the model.
+export async function GET() {
+  return NextResponse.json({ ok: true, ping: "assistant-keep-warm" });
+}
+
 export async function POST(req: NextRequest) {
   try {
     // ── Auth gate: any authenticated staff member with a profile ──

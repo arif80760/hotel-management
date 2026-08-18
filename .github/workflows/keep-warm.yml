@@ -1,0 +1,37 @@
+# Assistant keep-warm pinger.
+#
+# Hits GET /api/assistant every 5 minutes so a warm function instance is
+# always available (measured 2026-08-19: 90s cold start vs 20s warm). This
+# exists because Vercel's own cron honours */5 schedules on Pro only —
+# Hobby clamps crons to once daily, which is useless for keep-warm. This
+# workflow works on any plan.
+#
+# ONE-TIME SETUP: add a repository VARIABLE (Settings → Secrets and
+# variables → Actions → Variables) named ASSISTANT_PING_URL with the full
+# production URL, e.g. https://<your-app-domain>/api/assistant
+# Until it is set, runs skip harmlessly with a notice.
+#
+# Notes: GitHub delivers scheduled runs on a best-effort basis (a few
+# minutes of jitter is normal — fine for keep-warm), and disables schedules
+# after 60 days without repo activity (any push re-enables).
+
+name: Assistant keep-warm
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}   # manual run button for testing
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping assistant route
+        run: |
+          URL="${{ vars.ASSISTANT_PING_URL }}"
+          if [ -z "$URL" ]; then
+            echo "::notice::ASSISTANT_PING_URL repository variable not set — skipping ping."
+            exit 0
+          fi
+          curl -sS -m 20 -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" "$URL"
