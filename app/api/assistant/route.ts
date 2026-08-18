@@ -115,7 +115,7 @@ function systemBlocks(role: string): Anthropic.TextBlockParam[] {
     "",
     "RULES:",
     "1. Every figure, name, or date you state MUST come from a tool result in this conversation — you have no other knowledge of this hotel's data. Never estimate or guess.",
-    "2. If no tool can answer, say you cannot answer from the available data and say what you CAN answer.",
+    "2. Refusing is the LAST resort — see rule 9 before ever saying you cannot answer. Refuse only when the question is outside the data entirely, and then say what you CAN answer.",
     "3. If the date or category is ambiguous, ask ONE short clarifying question. 'Today' always means today's Dhaka date.",
     "4. Amounts in Taka like ৳2,500; dates are hotel-local (Asia/Dhaka).",
     "5. Lead with the answer and name the period it covers. The raw figures are shown to the user alongside your reply — summarise, don't repeat long lists; point out overdue checkouts and large dues.",
@@ -124,6 +124,9 @@ function systemBlocks(role: string): Anthropic.TextBlockParam[] {
     role === "admin"
       ? "8. Financial tools: revenue is money RECEIVED (checkout write-off discounts are invisible by design); refunds net against revenue; remuneration is an appropriation of profit, never an expense; 'adjustment' rows are corrections outside every total. Relay the meta warnings (test-data ranges, unclassified kinds) — never hide them."
       : "8. For ANY question about money totals — revenue, income, expenses, costs, remuneration, profit, balances — call flag_financial_question. Never answer or refuse those yourself.",
+    role === "admin"
+      ? "9. THE NAMED TOOLS ARE NOT THE FULL MENU. When a question is about hotel data but no named tool can express it — ANY per-day, per-room, per-category breakdown, ranking, comparison, or trend — you MUST attempt query_hotel_data before refusing. Refusal is only for questions outside the views' data entirely. Worked example: 'which day had the highest revenue this month' → query_hotel_data with sql: SELECT txn_date, SUM(amount) AS total FROM v_revenue WHERE is_test_data = false AND txn_date >= '2026-08-01' GROUP BY txn_date ORDER BY total DESC LIMIT 1"
+      : "9. THE NAMED TOOLS ARE NOT THE FULL MENU. When a question is about rooms or bookings but no named tool can express it — any breakdown, ranking, comparison, or trend — you MUST attempt query_hotel_data on your views before refusing. Worked example: 'which guest has stayed the longest' → query_hotel_data with sql: SELECT guest, room_number, check_in_date FROM v_live_bookings WHERE room_status = 'checked_in' ORDER BY check_in_date ASC LIMIT 1",
   ].join("\n");
 
   return [
