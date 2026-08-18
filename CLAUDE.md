@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-07-31 (rev 33)
+Last updated: 2026-08-19 (rev 34)
 
 > **rev 19** — Removed the cleaning/maintenance lifecycle from the dashboard Room Board. Checkout now releases a room straight to Available (`checkoutNormal`/`checkoutWithOverride` set the physical room Available and optimistically mark `booking_rooms` Checked Out). `lib/roomStatus.deriveRoomStatusForDate` no longer special-cases Cleaning/Maintenance — the board shows only Available/Reserved/Occupied, derived from bookings; summary/legend trimmed to those three.
 >
@@ -35,6 +35,15 @@ Last updated: 2026-07-31 (rev 33)
 > **Guests: insert-always, NO dedup:** `guests_email_key` DROPPED live (`2026-07-31-drop-guests-email-unique.sql`). Business rule: phones/emails are NOT unique guest identifiers (staff refer guests using their own contact details); booking identity is `booking_ref`. `findOrCreateGuest` → `createGuestForBooking` (commit `b9eef61`): every booking inserts a fresh guest row; no phone/name matching, no placeholder-email upgrade, no 23505 handling (the user-facing "email already registered" branch in `updateBooking` is gone). `guests.email`/`phone` stay NOT NULL — the `{phone_digits}.noemail@hotel.local` placeholder remains. Guest lists grow by design; nothing merges.
 > **Category identity = `system_key`, never name:** `expense_categories.system_key` (text, unique where not null; `2026-07-31-expense-category-system-key.sql`) set to `'salary'` and `'remuneration'` live. Display names are user-renameable, so **no code may resolve a category by name**. `getExpenseCategoryBySystemKey()` (matches regardless of `is_active`); PayrollClient resolves Salary by key and its **auto-create fallback is removed** (name is UNIQUE — a miss now throws "Salary category is missing" instead of inserting); `resolveRemunerationCategoryId` = key → kind fallback → create (name preference removed). Commit `b4aea0c`.
 > **expense_items:** new `public.expense_items` table + `account_transactions.expense_item_id` applied live (`2026-07-31-expense-items.sql`). Schema recorded only — **client-side expense_items work NOT started.**
+
+> **rev 34 (2026-08-19)** — August hardening + three features + the AI assistant. All SQL applied LIVE first, then recorded (see Migration History).
+> **Checkout balance guard:** `assert_checkout_allowed(p_booking_id, p_override, p_booking_room_id)` — SECURITY DEFINER, due = total + extra − additional_discount − paid (early deduction is INSIDE total; never subtract again), fail-closed on NULL `auth.uid()`, admin-only override with mandatory recorded reason. In `checkout_booking` it runs AFTER the 3.6 discount write (deliberate — see Known Behaviour); in `checkout_booking_room` it passes the room id so INTERMEDIATE rooms of a multi-room staged stay pass (guest settles at final departure, BK-1373) while the LAST active room is fully guarded. The old two-arg overload is dropped.
+> **Nights integrity (BK-1400):** client `calcNights` noon-anchored + toISODate-normalised (a display-format operand had eaten one night in Dhaka); `create_booking_with_rooms` now DERIVES nights from the dates (client 'nights' key ignored; total checked against rate × derived nights; span guard). ৳6,200 of real post-launch underbilling found (4 bookings, each short exactly one night); 11 pre-launch test rows left alone. RESIDUAL GAPS: `add_room_to_booking` still trusts p_nights; the edit flow writes nights via direct updates.
+> **P&L 'adjustment' fix (URGENT, GM-facing):** `expense_categories.kind` has exactly THREE live values — see the Expense Kinds rule below. The P&L's old two-way else-bucket had counted the ৳510,849 Software Test Data corrections as operating (showing an Aug loss of ৳150k where there was a ৳360k profit). ProfitLossClient + Cashbook tiles now whitelist; `ExpenseCategoryKind` type widened; the Manage Categories kind dropdown is HIDDEN for adjustment categories (one stray click would have reclassified them).
+> **AI assistant** (`/assistant`, all roles; sidebar under Front Desk) — see the AI Assistant rule section below for the architecture. Model+prompt in `app/api/assistant/route.ts`; staff-safe tools `tools.ts`; admin financial tools `financialTools.ts`; dynamic SQL `queryTool.ts`. NDJSON streaming with start/ping heartbeats (Vercel 504 class); keep-warm GET + Vercel cron + `.github/workflows/keep-warm.yml` (needs repo var ASSISTANT_PING_URL).
+> **Monthly Owner Report** (`/accounts/monthly-report/[month]` + `/accounts/monthly-reports` picker, admin): printable per-month occupancy (active-room denominator), collections/refunds, three-kind expense split, dues movement (current-values basis, footnoted), MoM deltas; standalone print route in AppShell regex.
+> **Rate calendar** (`rate_periods` + `/rooms/rate-calendar` admin UI + booking-form prefill): a period changes ONLY the prefilled rate at room-selection time — manual entry > period covering check-in > category default; min-rate floor and server RPCs untouched; existing bookings never recalculate. FK on room_categories(slug) physically locks slugs wherever periods reference them. 23P01 = overlap (create/update/reactivate).
+> **Booking confirmation SMS** (dormant until SMS_API_KEY exists): `lib/sms.ts` provider adapter (Alpha SMS / sms.bd, endpoint verified 2026-08-19: POST api.sms.net.bd/sendsms, error===0 = sent); fire-and-forget from `HotelContext.createBooking` (can never fail/delay a booking); outcomes + Unicode segment counts in `sms_log`; "Resend SMS" row action. OPEN DECISION: template ships with Latin digits at 42.8% Bangla — literal BTRC ≥70% needs Bangla numerals for dates/amounts (~73%, still 3 segments) or 5-segment padding.
 
 ### Role Permissions
 | Action | staff | admin |
@@ -160,6 +169,20 @@ Pages that must print cleanly are excluded from Sidebar + TopBar via `isStandalo
 - Pack quantities are converted to base units **client-side** before any service write
 - `toBaseQty` pattern: `upp != null && unit === "pack" ? packQty * upp : packQty`
 - Never store pack quantities in `inventory_movements.quantity`
+
+### Expense Kinds — three-value whitelist (2026-08-18)
+`expense_categories.kind` has EXACTLY three live values; every consumer must whitelist, never else-bucket:
+- `operating` — a normal cost (unknown/missing kind also counts as operating).
+- `remuneration` — MD/Chairman/Director payment: appropriation of profit, NEVER an operating expense.
+- `adjustment` — corrections (the "Software Test Data" pre-launch write-offs, ৳510,849): neither a cost nor a payment; its own labelled line OUTSIDE every total. Assigned via SQL only — the Manage Categories UI offers operating/remuneration and hides the selector on adjustment categories.
+Any unknown FOURTH kind must be surfaced loudly (banner/warning), never silently bucketed. Type: `ExpenseCategoryKind` in `expenseCategoriesService`. Consumers: P&L, Cashbook tiles, Monthly Owner Report, assistant financialTools + v_* views (v_unclassified_expenses catches strays). Expense-page view toggle shows adjustment rows in NEITHER list (known, accepted).
+
+### AI Assistant (three layers; grants are the boundary)
+`/assistant` chat (all signed-in users) → `POST /api/assistant` (NDJSON stream). THREE answer layers, in preference order:
+1. Staff-safe fixed tools (`app/api/assistant/tools.ts`): room availability (mirrors the DB overlap guard exactly), day sheet.
+2. Financial fixed tools (`financialTools.ts`) — appended to the model's tool menu ONLY when profiles.role='admin'; staff instead get a flag tool whose call the ROUTE short-circuits with a fixed bilingual admin-only message. Encode: three-kind whitelist, refunds netted (labelled), central fund (method from payments.method, never to_account_id), launch boundary 2026-07-30 warnings, soft-deletes excluded, paged fetches.
+3. `query_hotel_data` (`queryTool.ts`): the model writes ONE SELECT against the nine v_* views (2026-08-18 migration). Security = Postgres grants, not prompt: connection logs in as `assistant_login` (NOINHERIT — no privileges until SET LOCAL ROLE `assistant_ro`/`assistant_staff_ro`, chosen from the SERVER-SIDE profile); executor rejects multi-statement/non-SELECT pre-connection; 3s timeout; 200-row cap with truncated flag; one retry on SQL error then honest give-up. Staff role can SELECT only v_room_status + v_live_bookings.
+Invariants: figures may come ONLY from tool results (route discards figure-bearing answers with zero tool calls); reply mirrors the question's language and script (English / Bengali script / romanised Banglish — vocabulary in the prompt); named tools are NOT the full menu — query_hotel_data MUST be tried before refusing anything the views can express. Thinking is OFF by default (ASSISTANT_THINKING=on re-enables, with retry-on-400 for unsupported models). Model via ASSISTANT_MODEL (default claude-opus-4-8).
 
 ### Central Fund model (2026-08-16 — Arif + GM)
 Cash in Hand is the SINGLE central fund. Every revenue receipt — booking/checkout payments (via the `fn_sync_account_transactions` trigger on `payments`), Revenue Management manual entries, any source — credits it; payment method is DESCRIPTIVE only and never picks the account (the old method→bucket CASE mapping is gone). Refund disbursements and negative payments also debit Cash in Hand. The central fund is always resolved from the accounts table as the `is_spendable = true` account — never by hardcoded id or name. Bank/bKash/Nagad now change ONLY via explicit transfers and the guarded remuneration source-account drawdowns; their balances no longer rise passively. Live body: `2026-08-16-central-fund-payment-trigger.sql` (supersedes the 2026-05-23 mapping); client half in `18b06fc`. KNOWN one-off artifact: a refund on a PRE-changeover payment whose revenue landed in Bank/bKash debits Cash in Hand while the original credit stays put — opposite misstatements of the same amount, hotel-total correct; clean up with a matching explicit transfer. FOLLOW-UP pending: the MD Fund page's "received into MD accounts" stream goes to zero for new dates and should pivot to transfers-in/drawdowns-out per-account statements.
@@ -310,6 +333,19 @@ cd /Users/arif80760/hotel-management &&
 # NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
 # NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
 # SUPABASE_SERVICE_ROLE_KEY=eyJ...   (server-only — never expose to browser)
+#
+# AI assistant (server-only):
+# ANTHROPIC_API_KEY=sk-ant-...       (route returns a clear error if missing)
+# ASSISTANT_MODEL=claude-...         (optional; default claude-opus-4-8)
+# ASSISTANT_THINKING=on              (optional; thinking is OFF by default)
+# ASSISTANT_DB_URL=postgresql://assistant_login.<ref>:<pw>@<pooler>:6543/postgres
+#                                    (query_hotel_data; transaction pooler;
+#                                     password letters+digits only — special
+#                                     chars broke URL parsing once already)
+#
+# Booking confirmation SMS (server-only; dormant until set):
+# SMS_API_KEY=...                    (Alpha SMS / sms.bd)
+# SMS_SENDER_ID=...                  (optional approved sender id)
 ```
 
 ### Database Migrations (manual)
@@ -366,6 +402,14 @@ cd /Users/arif80760/hotel-management &&
 | 2026-06-09 | `2026-06-09-bookings-delete-admin-only.sql` | Adds SECURITY DEFINER `is_admin()` helper; restricts direct DELETE on `bookings` + `booking_rooms` to admins (replaces the open authenticated-delete policies). INSERT/SELECT/UPDATE unchanged | ✅ Applied |
 
 | 2026-06-09 | `2026-06-09-rls-delete-admin-only.sql` | Restricts direct DELETE on `bookings` and `booking_rooms` to admins; adds `is_admin()` helper (SECURITY DEFINER) | ✅ Applied |
+| 2026-08-14 | `2026-08-14-checkout-balance-guard.sql` | `assert_checkout_allowed` server-side balance guard (fail-closed on NULL auth.uid); wired into both checkout RPCs | ✅ Applied (guard placement partially superseded 08-15) |
+| 2026-08-15 | `2026-08-15-checkout-guard-after-discount.sql` | Guard moved AFTER step 3.6 in `checkout_booking` — a discount up to the balance clears it (deliberate, see Known Behaviour) | ✅ Applied |
+| 2026-08-16 | `2026-08-16-central-fund-payment-trigger.sql` | Central fund: `fn_sync_account_transactions` resolves the is_spendable account for ALL payment-driven rows (method is descriptive only) | ✅ Applied |
+| 2026-08-17 | `2026-08-17-derive-nights-in-create-booking.sql` | `create_booking_with_rooms` derives nights from dates server-side; client 'nights' ignored; span guard (BK-1400 underbilling backstop) | ✅ Applied |
+| 2026-08-17 | `2026-08-17-per-room-checkout-guard-scope.sql` | `assert_checkout_allowed` gains p_booking_room_id: intermediate rooms of a staged stay pass, LAST room fully guarded (BK-1373) | ✅ Applied |
+| 2026-08-18 | `2026-08-18-assistant-query-views.sql` | Nine rule-encoding v_* views + NOLOGIN roles assistant_ro / assistant_staff_ro (grants = the assistant query boundary) | ✅ Applied |
+| 2026-08-19 | `2026-08-19-rate-periods.sql` | `rate_periods` (seasonal rates; per-category EXCLUDE over inclusive daterange, active rows only; FK LOCKS category slugs) | ✅ Applied |
+| 2026-08-19 | `2026-08-19-sms-log.sql` | `sms_log` (booking confirmation SMS outcomes; service-role writes only) | ✅ Applied |
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
 ---
@@ -399,6 +443,12 @@ cd /Users/arif80760/hotel-management &&
 | Pack/base conversion logic | `app/inventory/InventoryClient.tsx` (stockUnit) or `app/accounts/expense/ExpenseClient.tsx` (exInvUnit + toBaseQty) |
 | Sidebar navigation | `components/Sidebar.tsx` |
 | Supabase client setup | `lib/supabase.ts` (browser) / `lib/supabaseAdmin.ts` (server) |
+| AI assistant prompt / auth / streaming | `app/api/assistant/route.ts` |
+| AI assistant tools (staff / financial / dynamic SQL) | `app/api/assistant/tools.ts` / `financialTools.ts` / `queryTool.ts` |
+| AI assistant chat UI | `app/assistant/AssistantClient.tsx` |
+| Monthly Owner Report compute / layout | `app/accounts/monthly-report/[month]/page.tsx` / `MonthlyReportClient.tsx` |
+| Rate periods (seasonal rates) | `services/ratePeriodsService.ts` + `app/rooms/rate-calendar/` (prefill in BookingsClient `updateRoom`) |
+| Booking SMS (adapter, template, route) | `lib/sms.ts` + `app/api/sms/booking-confirmation/route.ts` |
 
 ## Pricing Architecture (updated 2026-06-11 — rev 26)
 
