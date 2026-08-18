@@ -49,6 +49,7 @@ import {
 } from "@/services/documentsService";
 import { type RoomCategory } from "@/services/roomCategoriesService";
 import { getRatePeriods, findRatePeriod, type RatePeriod } from "@/services/ratePeriodsService";
+import { supabase } from "@/lib/supabase";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
 import { calcBookingLevelDeductions, earlyNights } from "@/lib/checkoutUtils";
 import ConfirmDialog from "@/components/ConfirmDialog";
@@ -900,6 +901,40 @@ export default function BookingsClient({ initialRoom }: Props) {
   const [showDiscountSection, setShowDiscountSection] = useState<boolean>(false);
 
   const [bookingPayMethod,  setBookingPayMethod]  = useState<PaymentMethod>("cash");
+
+  // ── Resend confirmation SMS (manual, per booking row) ──────
+  // Same route the fire-and-forget creation hook uses; outcomes land in
+  // sms_log either way. Status text is transient UI only.
+  const [smsResend, setSmsResend] = useState<Map<string, string>>(new Map());
+  async function handleResendSms(bookingRef: string) {
+    if (smsResend.get(bookingRef) === "sending") return;
+    setSmsResend(prev => new Map(prev).set(bookingRef, "sending"));
+    let outcome = "failed";
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("not signed in");
+      const res = await fetch("/api/sms/booking-confirmation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${session.access_token}` },
+        body: JSON.stringify({ booking_ref: bookingRef, resend: true }),
+      });
+      const body = await res.json().catch(() => null);
+      if (res.ok && body?.status === "sent") outcome = "sent";
+      else if (body?.status === "skipped") outcome = `skipped:${body.reason ?? ""}`;
+      else outcome = "failed";
+    } catch {
+      outcome = "failed";
+    }
+    setSmsResend(prev => new Map(prev).set(bookingRef, outcome));
+  }
+  const smsStatusText = (s: string | undefined): string | null => {
+    if (!s || s === "sending") return null;
+    if (s === "sent") return "SMS sent ✓";
+    if (s === "skipped:not_configured") return "SMS not configured yet";
+    if (s === "skipped:invalid_phone") return "No valid phone on booking";
+    if (s.startsWith("skipped")) return "SMS skipped";
+    return "SMS failed — see log";
+  };
 
   // ── Rate calendar (prefill only) ───────────────────────────
   // Active periods change the PREFILLED rate at room-selection time;
@@ -4437,6 +4472,25 @@ export default function BookingsClient({ initialRoom }: Props) {
                             </button>
                           );
                         })()}
+
+                        {/* ── Resend confirmation SMS (manual; outcomes in sms_log) ── */}
+                        <div>
+                          <button
+                            onClick={() => handleResendSms(b.id)}
+                            disabled={smsResend.get(b.id) === "sending"}
+                            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-sky-600 transition-colors disabled:opacity-50"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 flex-shrink-0">
+                              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                            </svg>
+                            {smsResend.get(b.id) === "sending" ? "Sending…" : "Resend SMS"}
+                          </button>
+                          {smsStatusText(smsResend.get(b.id)) && (
+                            <p className={`text-[10.5px] leading-tight mt-0.5 ${smsResend.get(b.id) === "sent" ? "text-emerald-600" : "text-amber-600"}`}>
+                              {smsStatusText(smsResend.get(b.id))}
+                            </p>
+                          )}
+                        </div>
 
                         {/* ── Documents ── */}
                         <button

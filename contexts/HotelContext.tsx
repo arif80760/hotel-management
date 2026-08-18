@@ -23,6 +23,7 @@
 
 import { createContext, useContext, useState, useEffect, useMemo, useCallback, type ReactNode } from "react";
 import { useAuth } from "@/contexts/AuthContext";
+import { supabase } from "@/lib/supabase";
 import type {
   MockRoom,
   MockBooking,
@@ -360,6 +361,24 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     return bookingsService.createBooking(input)
       .then(realBooking => {
         setBookings(prev => prev.map(b => b.id === input.id ? realBooking : b));
+
+        // ── Booking confirmation SMS — FIRE-AND-FORGET (2026-08-19) ──
+        // Deliberately not awaited and never rethrown: an SMS failure (or
+        // missing provider keys) must never fail, delay, or roll back a
+        // booking. The route logs outcomes to sms_log for the desk.
+        void supabase.auth.getSession()
+          .then(({ data: { session } }) => {
+            if (!session) return;
+            return fetch("/api/sms/booking-confirmation", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${session.access_token}`,
+              },
+              body: JSON.stringify({ booking_ref: realBooking.id }),
+            });
+          })
+          .catch(err => console.warn("[createBooking] confirmation SMS fire-and-forget failed:", err instanceof Error ? err.message : err));
       })
       .catch(err => {
         const msg = err instanceof Error ? err.message : String(err);
