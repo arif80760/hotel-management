@@ -48,6 +48,14 @@ import {
   getDaySheet,
   dhakaTodayISO,
 } from "./tools";
+import {
+  FINANCIAL_TOOL_SCHEMAS,
+  getRevenueSummary,
+  getExpenseSummary,
+  getRemuneration,
+  getProfitSummary,
+  getAccountBalances,
+} from "./financialTools";
 
 export const maxDuration = 60;
 
@@ -57,6 +65,27 @@ const CANT_ANSWER =
   "I can't answer that from the hotel's data I have access to. " +
   "I can currently answer questions about room availability, and the daily " +
   "sheet (check-ins, check-outs, in-house guests, occupancy, dues of in-house guests).";
+
+// Financial questions from STAFF: the model calls the flag tool below and the
+// ROUTE short-circuits with this fixed bilingual message — the refusal is
+// route-enforced, not model-generated, and staff never see the financial
+// tool schemas at all (the model cannot call what it is not offered).
+const ADMIN_ONLY_MESSAGE =
+  "Financial information (revenue, expenses, remuneration, profit, account balances) is admin-only — " +
+  "please ask an admin. আর্থিক তথ্য (আয়, খরচ, লাভ, ব্যালেন্স) শুধুমাত্র অ্যাডমিনদের জন্য।";
+
+const STAFF_FINANCIAL_FLAG_TOOL = {
+  name: "flag_financial_question",
+  description:
+    "Call this when the question asks about money totals: revenue, income, takings, expenses, costs, remuneration, director payments, profit, or account balances (in any language — including Banglish like 'koto taka aslo'). Do NOT answer such questions yourself.",
+  strict: true,
+  input_schema: {
+    type: "object" as const,
+    properties: {},
+    required: [],
+    additionalProperties: false,
+  },
+};
 
 // ── Thinking: off by default; optimistic send + retry-on-400 when enabled ──
 const thinkingUnsupported = new Set<string>();
@@ -79,12 +108,15 @@ function systemBlocks(role: string): Anthropic.TextBlockParam[] {
     "",
     "RULES:",
     "1. Every figure, name, or date you state MUST come from a tool result in this conversation — you have no other knowledge of this hotel's data. Never estimate or guess.",
-    "2. If no tool can answer, say you cannot answer from the available data and say what you CAN answer (availability; the daily sheet: check-ins/check-outs, in-house guests, occupancy, dues). Financial totals (revenue, expenses, remuneration, profit) are out of scope — admin-only reporting, not yet available here.",
+    "2. If no tool can answer, say you cannot answer from the available data and say what you CAN answer.",
     "3. If the date or category is ambiguous, ask ONE short clarifying question. 'Today' always means today's Dhaka date.",
     "4. Amounts in Taka like ৳2,500; dates are hotel-local (Asia/Dhaka).",
     "5. Lead with the answer and name the period it covers. The raw figures are shown to the user alongside your reply — summarise, don't repeat long lists; point out overdue checkouts and large dues.",
     "6. Questions arrive in Bengali script, English, or ROMANISED Bengali (Banglish — Bengali in Latin letters; very common). Banglish vocabulary: khali/faka = free/available; ache = is there; 'room khali ache/hobe' = is/will the room be available — that IS a room-availability question, call check_room_availability; tarik = date; theke = from; prjnto/porjonto = until; aj/ajke = today; kal/kalke = tomorrow OR yesterday by context (ask if unclear); koto = how many; kobe = when; kon = which. Example: '104 number room khali hobe september 4 tarik theke september 6 tarik prjnto' → check_room_availability 2026-09-04 to 2026-09-06, report on room 104.",
     "7. Reply in the SAME language and script as the question: English → English; Bengali script → Bengali script; Banglish → Banglish in Latin letters (NEVER Bengali script). Booking refs (BK-XXXX), room numbers, and dates stay Latin/ISO.",
+    role === "admin"
+      ? "8. Financial tools: revenue is money RECEIVED (checkout write-off discounts are invisible by design); refunds net against revenue; remuneration is an appropriation of profit, never an expense; 'adjustment' rows are corrections outside every total. Relay the meta warnings (test-data ranges, unclassified kinds) — never hide them."
+      : "8. For ANY question about money totals — revenue, income, expenses, costs, remuneration, profit, balances — call flag_financial_question. Never answer or refuse those yourself.",
   ].join("\n");
 
   return [
@@ -135,9 +167,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Step-1 tool menu (both staff-safe). Financial tools: appended here for
-    // role === 'admin' only, when they exist.
-    const tools = TOOL_SCHEMAS;
+    // Tool menu by role: staff get the two staff-safe tools plus the
+    // financial-question FLAG (route-enforced refusal); admins additionally
+    // get the five financial tools. Staff requests never contain the
+    // financial schemas — the model cannot call what it is not offered.
+    const isAdmin = role === "admin";
+    const tools = isAdmin
+      ? [...TOOL_SCHEMAS, ...FINANCIAL_TOOL_SCHEMAS]
+      : [...TOOL_SCHEMAS, STAFF_FINANCIAL_FLAG_TOOL];
     const anthropic = new Anthropic();
     const model = process.env.ASSISTANT_MODEL ?? "claude-opus-4-8";
     const system = systemBlocks(role);
@@ -202,6 +239,14 @@ export async function POST(req: NextRequest) {
             );
             messages.push({ role: "assistant", content: response.content });
 
+            // Staff financial question → the ROUTE answers, not the model.
+            if (toolUses.some((tu) => tu.name === "flag_financial_question")) {
+              send({ type: "delta", text: ADMIN_ONLY_MESSAGE });
+              timings.total_ms = Date.now() - t0;
+              send({ type: "done", answer: ADMIN_ONLY_MESSAGE, tool_results: [], model, timings });
+              return;
+            }
+
             const resultBlocks: Anthropic.ToolResultBlockParam[] = [];
             const toolsStart = Date.now();
             for (const tu of toolUses) {
@@ -214,6 +259,20 @@ export async function POST(req: NextRequest) {
                   );
                 } else if (tu.name === "get_day_sheet") {
                   result = await getDaySheet(adminClient, tu.input as { date: string });
+                } else if (!isAdmin && tu.name.startsWith("get_")) {
+                  // Defense in depth — staff menus never contain these schemas,
+                  // so this branch should be unreachable.
+                  throw new Error("Financial tools are admin-only.");
+                } else if (tu.name === "get_revenue_summary") {
+                  result = await getRevenueSummary(adminClient, tu.input as never);
+                } else if (tu.name === "get_expense_summary") {
+                  result = await getExpenseSummary(adminClient, tu.input as never);
+                } else if (tu.name === "get_remuneration") {
+                  result = await getRemuneration(adminClient, tu.input as never);
+                } else if (tu.name === "get_profit_summary") {
+                  result = await getProfitSummary(adminClient, tu.input as never);
+                } else if (tu.name === "get_account_balances") {
+                  result = await getAccountBalances(adminClient);
                 } else {
                   throw new Error(`Unknown tool: ${tu.name}`);
                 }
