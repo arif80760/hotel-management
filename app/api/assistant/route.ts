@@ -56,6 +56,7 @@ import {
   getProfitSummary,
   getAccountBalances,
 } from "./financialTools";
+import { QUERY_TOOL_ADMIN, QUERY_TOOL_STAFF, runHotelQuery } from "./queryTool";
 
 // 300s is the Fluid Compute ceiling on every Vercel plan (legacy non-fluid
 // Hobby clamps this to its own 60s max — if 504s persist, enable Fluid
@@ -178,9 +179,15 @@ export async function POST(req: NextRequest) {
     // get the five financial tools. Staff requests never contain the
     // financial schemas — the model cannot call what it is not offered.
     const isAdmin = role === "admin";
+    // query_hotel_data variants differ ONLY in their view catalog; the real
+    // staff/admin boundary is the Postgres role chosen server-side below.
     const tools = isAdmin
-      ? [...TOOL_SCHEMAS, ...FINANCIAL_TOOL_SCHEMAS]
-      : [...TOOL_SCHEMAS, STAFF_FINANCIAL_FLAG_TOOL];
+      ? [...TOOL_SCHEMAS, ...FINANCIAL_TOOL_SCHEMAS, QUERY_TOOL_ADMIN]
+      : [...TOOL_SCHEMAS, STAFF_FINANCIAL_FLAG_TOOL, QUERY_TOOL_STAFF];
+    // Chosen from the SERVER-SIDE profile lookup — never from anything the
+    // client sends. NOINHERIT on assistant_login means the connection holds
+    // no privileges until SET LOCAL ROLE runs with exactly this value.
+    const queryRole = isAdmin ? ("assistant_ro" as const) : ("assistant_staff_ro" as const);
     const anthropic = new Anthropic();
     const model = process.env.ASSISTANT_MODEL ?? "claude-opus-4-8";
     const system = systemBlocks(role);
@@ -244,6 +251,7 @@ export async function POST(req: NextRequest) {
         try {
           const messages: Anthropic.MessageParam[] = [{ role: "user", content: question }];
           const toolResults: { tool: string; input: unknown; result: unknown }[] = [];
+          let queryFailures = 0;   // bad SQL gets ONE retry, then honest give-up
 
           let response = await callModel(messages, false);
 
@@ -287,6 +295,14 @@ export async function POST(req: NextRequest) {
                   result = await getProfitSummary(adminClient, tu.input as never);
                 } else if (tu.name === "get_account_balances") {
                   result = await getAccountBalances(adminClient);
+                } else if (tu.name === "query_hotel_data") {
+                  if (queryFailures >= 2) {
+                    // Never loop: two failures is the end of the road.
+                    throw new Error(
+                      "The custom query failed twice — do NOT retry. Tell the user you could not compute this from the data and briefly say why.",
+                    );
+                  }
+                  result = await runHotelQuery(queryRole, (tu.input as { sql: string }).sql);
                 } else {
                   throw new Error(`Unknown tool: ${tu.name}`);
                 }
@@ -298,10 +314,19 @@ export async function POST(req: NextRequest) {
                 });
               } catch (toolErr) {
                 const message = toolErr instanceof Error ? toolErr.message : String(toolErr);
+                if (tu.name === "query_hotel_data") {
+                  queryFailures++;
+                  // Failed SQL is still shown in the figures panel so a wrong
+                  // answer can be traced to the query that produced it.
+                  toolResults.push({ tool: tu.name, input: tu.input, result: { error: message } });
+                }
                 resultBlocks.push({
                   type: "tool_result",
                   tool_use_id: tu.id,
-                  content: `Tool error: ${message}`,
+                  content:
+                    tu.name === "query_hotel_data" && queryFailures === 1
+                      ? `Tool error: ${message}\nYou may correct the SQL and retry ONCE. If unsure, stop and say you cannot compute this.`
+                      : `Tool error: ${message}`,
                   is_error: true,
                 });
               }

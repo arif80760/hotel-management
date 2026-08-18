@@ -46,13 +46,24 @@ const STARTERS: string[] = [
 const TOOL_LABELS: Record<string, string> = {
   check_room_availability: "Room availability",
   get_day_sheet: "Day sheet",
+  get_revenue_summary: "Revenue summary",
+  get_expense_summary: "Expense summary",
+  get_remuneration: "Remuneration",
+  get_profit_summary: "Profit & loss",
+  get_account_balances: "Account balances",
+  query_hotel_data: "Custom query",
 };
 
 function formatParams(input: unknown): string {
   if (!input || typeof input !== "object") return "";
   return Object.entries(input as Record<string, unknown>)
     .filter(([, v]) => v !== null && v !== undefined && v !== "")
-    .map(([k, v]) => `${k}: ${String(v)}`)
+    // Long values (the custom query's SQL) are truncated here — the full
+    // text appears in the result block below, which echoes the executed SQL.
+    .map(([k, v]) => {
+      const s = String(v);
+      return `${k}: ${s.length > 90 ? s.slice(0, 90) + "…" : s}`;
+    })
     .join(" · ");
 }
 
