@@ -85,7 +85,8 @@ function systemPrompt(role: string): string {
     "5. Answer concisely and lead with the number or fact asked for. Mention the exact period/date the figures cover. The raw tool figures are shown to the user alongside your answer, so do not repeat long lists — summarise and point out what matters (e.g. overdue checkouts, large dues).",
     "6. Questions about revenue, expenses, remuneration, profit, or any money totals beyond an individual booking's balance are OUT OF SCOPE for the current tools — say so plainly" +
       (role === "admin" ? " (financial tools are planned but not yet available)." : " (that information is admin-only)."),
-    "7. Staff may ask in Bengali, English, or a mix of both. ALWAYS reply in the language of the question — a Bengali question gets a Bengali answer. Keep booking references (BK-XXXX), room numbers, and dates in their standard Latin/ISO form inside a Bengali sentence.",
+    "7. Staff ask in THREE forms, all first-class: Bengali script, English, or ROMANISED Bengali (Banglish — Bengali typed in Latin letters on an English keyboard; very common). Romanised-Bengali vocabulary you must recognise: khali / faka = free/available; ache = is there; room khali ache / room khali hobe = is/will the room be available (this IS a room-availability question — call check_room_availability); tarik = date; theke = from; prjnto / porjonto / porzonto = until; aj / ajke = today; kal / kalke = tomorrow OR yesterday (decide from context; ask if genuinely unclear); koto = how many; kobe = when; kon = which. Example: '104 number room khali hobe september 4 tarik theke september 6 tarik prjnto' means 'will room 104 be free from Sep 4 until Sep 6' — call check_room_availability for 2026-09-04 to 2026-09-06 and report on room 104.",
+    "8. Reply in the SAME language AND SCRIPT as the question. English question → English answer. Bengali-script question → Bengali-script answer. Romanised-Bengali question → romanised-Bengali answer in Latin letters (NEVER Bengali script — the user typing Banglish may not read Bengali script comfortably). Booking references (BK-XXXX), room numbers, and dates always stay in Latin/ISO form.",
     "",
     `Today's date (Asia/Dhaka): ${dhakaTodayISO()}`,
     `The user's role: ${role}.`,
@@ -142,14 +143,26 @@ export async function POST(req: NextRequest) {
 
     const anthropic = new Anthropic();
     const model = process.env.ASSISTANT_MODEL ?? "claude-opus-4-8";
+
+    // ── Stage timings (diagnosing live latency, 2026-08-18). Logged AND
+    //    returned in the response so a single live question yields real
+    //    numbers from the deployed environment. ──
+    const timings: Record<string, number> = {};
+    const t0 = Date.now();
+
+    let mark = Date.now();
     const thinking: Pick<Anthropic.MessageCreateParams, "thinking"> =
       (await supportsAdaptiveThinking(anthropic, model))
         ? { thinking: { type: "adaptive" } }
         : {};
+    timings.capability_lookup_ms = Date.now() - mark;
 
     const messages: Anthropic.MessageParam[] = [{ role: "user", content: question }];
     const toolResults: { tool: string; input: unknown; result: unknown }[] = [];
+    let modelCalls = 0;
+    timings.tools_ms = 0;
 
+    mark = Date.now();
     let response = await anthropic.messages.create({
       model,
       max_tokens: 2000,
@@ -158,6 +171,8 @@ export async function POST(req: NextRequest) {
       tools,
       messages,
     });
+    modelCalls++;
+    timings[`model_call_${modelCalls}_ms`] = Date.now() - mark;
 
     for (let i = 0; i < MAX_TOOL_ITERATIONS && response.stop_reason === "tool_use"; i++) {
       const toolUses = response.content.filter(
@@ -166,6 +181,7 @@ export async function POST(req: NextRequest) {
       messages.push({ role: "assistant", content: response.content });
 
       const resultBlocks: Anthropic.ToolResultBlockParam[] = [];
+      const toolsStart = Date.now();
       for (const tu of toolUses) {
         try {
           let result: unknown;
@@ -196,7 +212,10 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      timings.tools_ms += Date.now() - toolsStart;
+
       messages.push({ role: "user", content: resultBlocks });
+      mark = Date.now();
       response = await anthropic.messages.create({
         model,
         max_tokens: 2000,
@@ -205,6 +224,8 @@ export async function POST(req: NextRequest) {
         tools,
         messages,
       });
+      modelCalls++;
+      timings[`model_call_${modelCalls}_ms`] = Date.now() - mark;
     }
 
     const answer = response.content
@@ -220,10 +241,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ answer: CANT_ANSWER, tool_results: [], model });
     }
 
+    timings.total_ms = Date.now() - t0;
+    console.log("[assistant] timings:", JSON.stringify(timings), "model:", model);
+
     return NextResponse.json({
       answer: answer || CANT_ANSWER,
       tool_results: toolResults,
       model,
+      timings,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
