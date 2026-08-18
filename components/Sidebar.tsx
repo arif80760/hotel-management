@@ -108,6 +108,13 @@ const Icons = {
       <path d="M6 20v-6"/>
     </svg>
   ),
+  assistant: (
+    /* Chat bubble with a spark — the AI assistant */
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+      <path d="M12 8.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z" fill="currentColor" stroke="none"/>
+    </svg>
+  ),
 };
 
 // ── Nav items ─────────────────────────────────────────────────
@@ -149,6 +156,7 @@ function isGroup(item: NavItem): item is NavGroup {
 const navItems: NavItem[] = [
   { label: "Dashboard",  href: "/",            icon: Icons.dashboard  },
   { label: "Front Desk", href: "/front-desk",  icon: Icons.frontdesk  },
+  { label: "Assistant",  href: "/assistant",   icon: Icons.assistant  },
   { label: "Rooms",          href: "/rooms",            icon: Icons.rooms                        },
   { label: "Room Analytics", href: "/rooms/analytics", icon: Icons.analytics, adminOnly: true },
   { label: "Guests",         href: "/guests",          icon: Icons.guests                     },

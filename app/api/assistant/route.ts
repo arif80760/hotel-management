@@ -54,6 +54,7 @@ function systemPrompt(role: string): string {
     "5. Answer concisely and lead with the number or fact asked for. Mention the exact period/date the figures cover. The raw tool figures are shown to the user alongside your answer, so do not repeat long lists — summarise and point out what matters (e.g. overdue checkouts, large dues).",
     "6. Questions about revenue, expenses, remuneration, profit, or any money totals beyond an individual booking's balance are OUT OF SCOPE for the current tools — say so plainly" +
       (role === "admin" ? " (financial tools are planned but not yet available)." : " (that information is admin-only)."),
+    "7. Staff may ask in Bengali, English, or a mix of both. ALWAYS reply in the language of the question — a Bengali question gets a Bengali answer. Keep booking references (BK-XXXX), room numbers, and dates in their standard Latin/ISO form inside a Bengali sentence.",
     "",
     `Today's date (Asia/Dhaka): ${dhakaTodayISO()}`,
     `The user's role: ${role}.`,
