@@ -170,6 +170,7 @@ const navItems: NavItem[] = [
     children: [
       { label: "Cashbook",           href: "/accounts/cashbook" },
       { label: "Cashbook Reports",   href: "/accounts/cashbook-reports" },
+      { label: "Monthly Reports",    href: "/accounts/monthly-reports" },
       { label: "Expense",            href: "/accounts/expense" },
       { label: "Payroll",            href: "/accounts/payroll" },
       { label: "Revenue Management", href: "/accounts/revenue-management" },
