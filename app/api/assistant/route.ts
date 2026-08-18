@@ -37,6 +37,37 @@ export const maxDuration = 60; // Vercel: allow the tool-use loop room to finish
 
 const MAX_TOOL_ITERATIONS = 5;
 
+// ── Adaptive-thinking capability, resolved from the Models API ──────────────
+// ASSISTANT_MODEL is a pure config switch: some models (e.g. Haiku 4.5)
+// reject `thinking: {type: "adaptive"}` with a 400, so the parameter is sent
+// only when the live model capabilities say it is supported. No hardcoded
+// model list — the Models API is the source of truth, so future models work
+// without a code change. Cached per server process (the model doesn't change
+// between requests); a failed lookup falls back to omitting thinking, which
+// is valid on every model, and is NOT cached so a transient error can't
+// permanently disable thinking for the process.
+const adaptiveSupportCache = new Map<string, boolean>();
+
+async function supportsAdaptiveThinking(anthropic: Anthropic, model: string): Promise<boolean> {
+  const cached = adaptiveSupportCache.get(model);
+  if (cached !== undefined) return cached;
+  try {
+    const info = await anthropic.models.retrieve(model);
+    const caps = (info as unknown as {
+      capabilities?: { thinking?: { types?: { adaptive?: { supported?: boolean } } } };
+    }).capabilities;
+    const supported = caps?.thinking?.types?.adaptive?.supported === true;
+    adaptiveSupportCache.set(model, supported);
+    return supported;
+  } catch (err) {
+    console.warn(
+      "[assistant] model capability lookup failed; omitting thinking this request:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return false;
+  }
+}
+
 const CANT_ANSWER =
   "I can't answer that from the hotel's data I have access to. " +
   "I can currently answer questions about room availability, and the daily " +
@@ -111,6 +142,10 @@ export async function POST(req: NextRequest) {
 
     const anthropic = new Anthropic();
     const model = process.env.ASSISTANT_MODEL ?? "claude-opus-4-8";
+    const thinking: Pick<Anthropic.MessageCreateParams, "thinking"> =
+      (await supportsAdaptiveThinking(anthropic, model))
+        ? { thinking: { type: "adaptive" } }
+        : {};
 
     const messages: Anthropic.MessageParam[] = [{ role: "user", content: question }];
     const toolResults: { tool: string; input: unknown; result: unknown }[] = [];
@@ -118,7 +153,7 @@ export async function POST(req: NextRequest) {
     let response = await anthropic.messages.create({
       model,
       max_tokens: 2000,
-      thinking: { type: "adaptive" },
+      ...thinking,
       system: systemPrompt(role),
       tools,
       messages,
@@ -165,7 +200,7 @@ export async function POST(req: NextRequest) {
       response = await anthropic.messages.create({
         model,
         max_tokens: 2000,
-        thinking: { type: "adaptive" },
+        ...thinking,
         system: systemPrompt(role),
         tools,
         messages,
