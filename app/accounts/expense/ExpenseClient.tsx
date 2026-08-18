@@ -1569,19 +1569,27 @@ export default function ExpenseClient() {
                             {c.kind === "remuneration" && (
                               <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 ring-1 ring-amber-200 text-[10.5px] font-semibold uppercase tracking-wider">Remuneration</span>
                             )}
+                            {c.kind === "adjustment" && (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 ring-1 ring-slate-300 text-[10.5px] font-semibold uppercase tracking-wider" title="Corrections — excluded from operating expenses and remuneration; assigned via SQL only">Adjustment</span>
+                            )}
                             {!c.isActive && (
                               <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10.5px] font-semibold uppercase tracking-wider">Inactive</span>
                             )}
-                            <select
-                              value={c.kind}
-                              onChange={(e) => handleChangeKind(c, e.target.value as "operating" | "remuneration")}
-                              disabled={kindUpdatingId === c.id}
-                              title="Classification"
-                              className="px-2 py-1.5 rounded-md border border-slate-200 bg-white text-[11.5px] text-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-40"
-                            >
-                              <option value="operating">Operating</option>
-                              <option value="remuneration">Remuneration</option>
-                            </select>
+                            {c.kind !== "adjustment" && (
+                              // Adjustment categories (SQL-assigned) hide the kind select
+                              // entirely so a stray click can't silently reclassify the
+                              // corrections back into operating or remuneration.
+                              <select
+                                value={c.kind}
+                                onChange={(e) => handleChangeKind(c, e.target.value as "operating" | "remuneration")}
+                                disabled={kindUpdatingId === c.id}
+                                title="Classification"
+                                className="px-2 py-1.5 rounded-md border border-slate-200 bg-white text-[11.5px] text-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-40"
+                              >
+                                <option value="operating">Operating</option>
+                                <option value="remuneration">Remuneration</option>
+                              </select>
+                            )}
                             <button
                               type="button"
                               onClick={() => handleToggleActive(c)}

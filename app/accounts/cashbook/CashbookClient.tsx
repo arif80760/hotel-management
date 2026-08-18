@@ -969,12 +969,15 @@ export default function CashbookClient({
       if (t.deletedAt !== null) continue;   // same guard the ledger uses to grey out deleted rows
       if (t.type === "revenue_in") revenueIn += t.amount;
       else if (t.type === "expense_out") {
-        // Remuneration is an appropriation of profit, not an operating
-        // expense — same kind-based rule as the expense list and P&L
-        // (resolved by expense_categories.kind, never by name; unknown/
-        // missing kind counts as operating, matching the list).
+        // Three-kind whitelist (2026-08-18, matching the P&L fix):
+        //   remuneration — appropriation of profit, its own tile;
+        //   adjustment   — corrections (test-data write-offs), in NEITHER
+        //                  tile (the rows still show in the ledger below);
+        //   operating / missing / unknown — Expense Paid.
+        // (Resolved by expense_categories.kind, never by name.)
         const kind = t.categoryId ? expenseCatMap.get(t.categoryId)?.kind : undefined;
         if (kind === "remuneration") remunerationOut += t.amount;
+        else if (kind === "adjustment") { /* excluded from both tiles */ }
         else expenseOut += t.amount;
       }
     }

@@ -41,7 +41,7 @@ export default function ProfitLossClient({ oswaldFamily, archivoFamily }:{ oswal
   const [cFrom,setCFrom]=useState(firstOfMonthISO());
   const [cTo,setCTo]=useState(todayISO());
   const [error,setError]=useState<string|null>(null);
-  const [P,setP]=useState({ revenue:0, refunds:0, operating:0, remuneration:0, opByCat:[] as {name:string;total:number}[] });
+  const [P,setP]=useState({ revenue:0, refunds:0, operating:0, remuneration:0, adjustment:0, unknownTotal:0, unknownKinds:[] as string[], opByCat:[] as {name:string;total:number}[] });
   const [Y,setY]=useState({ rev:Array(12).fill(0) as number[], op:Array(12).fill(0) as number[], ebt:Array(12).fill(0) as number[], avg:0, ready:false });
 
   useEffect(()=>{ let cancelled=false; (async()=>{
@@ -54,12 +54,23 @@ export default function ProfitLossClient({ oswaldFamily, archivoFamily }:{ oswal
       const kindById=new Map(expenseCategories.map(c=>[c.id,c.kind])); const nameById=new Map(expenseCategories.map(c=>[c.id,c.name]));
       const revenue=txns.filter(t=>t.type==="revenue_in").reduce((s,t)=>s+t.amount,0);
       const refunds=txns.filter(t=>t.type==="expense_out"&&t.bookingPaymentId!==null).reduce((s,t)=>s+t.amount,0);
-      let operating=0, remuneration=0; const cm=new Map<string,number>();
+      // Three-kind WHITELIST (2026-08-18). expense_categories.kind has exactly
+      // three live values: operating | remuneration | adjustment.
+      //   remuneration = appropriation of profit — not an operating expense.
+      //   adjustment   = corrections (pre-launch test-data write-offs) —
+      //                  neither a cost nor a payment; excluded from operating,
+      //                  net profit AND remuneration; shown as a memo line.
+      // Any unknown fourth kind is surfaced in a banner, never silently
+      // bucketed — the old two-way else-bucket put 'adjustment' into
+      // operating and showed a ৳150k Aug loss where there was a ৳360k profit.
+      let operating=0, remuneration=0, adjustment=0, unknownTotal=0; const unknownSet=new Set<string>(); const cm=new Map<string,number>();
       for(const e of expenses){ const kind=kindById.get(e.categoryId)??"operating";
         if(kind==="remuneration") remuneration+=e.amount;
-        else { operating+=e.amount; const nm=nameById.get(e.categoryId)??"Uncategorized"; cm.set(nm,(cm.get(nm)??0)+e.amount); } }
+        else if(kind==="adjustment") adjustment+=e.amount;
+        else if(kind==="operating") { operating+=e.amount; const nm=nameById.get(e.categoryId)??"Uncategorized"; cm.set(nm,(cm.get(nm)??0)+e.amount); }
+        else { unknownTotal+=e.amount; unknownSet.add(kind); } }
       const opByCat=[...cm.entries()].map(([name,total])=>({name,total})).sort((a,b)=>b.total-a.total);
-      setP({ revenue, refunds, operating, remuneration, opByCat });
+      setP({ revenue, refunds, operating, remuneration, adjustment, unknownTotal, unknownKinds:[...unknownSet], opByCat });
     }catch(err){ if(!cancelled) setError((err as Error).message||"Failed to load."); }
   })(); return ()=>{ cancelled=true; }; },[preset,cFrom,cTo,expenseCategories]);
 
@@ -75,7 +86,9 @@ export default function ProfitLossClient({ oswaldFamily, archivoFamily }:{ oswal
         if(t.type==="revenue_in") rev[mi]+=t.amount;
         else if(t.type==="expense_out"&&t.bookingPaymentId!==null) refund[mi]+=t.amount; }
       for(const e of expenses){ const mi=parseInt(String(e.txnDate).slice(5,7),10)-1; if(mi<0||mi>11)continue;
-        if((kindById.get(e.categoryId)??"operating")!=="remuneration") op[mi]+=e.amount; }
+        // whitelist: only operating counts as expense in the trend —
+        // remuneration, adjustment, and unknown kinds are all excluded
+        if((kindById.get(e.categoryId)??"operating")==="operating") op[mi]+=e.amount; }
       const ebt=rev.map((r,i)=>r-refund[i]-op[i]);
       const active=rev.filter(v=>v>0).length;
       const avg=active?rev.reduce((s,v)=>s+v,0)/active:0;
@@ -83,7 +96,7 @@ export default function ProfitLossClient({ oswaldFamily, archivoFamily }:{ oswal
     }catch{ if(!cancelled) setY(s=>({...s,ready:true})); }
   })(); return ()=>{ cancelled=true; }; },[expenseCategories]);
 
-  const { revenue,refunds,operating,remuneration,opByCat }=P;
+  const { revenue,refunds,operating,remuneration,adjustment,unknownTotal,unknownKinds,opByCat }=P;
   const netRevenue=revenue-refunds; const netProfit=netRevenue-operating; const retained=netProfit-remuneration;
   const margin=netRevenue>0?(netProfit/netRevenue*100):0;
   const retPct=revenue>0?(retained/revenue*100):0;
@@ -128,6 +141,14 @@ export default function ProfitLossClient({ oswaldFamily, archivoFamily }:{ oswal
           <input type="date" value={cFrom} max={cTo||todayISO()} onChange={e=>setCFrom(e.target.value)} style={{fontFamily:archivoFamily,fontSize:12,border:`1px solid ${C.hair}`,borderRadius:6,padding:"6px 10px"}}/>
           <span style={{fontSize:12,color:C.mut}}>to</span>
           <input type="date" value={cTo} min={cFrom} max={todayISO()} onChange={e=>setCTo(e.target.value)} style={{fontFamily:archivoFamily,fontSize:12,border:`1px solid ${C.hair}`,borderRadius:6,padding:"6px 10px"}}/>
+        </div>
+      )}
+
+      {unknownTotal>0 && (
+        <div style={{ border:`1.5px solid ${C.orange}`, color:C.ink, background:"#FDF6EC", borderRadius:8, padding:"12px 16px", fontSize:13, marginBottom:14 }}>
+          <b>Unclassified expense kind{unknownKinds.length>1?"s":""}:</b> {unknownKinds.join(", ")} — {taka(unknownTotal)} in this period is
+          in <b>no</b> figure on this page. The known kinds are operating / remuneration / adjustment; a new kind was added to
+          expense categories and this page needs updating before those rows can be classified.
         </div>
       )}
 
@@ -183,6 +204,15 @@ export default function ProfitLossClient({ oswaldFamily, archivoFamily }:{ oswal
                     <tr>
                       <td style={{fontSize:13.5,padding:"11px 2px",color:C.orange}}>Director remuneration</td>
                       <td style={osw({fontSize:13.5,padding:"11px 2px",textAlign:"right",color:C.orange})}>{taka(remuneration)}</td>
+                    </tr>
+                  )}
+                  {adjustment>0 && (
+                    <tr>
+                      <td style={{fontSize:12.5,padding:"11px 2px",color:C.mut}}>
+                        Adjustments / corrections
+                        <div style={{fontSize:10.5,marginTop:2}}>test-data write-offs — excluded from every figure above</div>
+                      </td>
+                      <td style={osw({fontSize:13,padding:"11px 2px",textAlign:"right",color:C.mut,verticalAlign:"top"})}>{taka(adjustment)}</td>
                     </tr>
                   )}
                 </tbody>

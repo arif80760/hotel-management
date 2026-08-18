@@ -33,10 +33,19 @@ import { supabase } from "@/lib/supabase";
 // TYPES
 // ─────────────────────────────────────────────────────────────
 
+/** The three live kinds (whitelisted 2026-08-18):
+ *  operating — a normal cost;
+ *  remuneration — MD/Chairman/Director payment, appropriation of profit;
+ *  adjustment — corrections (pre-launch test-data write-offs) — neither a
+ *  cost nor a payment; excluded from every operating/remuneration total.
+ *  'adjustment' is assigned via SQL only — the Manage Categories UI offers
+ *  operating/remuneration and must never silently overwrite it. */
+export type ExpenseCategoryKind = "operating" | "remuneration" | "adjustment";
+
 export type ExpenseCategory = {
   id:         string;
   name:       string;
-  kind:       "operating" | "remuneration";
+  kind:       ExpenseCategoryKind;
   /**
    * Stable machine identifier for system-relied categories ('salary',
    * 'remuneration'); null for ordinary categories. Display names are freely
@@ -68,7 +77,7 @@ function mapCategory(r: ExpenseCategoryRow): ExpenseCategory {
   return {
     id:        r.id,
     name:      r.name,
-    kind:      (r.kind as "operating" | "remuneration") ?? "operating",
+    kind:      (r.kind as ExpenseCategoryKind) ?? "operating",
     systemKey: r.system_key ?? null,
     isActive:  r.is_active,
     createdAt: r.created_at,
