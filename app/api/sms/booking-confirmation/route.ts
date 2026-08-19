@@ -25,7 +25,7 @@ import { getAdminClient } from "@/lib/supabaseAdmin";
 import {
   getSmsProvider,
   buildBookingConfirmationSms,
-  smsSegments,
+  smsUnits,
   normalizeBdPhone,
 } from "@/lib/sms";
 
@@ -63,11 +63,15 @@ export async function POST(req: NextRequest) {
       .single();
     if (bkErr || !bk) return NextResponse.json({ error: `Booking ${bookingRef} not found.` }, { status: 404 });
 
-    const { count: roomCount } = await adminClient
+    const { data: brRows } = await adminClient
       .from("booking_rooms")
-      .select("id", { count: "exact", head: true })
+      .select("rooms(room_number)")
       .eq("booking_id", bk.id)
       .neq("status", "cancelled");
+    const roomNumbers = (brRows ?? [])
+      .map((r) => embedded(r.rooms as { room_number: string } | { room_number: string }[] | null)?.room_number)
+      .filter((n): n is string => !!n)
+      .sort((a, b) => Number(a) - Number(b));
 
     const guest = embedded(bk.guests as { name: string; phone: string } | { name: string; phone: string }[] | null);
 
@@ -76,7 +80,8 @@ export async function POST(req: NextRequest) {
         booking_id: bk.id,
         phone,
         message,
-        segments: message ? smsSegments(message) : 1,
+        // Alpha's confirmed billing rule: 180 chars/unit — the log matches billing.
+        segments: message ? smsUnits(message) : 1,
         status,
         provider_response: providerResponse ?? null,
       });
@@ -104,7 +109,7 @@ export async function POST(req: NextRequest) {
     const message = buildBookingConfirmationSms({
       guestName: guest?.name ?? "Guest",
       bookingRef: bk.booking_ref,
-      roomCount: roomCount ?? 1,
+      roomNumbers: roomNumbers.length ? roomNumbers : ["-"],   // ASCII hyphen — GSM-safe
       checkIn: bk.check_in_date,
       checkOut: bk.check_out_date,
       total: effTotal,
