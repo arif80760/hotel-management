@@ -102,7 +102,7 @@ export function gsmSafeName(raw: string): string {
     .replace(/[^A-Za-z0-9 .'\-]/g, "")                  // drop everything non-GSM-safe
     .replace(/\s+/g, " ")
     .trim();
-  return cleaned.length >= 2 ? cleaned.slice(0, 30) : "Guest";
+  return cleaned.length >= 2 ? cleaned.slice(0, 12).trim() : "Guest";
 }
 
 // ── Booking confirmation template (English, GSM-safe, 1 unit typical) ──────
@@ -122,14 +122,29 @@ export function buildBookingConfirmationSms(b: {
   checkOut: string;        // ISO date
   total: number;
   paid: number;
+  /** CANONICAL true due: total + extra_charge − additional_discount − paid
+   *  (computed by the caller from the same booking columns the booking
+   *  detail page uses — never total − paid). Field omitted when ≤ 0. */
+  due: number;
 }): string {
   const taka = (n: number) => Math.round(n).toLocaleString("en-US");
   // Local 01X form of the hotel phone (+8801XXXXXXXXX → 01XXXXXXXXX).
   const phone = HOTEL_INFO.phone.replace(/\D/g, "").replace(/^880/, "0");
+  const duePart = b.due > 0.009 ? ` Due Tk${taka(b.due)}` : "";
   return (
     `${gsmSafeName(b.guestName)}, your booking at Hotel Albatross Resort is confirmed. ` +
     `Ref: ${b.bookingRef} Room: ${b.roomNumbers.join(",")} ` +
     `In: ${ddMmm(b.checkIn)} Out: ${ddMmm(b.checkOut)} ` +
-    `Total Tk${taka(b.total)} Paid Tk${taka(b.paid)}. Call ${phone}`
+    `Total Tk${taka(b.total)} Paid Tk${taka(b.paid)}${duePart}. Call ${phone}`
   );
+}
+
+/** Hard one-unit ceiling — checked BEFORE sending. Alpha bills 180 chars/unit;
+ *  a message over 180 is never sent (the route logs it as skipped instead),
+ *  so a pathological booking (many rooms + long figures) can't silently bill
+ *  multiple units. */
+export const SMS_MAX_CHARS = 180;
+
+export function smsWithinLimit(message: string): boolean {
+  return [...message].length <= SMS_MAX_CHARS;
 }

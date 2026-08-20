@@ -26,6 +26,8 @@ import {
   getSmsProvider,
   buildBookingConfirmationSms,
   smsUnits,
+  smsWithinLimit,
+  SMS_MAX_CHARS,
   normalizeBdPhone,
 } from "@/lib/sms";
 
@@ -105,7 +107,11 @@ export async function POST(req: NextRequest) {
     }
 
     // ── Compose + send + log ──
+    // Canonical true due — same columns/formula as the booking detail page:
+    // total + extra_charge − additional_discount − paid (early deduction is
+    // already inside total_amount; never subtracted again).
     const effTotal = (bk.total_amount ?? 0) + (bk.extra_charge_amount ?? 0) - (bk.additional_discount_amount ?? 0);
+    const paid = bk.paid_amount ?? 0;
     const message = buildBookingConfirmationSms({
       guestName: guest?.name ?? "Guest",
       bookingRef: bk.booking_ref,
@@ -113,8 +119,18 @@ export async function POST(req: NextRequest) {
       checkIn: bk.check_in_date,
       checkOut: bk.check_out_date,
       total: effTotal,
-      paid: bk.paid_amount ?? 0,
+      paid,
+      due: effTotal - paid,
     });
+
+    // Hard one-unit ceiling: never send >180 chars (Alpha bills per 180).
+    if (!smsWithinLimit(message)) {
+      await log("skipped", phone, message, {
+        reason: `message_over_${SMS_MAX_CHARS}_chars`,
+        length: [...message].length,
+      });
+      return NextResponse.json({ status: "skipped", reason: "message_too_long" });
+    }
 
     const result = await provider.send(phone, message);
     await log(result.ok ? "sent" : "failed", phone, message, result.providerResponse);
