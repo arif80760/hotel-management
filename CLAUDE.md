@@ -38,12 +38,21 @@ Last updated: 2026-08-19 (rev 34)
 
 > **rev 34 (2026-08-19)** — August hardening + three features + the AI assistant. All SQL applied LIVE first, then recorded (see Migration History).
 > **Checkout balance guard:** `assert_checkout_allowed(p_booking_id, p_override, p_booking_room_id)` — SECURITY DEFINER, due = total + extra − additional_discount − paid (early deduction is INSIDE total; never subtract again), fail-closed on NULL `auth.uid()`, admin-only override with mandatory recorded reason. In `checkout_booking` it runs AFTER the 3.6 discount write (deliberate — see Known Behaviour); in `checkout_booking_room` it passes the room id so INTERMEDIATE rooms of a multi-room staged stay pass (guest settles at final departure, BK-1373) while the LAST active room is fully guarded. The old two-arg overload is dropped.
-> **Nights integrity (BK-1400):** client `calcNights` noon-anchored + toISODate-normalised (a display-format operand had eaten one night in Dhaka); `create_booking_with_rooms` now DERIVES nights from the dates (client 'nights' key ignored; total checked against rate × derived nights; span guard). ৳6,200 of real post-launch underbilling found (4 bookings, each short exactly one night); 11 pre-launch test rows left alone. RESIDUAL GAPS: `add_room_to_booking` still trusts p_nights; the edit flow writes nights via direct updates.
+> **Nights integrity (BK-1400):** client `calcNights` noon-anchored + toISODate-normalised (a display-format operand had eaten one night in Dhaka); `create_booking_with_rooms` now DERIVES nights from the dates (client 'nights' key ignored; total checked against rate × derived nights; span guard). ৳6,200 of real post-launch underbilling found (4 bookings, each short exactly one night); 11 pre-launch test rows left alone. RESIDUAL GAP: `add_room_to_booking` still trusts p_nights (the edit-flow gap is closed as of rev 35 — `apply_booking_room_changes` derives nights server-side).
 > **P&L 'adjustment' fix (URGENT, GM-facing):** `expense_categories.kind` has exactly THREE live values — see the Expense Kinds rule below. The P&L's old two-way else-bucket had counted the ৳510,849 Software Test Data corrections as operating (showing an Aug loss of ৳150k where there was a ৳360k profit). ProfitLossClient + Cashbook tiles now whitelist; `ExpenseCategoryKind` type widened; the Manage Categories kind dropdown is HIDDEN for adjustment categories (one stray click would have reclassified them).
 > **AI assistant** (`/assistant`, all roles; sidebar under Front Desk) — see the AI Assistant rule section below for the architecture. Model+prompt in `app/api/assistant/route.ts`; staff-safe tools `tools.ts`; admin financial tools `financialTools.ts`; dynamic SQL `queryTool.ts`. NDJSON streaming with start/ping heartbeats (Vercel 504 class); keep-warm GET + Vercel cron + `.github/workflows/keep-warm.yml` (needs repo var ASSISTANT_PING_URL).
 > **Monthly Owner Report** (`/accounts/monthly-report/[month]` + `/accounts/monthly-reports` picker, admin): printable per-month occupancy (active-room denominator), collections/refunds, three-kind expense split, dues movement (current-values basis, footnoted), MoM deltas; standalone print route in AppShell regex.
 > **Rate calendar** (`rate_periods` + `/rooms/rate-calendar` admin UI + booking-form prefill): a period changes ONLY the prefilled rate at room-selection time — manual entry > period covering check-in > category default; min-rate floor and server RPCs untouched; existing bookings never recalculate. FK on room_categories(slug) physically locks slugs wherever periods reference them. 23P01 = overlap (create/update/reactivate).
-> **Booking confirmation SMS** (dormant until SMS_API_KEY exists): `lib/sms.ts` provider adapter (Alpha SMS / sms.bd, endpoint verified 2026-08-19: POST api.sms.net.bd/sendsms, error===0 = sent); fire-and-forget from `HotelContext.createBooking` (can never fail/delay a booking); outcomes + Unicode segment counts in `sms_log`; "Resend SMS" row action. OPEN DECISION: template ships with Latin digits at 42.8% Bangla — literal BTRC ≥70% needs Bangla numerals for dates/amounts (~73%, still 3 segments) or 5-segment padding.
+> **Booking confirmation SMS** (dormant until SMS_API_KEY exists): `lib/sms.ts` provider adapter (Alpha SMS / sms.bd, endpoint verified 2026-08-19: POST api.sms.net.bd/sendsms, error===0 = sent); fire-and-forget from `HotelContext.createBooking` (can never fail/delay a booking); "Resend SMS" row action. TEMPLATE (retuned 2026-08-19 after Alpha confirmed billing: 180 chars/unit at Tk0.64): English GSM-safe only ("Tk" never ৳ — one Unicode char flips the whole message to UCS-2); `gsmSafeName` transliterates/strips to ASCII, caps at 12 chars, falls back to "Guest"; Due field uses the canonical true-due formula and is omitted when ≤ 0; hard `SMS_MAX_CHARS=180` — an over-length message is never sent (logged as skipped). `sms_log.segments` stores UNITS by the 180-char rule so the log matches billing. ONE confirmation SMS per booking: route checks sms_log for an existing 'sent' row (skip reason `already_sent`), backstopped by partial unique index `sms_log_one_sent_per_booking` — unbypassable at the DB level; failed/skipped attempts can repeat freely. OPEN REGULATORY QUESTION (deliberately traded for billing): BTRC prefers ≥70% Bangla content — the English template doesn't meet it; revisit if BTRC enforcement ever materialises (Bangla numerals route existed at ~73% / 3 units).
+
+> **rev 35 (2026-08-20)** — Edit-flow boundary + checkout departure dates. Investigation first: 13 post-launch overlap pairs, TWO mechanisms — (1) late-pressed checkouts stamping press-day as actual_checkout_date (10 pairs); (2) edit-flow back-dating over completed stays (3 pairs; the old client-only check filtered confirmed/checked_in and ignored actual_checkout_date). Blast radius: 53 late-stamped rows / 39 bookings, ZERO nights/refund damage — deliberately NOT corrected.
+> **`apply_booking_room_changes(p_booking_id, p_changes jsonb)`** is now THE edit-flow boundary (SECURITY INVOKER; `updateBooking` Step 4 routes through it; the client overlap check is UX pre-validation only). Guard = create-RPC semantics (half-open `[)` ranges, `COALESCE(actual_checkout_date, check_out_date)`) PLUS completed statuses checked_out/checked_out_early; cancelled/no_show never block. Nights derived server-side: active rows = span; completed rows RECOMPUTED fact-first — `nights = GREATEST(1, LEAST(actual, new_out) − new_in)`, `early = span − nights` — so "nights = nights actually stayed" holds even when check-in is the corrected date (reduces exactly to the checkout RPCs' expression when check-in is unchanged). `update_booking_total` + trg_sync_payment_status + booking-status re-sync run inside the RPC, atomically; the phantom-booking guard is now `chk_paid_not_exceed_total` aborting the whole edit. An edit never auto-refunds.
+> **Departure-date picker + Dhaka clamp:** both checkout modals (BookingsClient booking-level AND per-room, FrontDeskClient) let staff pick the actual departure date — defaults to LOCAL today, bounded [latest room check-in, today]; the picked date drives the deduction preview and `p_actual_checkout_date`. Server backstop in BOTH checkout RPCs: actual clamped to `GREATEST(check_in, LEAST(actual, (now() AT TIME ZONE 'Asia/Dhaka')::date))`. **NEVER raw `current_date` here** — it follows the session timezone (UTC on Supabase), so between 00:00 and 06:00 Dhaka it reads "yesterday" and would rewind a legitimate 2am checkout, firing a phantom early deduction + auto-refund. Same class of bug existed client-side: `new Date().toISOString()` is UTC — use `localTodayISO()` from `lib/checkoutUtils` for any calendar-date stamp.
+> **Room Analytics launch-date floor:** date presets floor at `LAUNCH_DATE = "2026-07-30"` ("from live operation" note shown); CUSTOM ranges are exempt (deliberate — pre-launch inspection stays possible). Pre-launch test data has stacked overlaps (up to 6 simultaneous bookings per room-night) that inflate occupancy — displayed occupancy is capped at 100% with a ⚠ marker instead of showing >100%.
+
+> **rev 36 (2026-08-20)** — RLS hardening + DB-side negative-balance guard. Both applied live first, verified, then recorded.
+> **CORRECTION to the standing RLS picture:** the long-carried claim that staff tokens could read `account_transactions` directly was **never true** — the ledger has had admin-only policies on ALL FOUR verbs, `account_balances` is a `security_invoker` VIEW inheriting them (staff get zero rows), `accounts` is SELECT-admin-only with writes denied, and `loans` is admin-only throughout. The rev 23/25/27 "broad role-based RLS hardening remains" follow-ups are superseded by this audit: the real staff-token gaps were **payments UPDATE**, **refunds UPDATE**, **day_closes INSERT**, **expense_categories writes** (kind reclassification — the P&L-poisoning class), and **guests DELETE** — all now admin-only (`2026-08-20-rls-hardening.sql`), plus anon grants revoked wholesale and TRUNCATE/TRIGGER/REFERENCES revoked from authenticated (TRUNCATE ignores RLS). Payments/refunds INSERT stay open: recordPayment inserts payments at the desk, and `cancel_booking_room` is SECURITY INVOKER — it inserts refunds in the caller's context. The assistant is structurally unaffected (v_* views run with owner rights; grants remain the boundary) — smoke-verified post-apply. STILL OPEN: same write-lock for `expense_items` + `revenue_categories`; and a KNOWN REGRESSION — `deny_refund` is SECURITY INVOKER so the un-gated Deny button in the Timeline modal is now a silent no-op for staff while Mark Disbursed (`disburse_refund`, SECURITY DEFINER) still works; fix = ALTER FUNCTION SECURITY DEFINER for parity, or admin-gate both buttons (decision pending).
+> **Negative-balance guard:** `trg_assert_no_negative_balance` BEFORE INSERT on `account_transactions` (`fn_assert_no_negative_balance`, SECURITY DEFINER — must see all rows regardless of invoker RLS). Balances are DERIVED (no stored column) — the guard uses the exact `account_balances` view expression so they can never disagree; `FOR UPDATE` on the accounts row serializes concurrent outflows. Fires only on outflows (`from_account_id` set), so the day-close carry-forward path (collections = inflows) is a no-op by construction. Signed-off consequence: a checkout auto-refund now FAILS if Cash in Hand can't cover it, instead of driving cash negative. Known non-coverage: soft-deleting an old inflow can push a balance negative post-hoc (window limited by the immutability trigger). Probe-verified: ৳123,456 out of Bank (balance ৳0) → "Insufficient balance in Bank: balance ৳0.00, attempted ৳123456.00, shortfall ৳123456.00". Corrections: see the DISABLE TRIGGER runbook below.
 
 ### Role Permissions
 | Action | staff | admin |
@@ -348,6 +357,38 @@ cd /Users/arif80760/hotel-management &&
 # SMS_SENDER_ID=...                  (optional approved sender id)
 ```
 
+### Runbook — resetting the `assistant_login` password
+Three places must agree or `query_hotel_data` breaks: (1) the DB role —
+`ALTER ROLE assistant_login WITH PASSWORD '...'` in the SQL editor;
+(2) `ASSISTANT_DB_URL` in `.env.local`; (3) the same var in Vercel
+(Project → Settings → Environment Variables, then redeploy). Password
+must be **letters+digits only** — special characters break the
+connection-string parsing (bitten once). After ANY reset, expect the
+transaction pooler to serve **one stale-auth failure** (cached
+credentials) — retry once before diagnosing; a second failure means the
+three places genuinely disagree. When editing `.env.local` by script,
+beware appending without a trailing newline — `ASSISTANT_DB_URL` once
+glued itself onto the `SUPABASE_SERVICE_ROLE_KEY` line.
+
+### Runbook — corrections past the negative-balance guard
+`trg_assert_no_negative_balance` blocks any `account_transactions`
+INSERT that would take the source account negative. A correction that
+must transiently overdraw (e.g. re-sequencing entries) goes through
+DISABLE TRIGGER **inside an explicit transaction** — a crash or
+ROLLBACK re-enables the trigger automatically, so it can never be
+left off:
+```sql
+BEGIN;
+ALTER TABLE public.account_transactions
+  DISABLE TRIGGER trg_assert_no_negative_balance;
+-- corrective INSERTs here
+ALTER TABLE public.account_transactions
+  ENABLE TRIGGER trg_assert_no_negative_balance;
+COMMIT;
+```
+The ALTER takes a brief ACCESS EXCLUSIVE lock — a non-issue on a
+single-desk system. Never `DISABLE TRIGGER` outside a transaction.
+
 ### Database Migrations (manual)
 1. Open Supabase Dashboard → SQL Editor → New query
 2. Paste the SQL from `sql/migrations/*.sql`
@@ -410,6 +451,11 @@ cd /Users/arif80760/hotel-management &&
 | 2026-08-18 | `2026-08-18-assistant-query-views.sql` | Nine rule-encoding v_* views + NOLOGIN roles assistant_ro / assistant_staff_ro (grants = the assistant query boundary) | ✅ Applied |
 | 2026-08-19 | `2026-08-19-rate-periods.sql` | `rate_periods` (seasonal rates; per-category EXCLUDE over inclusive daterange, active rows only; FK LOCKS category slugs) | ✅ Applied |
 | 2026-08-19 | `2026-08-19-sms-log.sql` | `sms_log` (booking confirmation SMS outcomes; service-role writes only) | ✅ Applied |
+| 2026-08-19 | `2026-08-19-sms-one-sent-per-booking.sql` | Partial unique index `sms_log_one_sent_per_booking` — ONE 'sent' row per booking, DB-level backstop for the route's already_sent check | ✅ Applied |
+| 2026-08-20 | `2026-08-20-apply-booking-room-changes.sql` | `apply_booking_room_changes` — edit-flow boundary: atomic overlap guard (completed statuses + COALESCE(actual)), server-derived nights (fact-first recompute), total + status re-sync | ✅ Applied |
+| 2026-08-20 | `2026-08-20-checkout-dhaka-clamp.sql` | Both checkout RPCs clamp actual_checkout_date to [check_in, Dhaka-local today] — `(now() AT TIME ZONE 'Asia/Dhaka')::date`, never UTC current_date | ✅ Applied |
+| 2026-08-20 | `2026-08-20-rls-hardening.sql` | Staff-token write surface closed: payments/refunds UPDATE, day_closes INSERT, expense_categories writes, guests DELETE → admin-only; anon grants revoked; TRUNCATE/TRIGGER/REFERENCES revoked from authenticated | ✅ Applied |
+| 2026-08-20 | `2026-08-20-negative-balance-trigger.sql` | `trg_assert_no_negative_balance` BEFORE INSERT on account_transactions — no account balance may go negative (fail-closed, view-identical sum, per-account FOR UPDATE serialization) | ✅ Applied |
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
 ---
