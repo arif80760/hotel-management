@@ -77,8 +77,16 @@ export async function POST(req: NextRequest) {
 
     const guest = embedded(bk.guests as { name: string; phone: string } | { name: string; phone: string }[] | null);
 
-    const log = async (status: "sent" | "failed" | "skipped", phone: string, message: string, providerResponse: unknown) => {
-      const { error } = await adminClient.from("sms_log").insert({
+    // Every log outcome is returned to the caller (log_id / log_error) so a
+    // failed insert is VISIBLE in the response, not just in server logs —
+    // added 2026-08-19 after a confirmed-delivered resend left no row.
+    const log = async (
+      status: "sent" | "failed" | "skipped",
+      phone: string,
+      message: string,
+      providerResponse: unknown,
+    ): Promise<{ log_id?: string; log_error?: string }> => {
+      const { data, error } = await adminClient.from("sms_log").insert({
         booking_id: bk.id,
         phone,
         message,
@@ -86,24 +94,33 @@ export async function POST(req: NextRequest) {
         segments: message ? smsUnits(message) : 1,
         status,
         provider_response: providerResponse ?? null,
-      });
-      if (error) console.error("[sms] sms_log insert failed:", error.message);
+      }).select("id").single();
+      if (error) {
+        // House convention: log every PostgrestError field individually.
+        console.error("[sms] sms_log insert FAILED:",
+          "message:", error.message, "| details:", error.details,
+          "| hint:", error.hint, "| code:", error.code);
+        return { log_error: error.message || `insert failed (code ${error.code})` };
+      }
+      return { log_id: data.id as string };
     };
 
     // ── Skip guards ──
     const provider = getSmsProvider();
     if (!provider) {
       // Nothing sends until env keys exist. Manual resends leave a trace.
-      if (isResend) await log("skipped", guest?.phone ?? "—", "", { reason: "not_configured — SMS_API_KEY missing" });
-      return NextResponse.json({ status: "skipped", reason: "not_configured" });
+      const l = isResend ? await log("skipped", guest?.phone ?? "-", "", { reason: "not_configured — SMS_API_KEY missing" }) : {};
+      return NextResponse.json({ status: "skipped", reason: "not_configured", ...l });
     }
     if ((bk.total_guests ?? 0) === 0) {
-      return NextResponse.json({ status: "skipped", reason: "zero_guest_booking" });
+      // Manual resends log every skip — the desk must see why nothing sent.
+      const l = isResend ? await log("skipped", guest?.phone ?? "-", "", { reason: "zero_guest_booking" }) : {};
+      return NextResponse.json({ status: "skipped", reason: "zero_guest_booking", ...l });
     }
     const phone = guest?.phone ? normalizeBdPhone(guest.phone) : null;
     if (!phone) {
-      await log("skipped", guest?.phone ?? "—", "", { reason: "invalid_or_missing_phone" });
-      return NextResponse.json({ status: "skipped", reason: "invalid_phone" });
+      const l = await log("skipped", guest?.phone ?? "-", "", { reason: "invalid_or_missing_phone" });
+      return NextResponse.json({ status: "skipped", reason: "invalid_phone", ...l });
     }
 
     // ── Compose + send + log ──
@@ -125,17 +142,17 @@ export async function POST(req: NextRequest) {
 
     // Hard one-unit ceiling: never send >180 chars (Alpha bills per 180).
     if (!smsWithinLimit(message)) {
-      await log("skipped", phone, message, {
+      const l = await log("skipped", phone, message, {
         reason: `message_over_${SMS_MAX_CHARS}_chars`,
         length: [...message].length,
       });
-      return NextResponse.json({ status: "skipped", reason: "message_too_long" });
+      return NextResponse.json({ status: "skipped", reason: "message_too_long", ...l });
     }
 
     const result = await provider.send(phone, message);
-    await log(result.ok ? "sent" : "failed", phone, message, result.providerResponse);
+    const l = await log(result.ok ? "sent" : "failed", phone, message, result.providerResponse);
 
-    return NextResponse.json({ status: result.ok ? "sent" : "failed" });
+    return NextResponse.json({ status: result.ok ? "sent" : "failed", ...l });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[sms] route error:", message);
