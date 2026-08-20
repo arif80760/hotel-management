@@ -931,6 +931,7 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (!s || s === "sending") return null;
     if (s === "sent") return "SMS sent ✓";
     if (s === "skipped:not_configured") return "SMS not configured yet";
+    if (s === "skipped:already_sent") return "Already sent — one SMS per booking";
     if (s === "skipped:invalid_phone") return "No valid phone on booking";
     if (s.startsWith("skipped")) return "SMS skipped";
     return "SMS failed — see log";

@@ -105,6 +105,25 @@ export async function POST(req: NextRequest) {
       return { log_id: data.id as string };
     };
 
+    // ── ONE confirmation SMS per booking (2026-08-19) ──
+    // A booking with an existing status='sent' row never sends again — from
+    // either path. Backed by the partial unique index
+    // sms_log_one_sent_per_booking (booking_id WHERE status='sent'), so the
+    // rule can't be bypassed even if this check is raced or removed; a raced
+    // duplicate surfaces as a 23505 on the log insert.
+    const { data: alreadySent } = await adminClient
+      .from("sms_log").select("id, created_at")
+      .eq("booking_id", bk.id).eq("status", "sent")
+      .limit(1).maybeSingle();
+    if (alreadySent) {
+      const l = await log("skipped", guest?.phone ?? "-", "", {
+        reason: "already_sent",
+        sent_log_id: alreadySent.id,
+        sent_at: alreadySent.created_at,
+      });
+      return NextResponse.json({ status: "skipped", reason: "already_sent", ...l });
+    }
+
     // ── Skip guards ──
     const provider = getSmsProvider();
     if (!provider) {
