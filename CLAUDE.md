@@ -495,7 +495,7 @@ outside a transaction.
 | 2026-08-20 | `2026-08-20-rls-hardening-category-tables.sql` | expense_items + revenue_categories writes → admin-only (same pattern); duplicate SELECT-policy cleanup incl. the first block's expense_categories duplicate | ✅ Applied |
 | 2026-08-20 | `2026-08-20-deny-refund-zero-row-guard.sql` | deny_refund raises on zero-row UPDATE (RLS-silent-write class, reference implementation); SECURITY INVOKER kept — UI gates refund decisions admin-only | ✅ Applied |
 | 2026-08-20 | `2026-08-20-cancel-room-checkout-guard.sql` | cancel_booking_room early-departure branch: balance guard (per-room scope) + check_out_date stomp removed + Dhaka clamp (BK-1425 walkout door 1) | ✅ Applied |
-| 2026-08-20 | `2026-08-20-checkout-status-trigger.sql` | trg_guard_checkout_status: active→checked_out(_early) requires due ≤ 0 or override_checkout (door 4 backstop; override-only bypass) | ⏳ Apply AFTER the checkoutWithOverride reorder deploys |
+| 2026-08-20 | `2026-08-20-checkout-status-trigger.sql` | trg_guard_checkout_status: active→checked_out(_early) requires due ≤ 0 or override_checkout (door 4 backstop; override-only bypass) | ✅ Applied |
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
 ---

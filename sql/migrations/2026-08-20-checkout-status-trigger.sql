@@ -2,11 +2,17 @@
 -- 2026-08-20-checkout-status-trigger.sql
 -- trg_guard_checkout_status — invariant backstop on bookings.status.
 --
--- ⚠ APPLY ORDER: apply ONLY AFTER the checkoutWithOverride reorder
--- (override fields persisted BEFORE the RPC) is DEPLOYED on Vercel.
--- Before that deploy, admin overrides with a due would be blocked:
--- the old client stamped override_checkout only after the status
--- flip. Status: ⏳ until Arif confirms live apply post-deploy.
+-- APPLY ORDER (honoured): applied ONLY AFTER the checkoutWithOverride
+-- reorder (override fields persisted BEFORE the RPC, commit 5eab531)
+-- deployed on Vercel — before that deploy, admin overrides with a due
+-- would have been blocked (the old client stamped override_checkout
+-- only after the status flip).
+--
+-- RECORD OF LIVE STATE — applied in the Supabase SQL editor on
+-- 2026-08-20 post-deploy. Probe verified same day: ROLLBACK-wrapped
+-- bare UPDATE on due-carrying BK-1331 failed with "Cannot check out
+-- BK-1331: outstanding balance 22500.00 — admin override required."
+-- (fn_guard_checkout_status line 11); tgenabled='O'.
 --
 -- WHY (BK-1425, door 4 of the checkout-route inventory): RLS allows
 -- authenticated UPDATE on bookings/booking_rooms status, so a bare
