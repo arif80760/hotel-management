@@ -51,7 +51,7 @@ Last updated: 2026-08-19 (rev 34)
 > **Room Analytics launch-date floor:** date presets floor at `LAUNCH_DATE = "2026-07-30"` ("from live operation" note shown); CUSTOM ranges are exempt (deliberate — pre-launch inspection stays possible). Pre-launch test data has stacked overlaps (up to 6 simultaneous bookings per room-night) that inflate occupancy — displayed occupancy is capped at 100% with a ⚠ marker instead of showing >100%.
 
 > **rev 36 (2026-08-20)** — RLS hardening + DB-side negative-balance guard. Both applied live first, verified, then recorded.
-> **CORRECTION to the standing RLS picture:** the long-carried claim that staff tokens could read `account_transactions` directly was **never true** — the ledger has had admin-only policies on ALL FOUR verbs, `account_balances` is a `security_invoker` VIEW inheriting them (staff get zero rows), `accounts` is SELECT-admin-only with writes denied, and `loans` is admin-only throughout. The rev 23/25/27 "broad role-based RLS hardening remains" follow-ups are superseded by this audit: the real staff-token gaps were **payments UPDATE**, **refunds UPDATE**, **day_closes INSERT**, **expense_categories writes** (kind reclassification — the P&L-poisoning class), and **guests DELETE** — all now admin-only (`2026-08-20-rls-hardening.sql`), plus anon grants revoked wholesale and TRUNCATE/TRIGGER/REFERENCES revoked from authenticated (TRUNCATE ignores RLS). Payments/refunds INSERT stay open: recordPayment inserts payments at the desk, and `cancel_booking_room` is SECURITY INVOKER — it inserts refunds in the caller's context. The assistant is structurally unaffected (v_* views run with owner rights; grants remain the boundary) — smoke-verified post-apply. `expense_items` + `revenue_categories` got the same write-lock the same day (`2026-08-20-rls-hardening-category-tables.sql`, incl. duplicate-SELECT-policy cleanup). STILL OPEN: a KNOWN REGRESSION — `deny_refund` is SECURITY INVOKER so the un-gated Deny button in the Timeline modal is now a silent no-op for staff while Mark Disbursed (`disburse_refund`, SECURITY DEFINER) still works; fix = ALTER FUNCTION SECURITY DEFINER for parity, or admin-gate both buttons (decision pending).
+> **CORRECTION to the standing RLS picture:** the long-carried claim that staff tokens could read `account_transactions` directly was **never true** — the ledger has had admin-only policies on ALL FOUR verbs, `account_balances` is a `security_invoker` VIEW inheriting them (staff get zero rows), `accounts` is SELECT-admin-only with writes denied, and `loans` is admin-only throughout. The rev 23/25/27 "broad role-based RLS hardening remains" follow-ups are superseded by this audit: the real staff-token gaps were **payments UPDATE**, **refunds UPDATE**, **day_closes INSERT**, **expense_categories writes** (kind reclassification — the P&L-poisoning class), and **guests DELETE** — all now admin-only (`2026-08-20-rls-hardening.sql`), plus anon grants revoked wholesale and TRUNCATE/TRIGGER/REFERENCES revoked from authenticated (TRUNCATE ignores RLS). Payments/refunds INSERT stay open: recordPayment inserts payments at the desk, and `cancel_booking_room` is SECURITY INVOKER — it inserts refunds in the caller's context. The assistant is structurally unaffected (v_* views run with owner rights; grants remain the boundary) — smoke-verified post-apply. `expense_items` + `revenue_categories` got the same write-lock the same day (`2026-08-20-rls-hardening-category-tables.sql`, incl. duplicate-SELECT-policy cleanup). The deny_refund regression was RESOLVED the tighten way (Arif, 2026-08-20): both Deny and Mark Disbursed buttons are admin-gated in the Timeline modal (refund decisions = admin actions, matching the admin-only refunds UPDATE policy), and `deny_refund` now raises on a zero-row UPDATE instead of silently succeeding (`2026-08-20-deny-refund-zero-row-guard.sql`) — see the "RLS-blocked writes report SUCCESS" rule. `disburse_refund` keeps its live-only SECURITY DEFINER flag DELIBERATELY (no migration ever set it; circumstantially the fix for the May issue #19 silent failures) — staff can no longer reach it from the UI, and stripping DEFINER without need risks re-breaking admin flows.
 > **Negative-balance guard:** `trg_assert_no_negative_balance` BEFORE INSERT on `account_transactions` (`fn_assert_no_negative_balance`, SECURITY DEFINER — must see all rows regardless of invoker RLS). Balances are DERIVED (no stored column) — the guard uses the exact `account_balances` view expression so they can never disagree; `FOR UPDATE` on the accounts row serializes concurrent outflows. Fires only on outflows (`from_account_id` set), so the day-close carry-forward path (collections = inflows) is a no-op by construction. Signed-off consequence: a checkout auto-refund now FAILS if Cash in Hand can't cover it, instead of driving cash negative. Known non-coverage: soft-deleting an old inflow can push a balance negative post-hoc (window limited by the immutability trigger). Probe-verified: ৳123,456 out of Bank (balance ৳0) → "Insufficient balance in Bank: balance ৳0.00, attempted ৳123456.00, shortfall ৳123456.00". Corrections: see the DISABLE TRIGGER runbook below.
 
 ### Role Permissions
@@ -156,6 +156,24 @@ Pages that must print cleanly are excluded from Sidebar + TopBar via `isStandalo
 ---
 
 ## 7. Important Rules
+
+### RLS-blocked writes report SUCCESS — check this on EVERY policy tightening
+Postgres RLS does not reject a blocked UPDATE/DELETE — it silently filters
+the rows away, so the statement affects zero rows and **returns success**.
+Any SECURITY INVOKER write path (RPC or direct PostgREST call) against a
+newly-tightened table therefore degrades to a silent no-op for the roles
+you just excluded — the worst failure shape, because everything reports
+fine. **Hit three times:** disburse_refund silent failures when the
+payments UPDATE policy was missing (May, issue #19 — likely why its live
+DEFINER flag exists); the SMS resend that delivered but left no log row
+(2026-08-19); deny_refund becoming a staff no-op under the admin-only
+refunds UPDATE policy (2026-08-20). **The rule:** when tightening ANY
+policy, enumerate every SECURITY INVOKER write path touching that table
+(plpgsql UPDATEs inside RPCs included) and make each one check its row
+count — `IF NOT FOUND THEN RAISE` after UPDATE/DELETE in plpgsql,
+`.select()`-and-verify on PostgREST writes — BEFORE calling the
+tightening done. deny_refund carries the reference implementation
+(`2026-08-20-deny-refund-zero-row-guard.sql`).
 
 ### Never Break Existing Flow
 - Do not change the booking creation, check-in, check-out, payment, or override flows unless explicitly asked
@@ -457,6 +475,7 @@ single-desk system. Never `DISABLE TRIGGER` outside a transaction.
 | 2026-08-20 | `2026-08-20-rls-hardening.sql` | Staff-token write surface closed: payments/refunds UPDATE, day_closes INSERT, expense_categories writes, guests DELETE → admin-only; anon grants revoked; TRUNCATE/TRIGGER/REFERENCES revoked from authenticated | ✅ Applied |
 | 2026-08-20 | `2026-08-20-negative-balance-trigger.sql` | `trg_assert_no_negative_balance` BEFORE INSERT on account_transactions — no account balance may go negative (fail-closed, view-identical sum, per-account FOR UPDATE serialization) | ✅ Applied |
 | 2026-08-20 | `2026-08-20-rls-hardening-category-tables.sql` | expense_items + revenue_categories writes → admin-only (same pattern); duplicate SELECT-policy cleanup incl. the first block's expense_categories duplicate | ✅ Applied |
+| 2026-08-20 | `2026-08-20-deny-refund-zero-row-guard.sql` | deny_refund raises on zero-row UPDATE (RLS-silent-write class, reference implementation); SECURITY INVOKER kept — UI gates refund decisions admin-only | ✅ Applied |
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
 ---

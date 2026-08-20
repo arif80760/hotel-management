@@ -6872,8 +6872,14 @@ export default function BookingsClient({ initialRoom }: Props) {
                           {refund.status === "denied" && refund.notes && (
                             <p className="text-[10.5px] text-slate-400 italic">{refund.notes}</p>
                           )}
-                          {/* Action buttons — pending only */}
-                          {refund.status === "pending" && (
+                          {/* Action buttons — pending only, ADMIN only (2026-08-20):
+                              refund decisions are admin actions, matching the
+                              admin-only refunds UPDATE policy. deny_refund is
+                              SECURITY INVOKER (staff calls became silent no-ops
+                              under the policy — now also raises on zero rows);
+                              disburse_refund is SECURITY DEFINER and would still
+                              work for staff, so the gate here is the boundary. */}
+                          {isAdmin && refund.status === "pending" && (
                             <div className="flex items-center gap-1.5 pt-0.5">
                               <button
                                 type="button"
