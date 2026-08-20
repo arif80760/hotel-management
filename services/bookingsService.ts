@@ -1312,16 +1312,19 @@ export async function updateBookingStatus(
     return;
   }
 
-  // ── All other transitions: bare bookings UPDATE ───────────────────────────
-  // "Checked Out" / "Cancelled" arrive here only if invoked directly;
-  // the normal paths go through checkout_booking_room / cancel_booking_room
-  // which already cascade booking_rooms.status before this is called.
-  const { error } = await supabase
-    .from("bookings")
-    .update({ status: dbStatus })
-    .eq("booking_ref", id);
-
-  if (error) throw error;
+  // ── All other transitions: REFUSED (2026-08-20, BK-1425 incident) ─────────
+  // The old bare bookings UPDATE here was door 4 in the checkout-route
+  // inventory: a status write that bypassed every guard. Checkout, early
+  // departure, cancel, and no-show each have a dedicated guarded RPC — this
+  // function serves ONLY the Confirmed ↔ Checked In pair above. Throwing
+  // (not silently succeeding) is deliberate: see the "RLS-blocked writes
+  // report SUCCESS" rule — a swallowed transition here would be the same
+  // failure shape. The DB-side backstop is trg_guard_checkout_status.
+  throw new Error(
+    `[updateBookingStatus] Refusing bare status write to "${newStatus}" — ` +
+    `use the dedicated guarded path (checkout_booking, checkout_booking_room, ` +
+    `cancel_booking_room, or mark_booking_no_show).`
+  );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1710,6 +1713,36 @@ export async function checkoutWithOverride(
   const bookingUUID = (bookingRow as { id: string }).id;
   console.log("[checkoutWithOverride] Step 0 — resolved UUID:", bookingUUID);
 
+  // ── Step 0.5 — Persist override audit BEFORE the RPC (2026-08-20) ─────────
+  // trg_guard_checkout_status blocks any active→checked_out(_early) status
+  // flip while true due > 0 unless bookings.override_checkout is ALREADY
+  // true — so the audit record must exist before the RPC flips the status.
+  // trg_enforce_override_is_admin validates this flip server-side (admin
+  // only, by/at stamped there). If the RPC then fails, the stamp stays —
+  // deliberate (Arif, 2026-08-20): a stale override stamp is visible and
+  // true (an admin DID authorize release), unlike a silently blocked one.
+  const { error: ovErr } = await supabase
+    .from("bookings")
+    .update({
+      override_checkout: true,
+      override_reason:   overrideReason.trim(),   // non-empty — validated above and in the modal
+      override_by:       overrideBy,
+      override_at:       new Date().toISOString(),
+    })
+    .eq("id", bookingUUID);
+
+  if (ovErr) {
+    console.error("──────────── [checkoutWithOverride] Step 0.5 — override-audit UPDATE FAILED ────────────");
+    console.error("  message:", ovErr.message, "| details:", ovErr.details,
+      "| hint:", ovErr.hint, "| code:", ovErr.code);
+    console.error("────────────────────────────────────────────────────────────────────────────────────────");
+    throw new Error(
+      `[checkoutWithOverride] Could not record the override before checkout — ${ovErr.message}` +
+      (ovErr.code ? ` (code: ${ovErr.code})` : "")
+    );
+  }
+  console.log("[checkoutWithOverride] Step 0.5 — override audit persisted for:", id);
+
   // ── Step 1 — checkout_booking RPC ─────────────────────────────────────────
   // Atomically sets ALL active booking_rooms.status = checked_out,
   // ALL associated rooms.status = cleaning, recomputes total, and
@@ -1754,23 +1787,18 @@ export async function checkoutWithOverride(
 
   console.log("[checkoutWithOverride] Step 1 — RPC succeeded for booking_ref:", id);
 
-  // ── Step 2 — Update bookings for override audit + fields RPC doesn't own ───
-  // Override audit fields are always written (override_checkout, override_reason,
-  // override_by, override_at). Extra charges and additional discount are conditional.
-  const updatePayload: Record<string, unknown> = {
-    override_checkout: true,
-    override_reason:   overrideReason.trim(),   // non-empty — validated above and in the modal
-    override_by:       overrideBy,
-    override_at:       new Date().toISOString(),
-  };
+  // ── Step 2 — Update bookings for fields the RPC doesn't own ──────────────
+  // Override audit moved to Step 0.5 (must precede the status flip — see
+  // trg_guard_checkout_status note there). Only extra charges remain here;
+  // additional_discount_* is written inside checkout_booking RPC (step 3.6,
+  // #58b). Skipped entirely when there is no extra charge.
+  const updatePayload: Record<string, unknown> = {};
   if (extraChargeAmount && extraChargeAmount > 0) {
     updatePayload.extra_charge_amount = extraChargeAmount;
     updatePayload.extra_charge_reason = extraChargeReason || null;
   }
-  // additional_discount_* is now written inside checkout_booking RPC (step 3.6).
-  // Removed from updatePayload to avoid the chk_paid_not_exceed_total
-  // constraint violation that fired when discount was applied post-RPC (#58b).
 
+  if (Object.keys(updatePayload).length > 0) {
   console.log("[checkoutWithOverride] Step 2 — UPDATE bookings, booking_ref:", id, "| payload:", updatePayload);
 
   const { error, status, statusText } = await supabase
@@ -1807,6 +1835,7 @@ export async function checkoutWithOverride(
       (error.hint    ? ` | hint: ${error.hint}`        : "") +
       (error.details ? ` | details: ${error.details}`  : "")
     );
+  }
   }
 
   // ── Step 3 — INSERT booking_extra_charges (table row for invoice display) ──

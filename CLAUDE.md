@@ -54,6 +54,12 @@ Last updated: 2026-08-19 (rev 34)
 > **CORRECTION to the standing RLS picture:** the long-carried claim that staff tokens could read `account_transactions` directly was **never true** — the ledger has had admin-only policies on ALL FOUR verbs, `account_balances` is a `security_invoker` VIEW inheriting them (staff get zero rows), `accounts` is SELECT-admin-only with writes denied, and `loans` is admin-only throughout. The rev 23/25/27 "broad role-based RLS hardening remains" follow-ups are superseded by this audit: the real staff-token gaps were **payments UPDATE**, **refunds UPDATE**, **day_closes INSERT**, **expense_categories writes** (kind reclassification — the P&L-poisoning class), and **guests DELETE** — all now admin-only (`2026-08-20-rls-hardening.sql`), plus anon grants revoked wholesale and TRUNCATE/TRIGGER/REFERENCES revoked from authenticated (TRUNCATE ignores RLS). Payments/refunds INSERT stay open: recordPayment inserts payments at the desk, and `cancel_booking_room` is SECURITY INVOKER — it inserts refunds in the caller's context. The assistant is structurally unaffected (v_* views run with owner rights; grants remain the boundary) — smoke-verified post-apply. `expense_items` + `revenue_categories` got the same write-lock the same day (`2026-08-20-rls-hardening-category-tables.sql`, incl. duplicate-SELECT-policy cleanup). The deny_refund regression was RESOLVED the tighten way (Arif, 2026-08-20): both Deny and Mark Disbursed buttons are admin-gated in the Timeline modal (refund decisions = admin actions, matching the admin-only refunds UPDATE policy), and `deny_refund` now raises on a zero-row UPDATE instead of silently succeeding (`2026-08-20-deny-refund-zero-row-guard.sql`) — see the "RLS-blocked writes report SUCCESS" rule. `disburse_refund` keeps its live-only SECURITY DEFINER flag DELIBERATELY (no migration ever set it; circumstantially the fix for the May issue #19 silent failures) — staff can no longer reach it from the UI, and stripping DEFINER without need risks re-breaking admin flows.
 > **Negative-balance guard:** `trg_assert_no_negative_balance` BEFORE INSERT on `account_transactions` (`fn_assert_no_negative_balance`, SECURITY DEFINER — must see all rows regardless of invoker RLS). Balances are DERIVED (no stored column) — the guard uses the exact `account_balances` view expression so they can never disagree; `FOR UPDATE` on the accounts row serializes concurrent outflows. Fires only on outflows (`from_account_id` set), so the day-close carry-forward path (collections = inflows) is a no-op by construction. Signed-off consequence: a checkout auto-refund now FAILS if Cash in Hand can't cover it, instead of driving cash negative. Known non-coverage: soft-deleting an old inflow can push a balance negative post-hoc (window limited by the immutability trigger). Probe-verified: ৳123,456 out of Bank (balance ৳0) → "Insufficient balance in Bank: balance ৳0.00, attempted ৳123456.00, shortfall ৳123456.00". Corrections: see the DISABLE TRIGGER runbook below.
 
+> **rev 37 (2026-08-20)** — BK-1425 walkout incident: investigation + four-door closure. Guest walked out with the full ৳2000 due at 10:38 Dhaka via the per-room "early departure" action — `cancel_booking_room`'s `checked_out_early` branch was a checkout in disguise with NO `assert_checkout_allowed` (the guard went into both checkout RPCs in mid-August; this third door was never fitted). Same branch also STOMPED `check_out_date` with the actual date after computing the deduction against it — producing rows that look self-contradictory (early > 0 while actual == check_out_date; BK-1425's "inconsistency" was this artifact, billing itself correct). Isolation verified: 273 completed bookings since launch → BK-1425 is the ONLY positive-due no-override walkout (৳2000 → collection; write-off later as recorded admin discount if chasing fails); nine other stomp-signature rows are semantic-only and LEFT ALONE. Checkout-route inventory found FOUR doors; all now closed:
+> **1.** `cancel_booking_room` early-departure branch: guard added (per-room scope, staged-stay semantics), stomp removed (phase11-57 treatment — schedule preserved, only `actual_checkout_date` records departure), Dhaka clamp added (`2026-08-20-cancel-room-checkout-guard.sql`, probe-verified on BK-1438).
+> **2.** `trg_guard_checkout_status` on bookings: active→checked_out(_early) transition requires true due ≤ 0 OR `override_checkout` already true. INVARIANT, not provenance — catches bare UPDATEs and any future unguarded RPC. NO `is_admin()` bypass (an admin bare-update walkout with no recorded reason would be weaker than the override mechanism). On BOOKINGS only, deliberately NOT booking_rooms (room rows flip before the 3.6 discount write — a room-level trigger would re-introduce the pre-3.6 ordering problem; staged stays never flip the booking, so per-room semantics are preserved for free).
+> **3.** `checkoutWithOverride` reordered: override audit fields persisted BEFORE the RPC (Step 0.5) so the trigger sees `override_checkout=true` at flip time; `trg_enforce_override_is_admin` validates the flip. A stale stamp on a failed RPC is visible and true — accepted.
+> **4.** `updateBookingStatus` bare-UPDATE fallback DELETED — now throws for anything other than the Confirmed ↔ Checked In RPC pair (silent success there would be the RLS-silent-write failure shape).
+
 ### Role Permissions
 | Action | staff | admin |
 |---|---|---|
@@ -407,6 +413,18 @@ COMMIT;
 The ALTER takes a brief ACCESS EXCLUSIVE lock — a non-issue on a
 single-desk system. Never `DISABLE TRIGGER` outside a transaction.
 
+### Runbook — corrections past the checkout-status guard
+`trg_guard_checkout_status` blocks flipping an active booking to
+checked_out / checked_out_early while true due > 0 unless
+`override_checkout` is already true. For a legitimate manual fix
+(SQL editor / service role), either set the override first —
+`UPDATE bookings SET override_checkout = true, override_reason =
+'<why>', override_at = NOW() WHERE id = ...` — which leaves a
+truthful audit trail (preferred), or use the same
+transaction-wrapped DISABLE TRIGGER pattern as above with
+`trg_guard_checkout_status` on `public.bookings`. Never disable it
+outside a transaction.
+
 ### Database Migrations (manual)
 1. Open Supabase Dashboard → SQL Editor → New query
 2. Paste the SQL from `sql/migrations/*.sql`
@@ -476,6 +494,8 @@ single-desk system. Never `DISABLE TRIGGER` outside a transaction.
 | 2026-08-20 | `2026-08-20-negative-balance-trigger.sql` | `trg_assert_no_negative_balance` BEFORE INSERT on account_transactions — no account balance may go negative (fail-closed, view-identical sum, per-account FOR UPDATE serialization) | ✅ Applied |
 | 2026-08-20 | `2026-08-20-rls-hardening-category-tables.sql` | expense_items + revenue_categories writes → admin-only (same pattern); duplicate SELECT-policy cleanup incl. the first block's expense_categories duplicate | ✅ Applied |
 | 2026-08-20 | `2026-08-20-deny-refund-zero-row-guard.sql` | deny_refund raises on zero-row UPDATE (RLS-silent-write class, reference implementation); SECURITY INVOKER kept — UI gates refund decisions admin-only | ✅ Applied |
+| 2026-08-20 | `2026-08-20-cancel-room-checkout-guard.sql` | cancel_booking_room early-departure branch: balance guard (per-room scope) + check_out_date stomp removed + Dhaka clamp (BK-1425 walkout door 1) | ✅ Applied |
+| 2026-08-20 | `2026-08-20-checkout-status-trigger.sql` | trg_guard_checkout_status: active→checked_out(_early) requires due ≤ 0 or override_checkout (door 4 backstop; override-only bypass) | ⏳ Apply AFTER the checkoutWithOverride reorder deploys |
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
 ---
