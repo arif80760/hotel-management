@@ -820,16 +820,15 @@ export type Payment = {
  *
  * Steps:
  *   1. Fetch current booking (UUID, room_id, paid_amount, dates, status).
- *   2. Per-room overlap checks (for each room in changes.rooms[] that changed
- *      room or dates, excluding the current booking via .neq).
+ *   2. Per-room overlap pre-checks — UX-only fast path; mirrors the RPC guard
+ *      (completed statuses + COALESCE(actual)) but the RPC is the boundary.
  *   3. Build bookings UPDATE payload (booking-level fields only).
- *   4. If totalAmount changed: derive payment_status manually
- *      (fn_sync_payment_status fires on paid_amount changes only, not total_amount).
- *   5. Execute bookings UPDATE.
- *   5.5. Per-room UPDATE on booking_rooms rows (for each row in changes.rooms[]).
- *        Also cascades room status when room_id changes.
- *   6. Guest fields UPDATE if changed and guestId known.
- *   7. Re-fetch with all joins, return mapBooking().
+ *   4. Per-room changes via apply_booking_room_changes RPC (atomic: overlap
+ *      guard, server-derived nights, update_booking_total + payment_status
+ *      trigger, booking-status re-sync). Room-status cascades after commit.
+ *   7. Execute bookings UPDATE (booking-level fields, e.g. total_guests).
+ *   Then guest fields UPDATE if changed, additional-guests replace,
+ *   re-fetch with all joins, return mapBooking().
  */
 export async function updateBooking(
   bookingRef: string,
@@ -892,13 +891,20 @@ export async function updateBooking(
         ` (${targetRoomId}) | ${ciISO} → ${coISO} (excluding ${bookingRef})`
       );
 
+      // UX pre-validation ONLY — the boundary is the apply_booking_room_changes
+      // RPC (Step 4), whose guard runs atomically with the write. Mirrors the
+      // RPC's semantics: completed stays (checked_out / checked_out_early)
+      // block too, and a completed stay occupies through its ACTUAL checkout
+      // date, not the scheduled one — COALESCE(actual_checkout_date,
+      // check_out_date) expressed as a PostgREST .or() since the filter
+      // language has no COALESCE. cancelled / no_show never block.
       const { data: conflicts, error: conflictErr } = await supabase
         .from("booking_rooms")
-        .select("check_in_date, check_out_date, status, bookings!booking_id(booking_ref)")
+        .select("check_in_date, check_out_date, actual_checkout_date, status, bookings!booking_id(booking_ref)")
         .eq("room_id", targetRoomId)
-        .in("status", ["confirmed", "checked_in"])
+        .in("status", ["confirmed", "checked_in", "checked_out", "checked_out_early"])
         .lt("check_in_date", coISO)
-        .gt("check_out_date", ciISO)
+        .or(`and(actual_checkout_date.is.null,check_out_date.gt.${ciISO}),actual_checkout_date.gt.${ciISO}`)
         .neq("booking_id", current.id);    // ← exclude current booking by UUID
 
       if (conflictErr) {
@@ -911,9 +917,10 @@ export async function updateBooking(
       if (conflicts && conflicts.length > 0) {
         const c = conflicts[0];
         const cBookings = c.bookings as Array<{ booking_ref: string }>;
+        const coversUntil = c.actual_checkout_date ?? c.check_out_date;
         throw new Error(
           `Room ${roomChange.roomNumber} is unavailable for ${ciISO} – ${coISO}. ` +
-          `Booking ${cBookings[0]?.booking_ref ?? "unknown"} covers ${c.check_in_date} – ${c.check_out_date} (${c.status}).`
+          `Booking ${cBookings[0]?.booking_ref ?? "unknown"} covers ${c.check_in_date} – ${coversUntil} (${c.status}).`
         );
       }
 
@@ -927,17 +934,22 @@ export async function updateBooking(
   const bookingUpdate: Record<string, unknown> = {};
   if (changes.totalGuests !== undefined) bookingUpdate.total_guests = changes.totalGuests;
 
-  // ── Step 4 — Per-room booking_rooms UPDATEs ─────────────────────────────
-  // Runs BEFORE the bookings UPDATE (Step 7) so that Step 5's server-side
-  // recompute reads the already-committed per-room state.
-  //
-  // Phase 6: each EditRoomInput is matched to its booking_rooms row by id.
-  // If room_number changed, resolve the new room UUID and cascade room statuses.
-  //
-  // NOTE: These UPDATEs run sequentially without a transaction. A future
-  // update_booking_with_rooms() RPC will wrap them atomically. For now any
-  // partial failure is logged loudly but does not abort.
+  // ── Step 4 — Per-room changes via apply_booking_room_changes RPC ────────
+  // The RPC is the boundary (2026-08-20): the overlap guard (create-RPC
+  // semantics — half-open [) ranges, COALESCE(actual_checkout_date,
+  // check_out_date), completed statuses included), server-derived nights,
+  // update_booking_total, and the booking-status re-sync all run atomically
+  // in ONE statement — a guard rejection rolls back every row. Client-
+  // supplied nights are ignored by the server. Step 2 above is UX
+  // pre-validation only. This replaces the direct per-row UPDATEs that let
+  // the edit flow back-date rooms over completed stays (3 of the 13
+  // post-launch overlap pairs).
   if (changes.rooms && changes.rooms.length > 0) {
+    // One RPC payload entry per editable row; room-status cascades (a purely
+    // presentational rooms.status sync) run client-side AFTER the RPC commits.
+    const rpcChanges: Array<Record<string, unknown>> = [];
+    const cascades: Array<{ oldRoomId: string; newRoomId: string }> = [];
+
     for (const roomChange of changes.rooms) {
       // Resolve room UUID for this room_number.
       // maybeSingle() returns null (not an error) for 0 rows — gives a
@@ -989,132 +1001,103 @@ export async function updateBooking(
         continue;   // defense in depth — UI should have blocked locked rows
       }
 
-      const brPayload: Record<string, unknown> = {
-        room_id:        newRoomUUID,
-        room_category:  roomChange.roomCategory.toLowerCase(),
-        check_in_date:  roomChange.checkInISO,
-        check_out_date: roomChange.checkOutISO,
-        booking_rate:   roomChange.bookingRate,
-        // fixed_rate is NOT a booking_rooms column — lives on bookings only. Do not write.
-        // nights is a GENERATED column — not written
-      };
+      rpcChanges.push({
+        booking_room_id: roomChange.id,
+        room_id:         newRoomUUID,
+        check_in_date:   roomChange.checkInISO,
+        check_out_date:  roomChange.checkOutISO,
+        category:        roomChange.roomCategory.toLowerCase(),
+        rate:            roomChange.bookingRate,
+        // nights deliberately NOT sent — the RPC derives it and would ignore it
+      });
 
-      console.log("[updateBooking] Step 4 — UPDATE booking_rooms id:", roomChange.id,
-        "| payload:", brPayload);
-
-      const { error: brErr } = await supabase
-        .from("booking_rooms")
-        .update(brPayload)
-        .eq("id", roomChange.id)
-        .eq("booking_id", current.id);   // extra safety: scope to this booking
-
-      if (brErr) {
-        console.error("[updateBooking] Step 4 — UPDATE booking_rooms FAILED:",
-          brErr.message, "| row id:", roomChange.id);
-      } else {
-        console.log("[updateBooking] Step 4 — booking_rooms row updated:", roomChange.id);
-      }
-
-      // Room status cascade when room_id changed
       if (newRoomUUID !== currentBR.room_id) {
-        // Old room: free if no other active booking holds it
-        const { data: otherRows, error: otherErr } = await supabase
-          .from("booking_rooms")
-          .select("id")
-          .eq("room_id", currentBR.room_id)
-          .in("status", ["confirmed", "checked_in"])
-          .neq("booking_id", current.id)
-          .limit(1);
-
-        if (otherErr) {
-          console.error("[updateBooking] Step 4 cascade — other-bookings check failed:", otherErr.message);
-        }
-        const oldRoomStatus = (otherRows && otherRows.length > 0) ? "reserved" : "available";
-        const { error: oldRoomErr } = await supabase
-          .from("rooms").update({ status: oldRoomStatus }).eq("id", currentBR.room_id);
-        if (oldRoomErr)
-          console.error("[updateBooking] Step 4 cascade — UPDATE old room FAILED:", oldRoomErr.message);
-        else
-          console.log("[updateBooking] Step 4 cascade — old room", currentBR.room_id, "→", oldRoomStatus);
-
-        // New room: derive status from booking's current status
-        const bookingStatus = DB_TO_BOOKING_STATUS[current.status] ?? "Confirmed";
-        const newRoomStatus = (bookingToRoomStatus(bookingStatus) ?? "Reserved").toLowerCase();
-        const { error: newRoomErr } = await supabase
-          .from("rooms").update({ status: newRoomStatus }).eq("id", newRoomUUID);
-        if (newRoomErr)
-          console.error("[updateBooking] Step 4 cascade — UPDATE new room FAILED:", newRoomErr.message);
-        else
-          console.log("[updateBooking] Step 4 cascade — new room", newRoomUUID, "→", newRoomStatus);
+        cascades.push({ oldRoomId: currentBR.room_id, newRoomId: newRoomUUID });
       }
+    }
+
+    if (rpcChanges.length > 0) {
+      console.log("[updateBooking] Step 4 — RPC apply_booking_room_changes | booking:",
+        current.id, "| changes:", rpcChanges);
+
+      const { error: rpcErr } = await supabase.rpc("apply_booking_room_changes", {
+        p_booking_id: current.id,
+        p_changes:    rpcChanges,
+      });
+
+      if (rpcErr) {
+        console.error("──────────── [updateBooking] Step 4 — RPC apply_booking_room_changes FAILED ────────────");
+        console.error("  message:", rpcErr.message, "| details:", rpcErr.details,
+          "| hint:", rpcErr.hint, "| code:", rpcErr.code);
+        console.error("────────────────────────────────────────────────────────────────────────────────────────");
+        // The guard's rejection is user-facing ("Room X is unavailable …") —
+        // surface it clean. Same for the paid-exceeds-total constraint, which
+        // now aborts the WHOLE edit atomically (previously a client-side
+        // post-write check).
+        if (rpcErr.message.startsWith("Room ")) throw new Error(rpcErr.message);
+        if (rpcErr.message.includes("chk_paid_not_exceed_total")) {
+          throw new Error(
+            `PHANTOM BOOKING WARNING — booking ${bookingRef}: the edited rooms ` +
+            `total would fall below the recorded paid amount. Reduce the amount ` +
+            `paid first via a payment adjustment, then lower the total.`
+          );
+        }
+        throw new Error(
+          `[updateBooking] apply_booking_room_changes RPC failed — ${rpcErr.message}` +
+          (rpcErr.code    ? ` (code: ${rpcErr.code})`       : "") +
+          (rpcErr.hint    ? ` | hint: ${rpcErr.hint}`        : "") +
+          (rpcErr.details ? ` | details: ${rpcErr.details}`  : "")
+        );
+      }
+      console.log("[updateBooking] Step 4 — RPC succeeded,", rpcChanges.length, "row(s) applied");
+    }
+
+    // Room status cascades — presentational rooms.status sync, AFTER the RPC
+    // commits so a guard rejection never flips physical room statuses.
+    for (const { oldRoomId, newRoomId } of cascades) {
+      // Old room: free if no other active booking holds it
+      const { data: otherRows, error: otherErr } = await supabase
+        .from("booking_rooms")
+        .select("id")
+        .eq("room_id", oldRoomId)
+        .in("status", ["confirmed", "checked_in"])
+        .neq("booking_id", current.id)
+        .limit(1);
+
+      if (otherErr) {
+        console.error("[updateBooking] Step 4 cascade — other-bookings check failed:", otherErr.message);
+      }
+      const oldRoomStatus = (otherRows && otherRows.length > 0) ? "reserved" : "available";
+      const { error: oldRoomErr } = await supabase
+        .from("rooms").update({ status: oldRoomStatus }).eq("id", oldRoomId);
+      if (oldRoomErr)
+        console.error("[updateBooking] Step 4 cascade — UPDATE old room FAILED:", oldRoomErr.message);
+      else
+        console.log("[updateBooking] Step 4 cascade — old room", oldRoomId, "→", oldRoomStatus);
+
+      // New room: derive status from booking's current status
+      const bookingStatus = DB_TO_BOOKING_STATUS[current.status] ?? "Confirmed";
+      const newRoomStatus = (bookingToRoomStatus(bookingStatus) ?? "Reserved").toLowerCase();
+      const { error: newRoomErr } = await supabase
+        .from("rooms").update({ status: newRoomStatus }).eq("id", newRoomId);
+      if (newRoomErr)
+        console.error("[updateBooking] Step 4 cascade — UPDATE new room FAILED:", newRoomErr.message);
+      else
+        console.log("[updateBooking] Step 4 cascade — new room", newRoomId, "→", newRoomStatus);
     }
   } else {
-    console.log("[updateBooking] Step 4 — no room-level changes, skipping booking_rooms UPDATE");
+    console.log("[updateBooking] Step 4 — no room-level changes, skipping RPC");
   }
 
-  // ── Step 5 — Server-side total_amount recompute ──────────────────────────
-  // Source of truth is the current booking_rooms state (just updated in Step 4).
-  // The client's changes.totalAmount is intentionally ignored — this prevents
-  // any stale or incorrect client grandTotal from drifting bookings.total_amount.
-  //
-  // Only fires when rooms changed; booking-level-only edits (guest name, etc.)
-  // don't touch total_amount at all, which is correct — room counts and rates
-  // are unchanged in that case.
-  if (changes.rooms && changes.rooms.length > 0) {
-    const { data: roomsAfter, error: sumErr } = await supabase
-      .from("booking_rooms")
-      .select("booking_rate, nights")
-      .eq("booking_id", current.id);
-
-    if (sumErr) {
-      throw new Error(
-        `[updateBooking] Step 5 — failed to recompute total_amount for ${bookingRef}: ` +
-        sumErr.message
-      );
-    }
-
-    const computedTotal = (roomsAfter ?? []).reduce(
-      (sum, br) => sum + (Number(br.booking_rate) * Number(br.nights)),
-      0
-    );
-
-    bookingUpdate.total_amount = computedTotal;
-    console.log("[updateBooking] Step 5 — server-computed total_amount:", computedTotal,
-      "| room rows summed:", (roomsAfter ?? []).length);
-  }
-
-  // ── Step 6 — Manually sync payment_status when total_amount changes ───────
-  // fn_sync_payment_status fires on paid_amount changes only (payments INSERT chain).
-  // Changing total_amount directly does NOT re-trigger it — must derive manually.
-  // derivePaymentStatus returns Title Case ("Unpaid"/"Partial"/"Paid"/"Cancelled")
-  // so .toLowerCase() is needed to match the DB's lowercase payment_status enum.
-  if (bookingUpdate.total_amount !== undefined) {
-    const newPmtStatus = derivePaymentStatus(
-      bookingUpdate.total_amount as number,
-      current.paid_amount,
-      DB_TO_BOOKING_STATUS[current.status] ?? "Confirmed"
-    );
-    bookingUpdate.payment_status = newPmtStatus.toLowerCase();
-    console.log("[updateBooking] Step 6 — total_amount →", bookingUpdate.total_amount,
-      "| derived payment_status:", bookingUpdate.payment_status);
-  }
-
-  // ── Step 6.5 — Guard against phantom bookings ────────────────────────────
-  // If the new total_amount would fall below the already-recorded paid_amount,
-  // the booking would appear "Paid" but no additional payment was received for
-  // the gap. The UI validates this first (validateEdit), but this is the hard
-  // server-side guard. Uses the server-computed total, not the client's value.
-  if (
-    bookingUpdate.total_amount !== undefined &&
-    (bookingUpdate.total_amount as number) < current.paid_amount
-  ) {
-    throw new Error(
-      `PHANTOM BOOKING WARNING — booking ${bookingRef}: ` +
-      `server-computed totalAmount (${bookingUpdate.total_amount}) is less than ` +
-      `paid_amount (${current.paid_amount}). ` +
-      `Reduce the amount paid first via a payment adjustment, then lower the total.`
-    );
-  }
+  // ── Steps 5/6/6.5 — REMOVED (2026-08-20): now inside the RPC ────────────
+  // apply_booking_room_changes calls update_booking_total, whose total_amount
+  // UPDATE fires trg_sync_payment_status — total recompute AND payment_status
+  // re-derivation happen server-side, atomically with the row writes. The old
+  // client-side re-sum drifted from the canonical function (it included
+  // cancelled rows and raced the write). The phantom-booking guard
+  // (total < paid) is now the chk_paid_not_exceed_total constraint, which
+  // aborts the whole edit inside the RPC's transaction — mapped to the
+  // PHANTOM BOOKING message in the Step 4 error handler above.
 
   // ── Step 7 — Execute bookings UPDATE ─────────────────────────────────────
   // total_amount (when present) is the server-computed value from Step 5.

@@ -30,7 +30,7 @@ import {
   PAYMENT_METHOD_LABELS,
 } from "@/lib/mockData";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
-import { calcBookingLevelDeductions } from "@/lib/checkoutUtils";
+import { calcBookingLevelDeductions, localTodayISO, isoAtNoon } from "@/lib/checkoutUtils";
 import ConfirmDialog from "@/components/ConfirmDialog";
 
 // ─────────────────────────────────────────────────────────────
@@ -257,6 +257,11 @@ export default function FrontDeskClient() {
   // ── Checkout timing — time captured when modal opens ────────
   const [checkoutOpenedAt, setCheckoutOpenedAt] = useState<Date | null>(null);
 
+  // ── Departure date — staff-picked actual checkout date ──────
+  // Mirrors BookingsClient: defaults to today (LOCAL date, matching the
+  // server's Dhaka clamp), bounded [latest active-room check-in, today].
+  const [checkoutDepartISO, setCheckoutDepartISO] = useState<string>("");
+
   // ── Add-payment modal ────────────────────────────────────────
   const [payModal,  setPayModal]  = useState<Booking | null>(null);
   const [payAmount, setPayAmount] = useState<string>("");
@@ -348,6 +353,7 @@ export default function FrontDeskClient() {
   function handleCheckOut(booking: Booking) {
     setCheckoutConfirm(booking);
     setCheckoutOpenedAt(new Date());   // stamp "actual checkout time" for timing panel
+    setCheckoutDepartISO(localTodayISO());   // departure defaults to today (local)
     setChargeType(""); setChargeAmount(""); setChargeNote(""); setChargeError("");
     setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
     setOverrideReason(""); setOverrideError("");
@@ -359,6 +365,7 @@ export default function FrontDeskClient() {
   function closeCheckoutConfirm() {
     setCheckoutConfirm(null);
     setCheckoutOpenedAt(null);
+    setCheckoutDepartISO("");
     setChargeType(""); setChargeAmount(""); setChargeNote(""); setChargeError("");
     setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
     setOverrideReason(""); setOverrideError("");
@@ -421,9 +428,11 @@ export default function FrontDeskClient() {
     if (!checkoutConfirm) return;
     const charge = validateAndBuildCharge();
     if (charge === undefined) return;
+    // Staff-picked departure date drives BOTH the deduction preview and the
+    // RPC's p_actual_checkout_date — no more UTC toISOString() press-day stamp.
+    const actualDateISO = checkoutDepartISO || localTodayISO();
     const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
-      calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], checkoutOpenedAt ?? new Date());
-    const actualDateISO = new Date().toISOString().split("T")[0];
+      calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], isoAtNoon(actualDateISO));
     const remainingAfterPayment =
       checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt - liveAmountPaid;
     const discount = validateAndBuildDiscount(remainingAfterPayment);
@@ -507,9 +516,11 @@ export default function FrontDeskClient() {
     }
     const charge = validateAndBuildCharge();
     if (charge === undefined) return;
+    // Staff-picked departure date drives BOTH the deduction preview and the
+    // RPC's p_actual_checkout_date — no more UTC toISOString() press-day stamp.
+    const actualDateISO = checkoutDepartISO || localTodayISO();
     const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
-      calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], checkoutOpenedAt ?? new Date());
-    const actualDateISO = new Date().toISOString().split("T")[0];
+      calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], isoAtNoon(actualDateISO));
     const remainingAfterPayment =
       checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt - liveAmountPaid;
     const discount = validateAndBuildDiscount(remainingAfterPayment);
@@ -1092,8 +1103,15 @@ export default function FrontDeskClient() {
       {checkoutConfirm && (() => {
         const extraChargeAmt     = parseFloat(chargeAmount) || 0;
         const moreDiscountAmtNum = parseFloat(moreDiscountAmt) || 0;
+        // Deduction preview follows the PICKED departure date so what the
+        // operator sees is what the RPC will write.
+        const departISO    = checkoutDepartISO || localTodayISO();
+        const departMaxISO = localTodayISO();   // never a future departure
+        const departMinISO = (checkoutConfirm.rooms ?? [])
+          .filter(r => r.status === "Checked In" || r.status === "Confirmed")
+          .reduce((m, r) => (r.checkInISO && r.checkInISO > m ? r.checkInISO : m), "");
         const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
-          calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], checkoutOpenedAt ?? new Date());
+          calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], isoAtNoon(departISO));
         const finalTotal                = checkoutConfirm.totalAmount + extraChargeAmt;
         const finalPayableBeforeModalPay = finalTotal - earlyDeductionAmt - moreDiscountAmtNum - liveAmountPaid;
         const modalPayAmtNum            = parseFloat(modalPayAmt) || 0;
@@ -1219,6 +1237,30 @@ export default function FrontDeskClient() {
                     </div>
                   );
                 })()}
+
+                {/* ── DEPARTURE DATE — mirrors BookingsClient ─────── */}
+                <div>
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Departure Date</p>
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[12.5px] text-slate-600">Guest actually left on</p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">Defaults to today — back-date if the checkout is being recorded late.</p>
+                    </div>
+                    <input
+                      type="date"
+                      value={departISO}
+                      min={departMinISO || undefined}
+                      max={departMaxISO}
+                      onChange={e => setCheckoutDepartISO(e.target.value)}
+                      className="text-[13px] font-medium text-slate-800 bg-white border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
+                    />
+                  </div>
+                  {departISO !== departMaxISO && (
+                    <p className="mt-1.5 px-0.5 text-[11px] font-medium text-amber-600">
+                      ⚠ Back-dated departure — billing below is computed from {departISO}, not today.
+                    </p>
+                  )}
+                </div>
 
                 {/* ── BILLING SUMMARY ─────────────────────────────── */}
                 <div>

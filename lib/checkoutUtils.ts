@@ -8,6 +8,21 @@
 
 import type { BookingRoom } from "@/lib/mockData";
 
+/** LOCAL calendar date as "YYYY-MM-DD" — never new Date().toISOString(),
+ *  which is UTC and reads as *yesterday* between 00:00 and 06:00 Dhaka.
+ *  Desk machines run Dhaka time, so this matches the server-side clamp
+ *  `(now() AT TIME ZONE 'Asia/Dhaka')::date` in both checkout RPCs. */
+export function localTodayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** Noon-anchored Date for an ISO day — same anchor convention as calcNights;
+ *  immune to DST/midnight boundary drift when passed to date-only math. */
+export function isoAtNoon(iso: string): Date {
+  return new Date(`${iso}T12:00:00`);
+}
+
 /** Floored early nights for a single room — mirrors the server RPC exactly.
  *  min( max(0, whole-day diff scheduled→actual), max(0, nights − 1) ).
  *  Always keeps at least the check-in night billable. */

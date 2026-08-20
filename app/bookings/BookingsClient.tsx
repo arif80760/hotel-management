@@ -51,7 +51,7 @@ import { type RoomCategory } from "@/services/roomCategoriesService";
 import { getRatePeriods, findRatePeriod, type RatePeriod } from "@/services/ratePeriodsService";
 import { supabase } from "@/lib/supabase";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
-import { calcBookingLevelDeductions, earlyNights } from "@/lib/checkoutUtils";
+import { calcBookingLevelDeductions, earlyNights, localTodayISO, isoAtNoon } from "@/lib/checkoutUtils";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { Refund } from "@/lib/mockData";
 import * as bookingsService from "@/services/bookingsService";
@@ -954,6 +954,13 @@ export default function BookingsClient({ initialRoom }: Props) {
   // Used as the "actual checkout time" in the timing analysis panel.
   const [checkoutOpenedAt, setCheckoutOpenedAt] = useState<Date | null>(null);
 
+  // ── Departure date — staff-picked actual checkout date ──────
+  // Defaults to today (LOCAL date, matching the server's Dhaka clamp);
+  // bounded [latest active-room check-in, today]. This is what fixes the
+  // late-pressed-checkout mechanism: pressing Check Out days late no longer
+  // stamps press-day as the departure. The server clamp is the backstop.
+  const [checkoutDepartISO, setCheckoutDepartISO] = useState<string>("");
+
   // ── Documents modal ─────────────────────────────────────────
   const [docsModal,      setDocsModal]      = useState<Booking | null>(null);
   const [docsList,       setDocsList]       = useState<BookingDocument[]>([]);
@@ -1062,11 +1069,14 @@ export default function BookingsClient({ initialRoom }: Props) {
   // ── Per-room NORMAL checkout modal (on-time / late departure) ──
   const [checkoutRoomModal, setCheckoutRoomModal] = useState<null | {
     bookingId: string; bookingRoomId: string; guestName: string; roomLabel: string;
-    scheduledCheckOut: string; currentStatus: string;
+    scheduledCheckIn: string; scheduledCheckOut: string; currentStatus: string;
   }>(null);
   const [checkoutRoomBusy, setCheckoutRoomBusy] = useState(false);
   const [checkoutRoomOpenedAt, setCheckoutRoomOpenedAt] = useState<Date | null>(null);
   const [checkoutRoomError, setCheckoutRoomError] = useState<string | null>(null);
+  // Staff-picked departure date for the per-room checkout — same bounds and
+  // Dhaka-clamp backstop as the booking-level picker.
+  const [checkoutRoomDepartISO, setCheckoutRoomDepartISO] = useState<string>("");
 
   // ── Phase 7.6: bulk check-in preflight modal ───────────────
   const [bulkCheckinModal, setBulkCheckinModal] = useState<BulkCheckinModalState>({
@@ -1833,11 +1843,13 @@ export default function BookingsClient({ initialRoom }: Props) {
   function openCheckoutRoomModal(b: Booking, r: BookingRoom) {
     setCheckoutRoomError(null);
     setCheckoutRoomOpenedAt(new Date());
+    setCheckoutRoomDepartISO(localTodayISO());   // departure defaults to today (local)
     setCheckoutRoomModal({
       bookingId:         b.id,
       bookingRoomId:     r.id,
       guestName:         b.guestName,
       roomLabel:         `Room ${r.roomNumber} · ${catDisplay(r.roomCategory)}`,
+      scheduledCheckIn:  r.checkInISO ?? "",
       scheduledCheckOut: r.checkOutISO ?? "",
       currentStatus:     r.status,
     });
@@ -1848,7 +1860,9 @@ export default function BookingsClient({ initialRoom }: Props) {
     setCheckoutRoomBusy(true);
     setCheckoutRoomError(null);
     try {
-      const actualISO = new Date().toISOString().split("T")[0];   // stamp "now", like booking-level checkout
+      // Staff-picked departure date (defaults to local today) — the RPC clamps
+      // to [check_in, Dhaka today] as the backstop.
+      const actualISO = checkoutRoomDepartISO || localTodayISO();
       await ctxCheckoutBookingRoom(checkoutRoomModal.bookingRoomId, actualISO);
       setCheckoutRoomModal(null);
     } catch (e) {
@@ -2521,6 +2535,7 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (nextStatus === "Checked Out") {
       setCheckoutConfirm(booking);
       setCheckoutOpenedAt(new Date());   // stamp "actual checkout time" for timing panel
+      setCheckoutDepartISO(localTodayISO());   // departure defaults to today (local)
       setChargeType(""); setChargeAmount(""); setChargeNote(""); setChargeError("");
       setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
       setOverrideReason(""); setOverrideError("");
@@ -2546,6 +2561,7 @@ export default function BookingsClient({ initialRoom }: Props) {
   function closeCheckoutConfirm() {
     setCheckoutConfirm(null);
     setCheckoutOpenedAt(null);
+    setCheckoutDepartISO("");
     setChargeType(""); setChargeAmount(""); setChargeNote(""); setChargeError("");
     setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
     setOverrideReason(""); setOverrideError("");
@@ -2613,9 +2629,11 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (!checkoutConfirm) return;
     const charge = validateAndBuildCharge();
     if (charge === undefined) return;
+    // Staff-picked departure date drives BOTH the deduction preview and the
+    // RPC's p_actual_checkout_date — no more UTC toISOString() press-day stamp.
+    const actualDateISO = checkoutDepartISO || localTodayISO();
     const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
-      calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], checkoutOpenedAt ?? new Date());
-    const actualDateISO = new Date().toISOString().split("T")[0];
+      calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], isoAtNoon(actualDateISO));
     const billableTotal         = checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt;
     const remainingAfterPayment = billableTotal - liveAmountPaid;
     const discount = validateAndBuildDiscount(billableTotal);
@@ -2706,9 +2724,10 @@ export default function BookingsClient({ initialRoom }: Props) {
     }
     const charge = validateAndBuildCharge();
     if (charge === undefined) return;
+    // Same picked-date basis as handleConfirmCheckout.
+    const actualDateISO = checkoutDepartISO || localTodayISO();
     const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
-      calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], checkoutOpenedAt ?? new Date());
-    const actualDateISO = new Date().toISOString().split("T")[0];
+      calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], isoAtNoon(actualDateISO));
     const billableTotal         = checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt;
     const remainingAfterPayment = billableTotal - liveAmountPaid;
     const discount = validateAndBuildDiscount(billableTotal);
@@ -5256,8 +5275,17 @@ export default function BookingsClient({ initialRoom }: Props) {
       {checkoutConfirm && (() => {
         const extraChargeAmt     = parseFloat(chargeAmount) || 0;
         const moreDiscountAmtNum = parseFloat(moreDiscountAmt) || 0;
+        // Deduction preview follows the PICKED departure date so what the
+        // operator sees is what the RPC will write.
+        const departISO    = checkoutDepartISO || localTodayISO();
+        const departMaxISO = localTodayISO();   // never a future departure
+        // Earliest pickable date: the latest check-in among the rooms being
+        // checked out — a room can't depart before it started.
+        const departMinISO = (checkoutConfirm.rooms ?? [])
+          .filter(r => r.status === "Checked In" || r.status === "Confirmed")
+          .reduce((m, r) => (r.checkInISO && r.checkInISO > m ? r.checkInISO : m), "");
         const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
-          calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], checkoutOpenedAt ?? new Date());
+          calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], isoAtNoon(departISO));
         const finalTotal                = checkoutConfirm.totalAmount + extraChargeAmt;
         const finalPayableBeforeModalPay = finalTotal - earlyDeductionAmt - moreDiscountAmtNum - liveAmountPaid;
         const modalPayAmtNum            = parseFloat(modalPayAmt) || 0;
@@ -5398,6 +5426,34 @@ export default function BookingsClient({ initialRoom }: Props) {
                     </div>
                   );
                 })()}
+
+                {/* ── DEPARTURE DATE ───────────────────────────────
+                    Staff-picked actual departure — fixes the late-pressed-
+                    checkout mechanism (pressing days late no longer stamps
+                    press-day). Bounded [latest room check-in, today]; the
+                    checkout RPCs clamp identically (Dhaka-local) as backstop. */}
+                <div>
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Departure Date</p>
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[12.5px] text-slate-600">Guest actually left on</p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">Defaults to today — back-date if the checkout is being recorded late.</p>
+                    </div>
+                    <input
+                      type="date"
+                      value={departISO}
+                      min={departMinISO || undefined}
+                      max={departMaxISO}
+                      onChange={e => setCheckoutDepartISO(e.target.value)}
+                      className="text-[13px] font-medium text-slate-800 bg-white border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
+                    />
+                  </div>
+                  {departISO !== departMaxISO && (
+                    <p className="mt-1.5 px-0.5 text-[11px] font-medium text-amber-600">
+                      ⚠ Back-dated departure — billing below is computed from {departISO}, not today.
+                    </p>
+                  )}
+                </div>
 
                 {/* ── BILLING SUMMARY ─────────────────────────────── */}
                 <div>
@@ -5938,6 +5994,33 @@ export default function BookingsClient({ initialRoom }: Props) {
                     </div>
                   </div>
                   <p className="mt-1.5 px-0.5 text-[11px] text-slate-400">Normal checkout — no early-departure deduction applies.</p>
+                </div>
+
+                {/* ── Departure date — same rule as booking-level modal ── */}
+                <div>
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Departure Date</p>
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[12.5px] text-slate-600">Guest actually left on</p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">Defaults to today — back-date if recording late.</p>
+                    </div>
+                    <input
+                      type="date"
+                      value={checkoutRoomDepartISO || localTodayISO()}
+                      min={checkoutRoomModal.scheduledCheckIn || undefined}
+                      max={localTodayISO()}
+                      onChange={e => setCheckoutRoomDepartISO(e.target.value)}
+                      disabled={checkoutRoomBusy}
+                      className="text-[13px] font-medium text-slate-800 bg-white border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400 disabled:opacity-40"
+                    />
+                  </div>
+                  {(checkoutRoomDepartISO || localTodayISO()) !== localTodayISO() && (
+                    <p className="mt-1.5 px-0.5 text-[11px] font-medium text-amber-600">
+                      ⚠ Back-dated departure — recorded as {checkoutRoomDepartISO}, not today.
+                      {checkoutRoomDepartISO < checkoutRoomModal.scheduledCheckOut &&
+                        " This is before the scheduled checkout — an early-departure deduction will apply."}
+                    </p>
+                  )}
                 </div>
 
                 {checkoutRoomError && (
