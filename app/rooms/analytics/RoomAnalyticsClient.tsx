@@ -58,6 +58,26 @@ function fmt(n: number, dp = 2): string {
 }
 function fmtPct(n: number): string { return `${fmt(n, 1)}%`; }
 
+/** First day of live operation — everything earlier is test data (incl.
+ *  stacked double-booked rows that inflate occupancy past 100%). Presets
+ *  floor here; CUSTOM ranges stay free for deliberate archaeology. */
+const LAUNCH_DATE = "2026-07-30";
+
+/** Occupancy display, capped at 100% with a defect marker when exceeded —
+ *  a raw 176% reads like a performance signal when it actually means
+ *  overlapping bookings exist for the same room in the range. */
+function OccPct({ pct }: { pct: number }) {
+  if (pct <= 100) return <>{fmtPct(pct)}</>;
+  return (
+    <span
+      className="cursor-help"
+      title={`Computed ${fmtPct(pct)} — overlapping bookings exist for the same room in this range (pre-launch test data or a data defect), so the true figure cannot exceed 100%. Displayed capped.`}
+    >
+      100%<span className="text-amber-500 font-semibold"> ⚠</span>
+    </span>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────────────────────
@@ -241,21 +261,26 @@ export default function RoomAnalyticsClient() {
   }, [fromDate, toDate]);
 
   // ── Preset handler ───────────────────────────────────────
+  // Every PRESET floors its start at LAUNCH_DATE — pre-launch test data
+  // (with stacked double-bookings) otherwise inflates nights/revenue ~10×
+  // on some rooms (room 201: 407 "nights" of which 400 were test rows).
+  // Custom ranges are deliberately NOT floored.
   function applyPreset(p: Preset) {
     setPreset(p);
     if (p === "custom") return;
     const now = new Date();
     const today = formatISO(now);
+    const floor = (iso: string) => (iso < LAUNCH_DATE ? LAUNCH_DATE : iso);
     if (p === "today") {
-      setFromDate(today); setToDate(today);
+      setFromDate(floor(today)); setToDate(today);
     } else if (p === "last7") {
-      setFromDate(formatISO(shiftDays(now, -6))); setToDate(today);
+      setFromDate(floor(formatISO(shiftDays(now, -6)))); setToDate(today);
     } else if (p === "last30") {
-      setFromDate(formatISO(shiftDays(now, -29))); setToDate(today);
+      setFromDate(floor(formatISO(shiftDays(now, -29)))); setToDate(today);
     } else if (p === "this_month") {
-      setFromDate(firstOfMonthISO()); setToDate(today);
+      setFromDate(floor(firstOfMonthISO())); setToDate(today);
     } else if (p === "this_year") {
-      setFromDate(`${now.getFullYear()}-01-01`); setToDate(today);
+      setFromDate(floor(`${now.getFullYear()}-01-01`)); setToDate(today);
     }
   }
 
@@ -422,6 +447,11 @@ export default function RoomAnalyticsClient() {
         ))}
       </div>
       <div className="flex items-center gap-2 ml-auto">
+        {preset !== "custom" && fromDate === LAUNCH_DATE && (
+          <span className="text-[11.5px] text-slate-400 italic whitespace-nowrap">
+            from live operation (30 Jul 2026) — use custom dates for the test period
+          </span>
+        )}
         <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">From</span>
         <input
           type="date"
@@ -501,7 +531,7 @@ export default function RoomAnalyticsClient() {
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4">
           <p className="text-[11.5px] font-semibold text-slate-400 uppercase tracking-wider">Occupancy</p>
           <p className="mt-2 text-[26px] font-semibold text-blue-700 tabular-nums leading-none">
-            {fmtPct(kpiOccupancy)}
+            <OccPct pct={kpiOccupancy} />
           </p>
           <p className="mt-1 text-[11px] text-slate-400">excl. deactivated rooms</p>
         </div>
@@ -618,9 +648,7 @@ export default function RoomAnalyticsClient() {
                     </span>
                   </td>
                   <td className="px-4 py-3 tabular-nums">
-                    <span className={r.occupancyPct > 100 ? "text-rose-600 font-semibold" : "text-slate-700"}>
-                      {fmtPct(r.occupancyPct)}
-                    </span>
+                    <span className="text-slate-700"><OccPct pct={r.occupancyPct} /></span>
                   </td>
                   <td className="px-4 py-3 tabular-nums text-slate-600">{r.bookings}</td>
                   <td className="px-4 py-3 tabular-nums font-semibold text-slate-800">৳{fmt(r.revenue, 0)}</td>
@@ -636,7 +664,7 @@ export default function RoomAnalyticsClient() {
         {sortedRows.length > 0 && (
           <div className="px-5 py-2.5 border-t border-slate-100 bg-slate-50">
             <p className="text-[11.5px] text-slate-400 italic">
-              Occupancy&nbsp;&gt;&nbsp;100% indicates periods with overlapping bookings recorded for the same room.
+              ⚠ marks occupancy computed above 100% — overlapping bookings recorded for the same room in this range (pre-launch test data or a data defect); shown capped at 100%.
             </p>
           </div>
         )}
@@ -731,7 +759,7 @@ export default function RoomAnalyticsClient() {
                     </span>
                   </td>
                   <td className="px-5 py-3 tabular-nums text-slate-600">{t.roomCount}</td>
-                  <td className="px-5 py-3 tabular-nums text-slate-700">{fmtPct(t.occupancyPct)}</td>
+                  <td className="px-5 py-3 tabular-nums text-slate-700"><OccPct pct={t.occupancyPct} /></td>
                   <td className="px-5 py-3 tabular-nums font-semibold text-slate-800">৳{fmt(t.revenue, 0)}</td>
                 </tr>
               ))}
