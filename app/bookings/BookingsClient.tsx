@@ -1046,7 +1046,16 @@ export default function BookingsClient({ initialRoom }: Props) {
   // "bookings" = full booking list (existing)
   // "dues"     = outstanding-dues monitor (new)
   const [pageView,  setPageView]  = useState<"bookings" | "dues">("bookings");
-  const [dueFilter, setDueFilter] = useState<"all" | "inhouse" | "checkedout">("all");
+  // Four mutually-exclusive buckets (2026-08-25): All / Upcoming (all
+  // Confirmed — stale past-check-in rows stay IN, badged, they're the
+  // highest-value chase targets) / Checked-In / Checked-Out.
+  const [dueFilter, setDueFilter] = useState<"all" | "upcoming" | "checkedin" | "checkedout">("all");
+  // Stay-overlap date range for the dues view — filters by the booking's
+  // check-in..check-out span intersecting the range (half-open, matching
+  // the overlap guard), NOT by created_at. "all" (default) = no range.
+  const [duePreset,  setDuePreset]  = useState<"all" | "today" | "7d" | "30d" | "month" | "custom">("all");
+  const [dueFromISO, setDueFromISO] = useState<string>("");
+  const [dueToISO,   setDueToISO]   = useState<string>("");
 
   // ── Edit booking modal state ────────────────────────────────
   // editTarget: the booking currently being edited (null = modal closed)
@@ -1216,19 +1225,77 @@ export default function BookingsClient({ initialRoom }: Props) {
     [bookings]
   );
 
-  const filteredDueBookings = useMemo(() => {
-    if (dueFilter === "inhouse")    return dueBookings.filter(b => b.status === "Confirmed" || b.status === "Checked In");
-    if (dueFilter === "checkedout") return dueBookings.filter(b => b.status === "Checked Out");
-    return dueBookings;
-  }, [dueBookings, dueFilter]);
+  // ── Stay-overlap range filter (2026-08-25) ──
+  // A booking is "in range" when its stay span [checkIn, checkOut)
+  // intersects [from, to+1) — half-open, byte-matching the overlap guard's
+  // daterange semantics. Bookings with missing span data are never hidden.
+  const rangedDueBookings = useMemo(() => {
+    if (duePreset === "all" || !dueFromISO || !dueToISO) return dueBookings;
+    const toExclusive = (() => {
+      const d = new Date(`${dueToISO}T12:00:00`);
+      d.setDate(d.getDate() + 1);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    })();
+    return dueBookings.filter(b => {
+      const ci = b.checkInISO  ?? "";
+      const co = b.checkOutISO ?? "";
+      if (!ci || !co) return true;   // never hide a due for missing span data
+      return ci < toExclusive && co > dueFromISO;
+    });
+  }, [dueBookings, duePreset, dueFromISO, dueToISO]);
 
+  /** Stale chase target: still Confirmed but the check-in date has passed. */
+  const isStaleConfirmed = (b: Booking) =>
+    b.status === "Confirmed" && !!b.checkInISO && b.checkInISO < localTodayISO();
+
+  const filteredDueBookings = useMemo(() => {
+    if (dueFilter === "upcoming")   return rangedDueBookings.filter(b => b.status === "Confirmed");
+    if (dueFilter === "checkedin")  return rangedDueBookings.filter(b => b.status === "Checked In");
+    if (dueFilter === "checkedout") return rangedDueBookings.filter(b => b.status === "Checked Out");
+    return rangedDueBookings;
+  }, [rangedDueBookings, dueFilter]);
+
+  // Banner + tiles reflect the RANGED set ("dues on stays in range");
+  // every figure via calcTrueDue per the due-display rule.
   const totalOutstanding = useMemo(
-    () => dueBookings.reduce((sum, b) => sum + calcTrueDue(b), 0),
-    [dueBookings]
+    () => rangedDueBookings.reduce((sum, b) => sum + calcTrueDue(b), 0),
+    [rangedDueBookings]
   );
-  const dueInHouseCount     = dueBookings.filter(b => b.status === "Confirmed" || b.status === "Checked In").length;
-  const dueCheckedOutCount  = dueBookings.filter(b => b.status === "Checked Out").length;
-  const dueOverrideCount    = dueBookings.filter(b => b.checkoutOverride?.used).length;
+  const dueBuckets = useMemo(() => {
+    const upcoming  = rangedDueBookings.filter(b => b.status === "Confirmed");
+    const checkedIn = rangedDueBookings.filter(b => b.status === "Checked In");
+    const checkedOut = rangedDueBookings.filter(b => b.status === "Checked Out");
+    const sum = (a: Booking[]) => a.reduce((s, b) => s + calcTrueDue(b), 0);
+    return {
+      upcomingCount:   upcoming.length,
+      upcomingSum:     sum(upcoming),
+      upcomingStale:   upcoming.filter(isStaleConfirmed).length,
+      checkedInCount:  checkedIn.length,
+      checkedInSum:    sum(checkedIn),
+      checkedOutCount: checkedOut.length,
+      checkedOutSum:   sum(checkedOut),
+      overrideCount:   checkedOut.filter(b => b.checkoutOverride?.used).length,
+    };
+  }, [rangedDueBookings]);
+
+  /** Range presets — mirrors Room Analytics (no launch floor: dues are live-ops). */
+  function applyDuePreset(p: "all" | "today" | "7d" | "30d" | "month") {
+    setDuePreset(p);
+    const today = localTodayISO();
+    if (p === "all")   { setDueFromISO("");  setDueToISO("");  return; }
+    if (p === "today") { setDueFromISO(today); setDueToISO(today); return; }
+    if (p === "month") {
+      const d = new Date();
+      setDueFromISO(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`);
+      setDueToISO(today);
+      return;
+    }
+    const back = p === "7d" ? 6 : 29;
+    const d = new Date();
+    d.setDate(d.getDate() - back);
+    setDueFromISO(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+    setDueToISO(today);
+  }
 
   // Threshold above which a due amount is flagged as "high" with an extra icon
   const HIGH_DUE_THRESHOLD = 500;
@@ -4811,62 +4878,113 @@ export default function BookingsClient({ initialRoom }: Props) {
       {pageView === "dues" && (
         <>
 
-          {/* ── Warning banner ─────────────────────────────────── */}
-          {dueBookings.length > 0 && (
+          {/* ── Warning banner — reflects the RANGED set ───────── */}
+          {rangedDueBookings.length > 0 && (
             <div className="flex items-center gap-3 bg-rose-50 border border-rose-200 rounded-xl px-5 py-3.5">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5 text-rose-500 flex-shrink-0">
                 <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
                 <path d="M12 9v4M12 17h.01"/>
               </svg>
               <p className="text-[13px] font-medium text-rose-800">
-                <span className="font-bold">{dueBookings.length} booking{dueBookings.length !== 1 ? "s" : ""}</span> have outstanding balances totalling{" "}
+                <span className="font-bold">{rangedDueBookings.length} booking{rangedDueBookings.length !== 1 ? "s" : ""}</span>{" "}
+                {duePreset === "all" ? "have outstanding balances totalling" : "have dues on stays in range totalling"}{" "}
                 <span className="font-bold">৳{totalOutstanding.toLocaleString()}</span>. Use "Add Payment" on each row to record payments received.
               </p>
             </div>
           )}
 
-          {/* ── Summary stat cards ─────────────────────────────── */}
+          {/* ── Stay-overlap range filter ──────────────────────── */}
+          <div className="flex flex-wrap items-center gap-3 bg-white border border-slate-200 rounded-xl px-4 py-3 shadow-sm">
+            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Stays in range</span>
+            <div className="inline-flex flex-wrap rounded-lg bg-slate-100 p-0.5">
+              {([["all","All"],["today","Today"],["7d","Last 7"],["30d","Last 30"],["month","This Month"],["custom","Custom"]] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => key === "custom" ? setDuePreset("custom") : applyDuePreset(key)}
+                  className={`px-3 py-1.5 rounded-md text-[12.5px] font-semibold transition-colors ${
+                    duePreset === key ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {duePreset === "custom" && (
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="date"
+                  value={dueFromISO}
+                  max={dueToISO || undefined}
+                  onChange={e => setDueFromISO(e.target.value)}
+                  className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-rose-300"
+                />
+                <span className="text-[12px] text-slate-400">to</span>
+                <input
+                  type="date"
+                  value={dueToISO}
+                  min={dueFromISO || undefined}
+                  onChange={e => setDueToISO(e.target.value)}
+                  className="px-2.5 py-1.5 text-[13px] text-slate-800 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-rose-300"
+                />
+              </div>
+            )}
+            {duePreset !== "all" && (
+              <span className="ml-auto text-[11.5px] text-slate-400">
+                stay span overlaps {dueFromISO || "…"} – {dueToISO || "…"}
+              </span>
+            )}
+          </div>
+
+          {/* ── Summary stat cards — one per bucket, ranged ────── */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
 
             {/* Total Outstanding */}
             <div className="bg-white border border-rose-200 rounded-xl px-5 py-4 shadow-sm">
-              <p className="text-[11px] font-semibold text-rose-400 uppercase tracking-wider mb-1.5">Total Outstanding</p>
+              <p className="text-[11px] font-semibold text-rose-400 uppercase tracking-wider mb-1.5">
+                {duePreset === "all" ? "Total Outstanding" : "Dues on Stays in Range"}
+              </p>
               <p className="text-[26px] font-bold text-rose-600 leading-none">৳{totalOutstanding.toLocaleString()}</p>
-              <p className="text-[11.5px] text-slate-400 mt-1.5">across {dueBookings.length} booking{dueBookings.length !== 1 ? "s" : ""}</p>
+              <p className="text-[11.5px] text-slate-400 mt-1.5">across {rangedDueBookings.length} booking{rangedDueBookings.length !== 1 ? "s" : ""}</p>
             </div>
 
-            {/* Bookings with dues */}
-            <div className="bg-white border border-slate-200 rounded-xl px-5 py-4 shadow-sm">
-              <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Bookings With Dues</p>
-              <p className="text-[26px] font-bold text-slate-800 leading-none">{dueBookings.length}</p>
-              <p className="text-[11.5px] text-slate-400 mt-1.5">of {bookings.length} total bookings</p>
+            {/* Upcoming with due */}
+            <div className="bg-white border border-sky-200 rounded-xl px-5 py-4 shadow-sm">
+              <p className="text-[11px] font-semibold text-sky-500 uppercase tracking-wider mb-1.5">Upcoming With Due</p>
+              <p className="text-[26px] font-bold text-sky-600 leading-none">{dueBuckets.upcomingCount}</p>
+              <p className="text-[11.5px] text-slate-400 mt-1.5">
+                ৳{dueBuckets.upcomingSum.toLocaleString()}
+                {dueBuckets.upcomingStale > 0 && (
+                  <span className="text-amber-600 font-semibold"> · ⚠ {dueBuckets.upcomingStale} check-in passed</span>
+                )}
+              </p>
             </div>
 
-            {/* In-house with due */}
+            {/* Checked-in with due */}
             <div className="bg-white border border-amber-200 rounded-xl px-5 py-4 shadow-sm">
-              <p className="text-[11px] font-semibold text-amber-500 uppercase tracking-wider mb-1.5">In-House With Due</p>
-              <p className="text-[26px] font-bold text-amber-600 leading-none">{dueInHouseCount}</p>
-              <p className="text-[11.5px] text-slate-400 mt-1.5">Confirmed or Checked In</p>
+              <p className="text-[11px] font-semibold text-amber-500 uppercase tracking-wider mb-1.5">Checked-In With Due</p>
+              <p className="text-[26px] font-bold text-amber-600 leading-none">{dueBuckets.checkedInCount}</p>
+              <p className="text-[11.5px] text-slate-400 mt-1.5">৳{dueBuckets.checkedInSum.toLocaleString()} · guests in-house now</p>
             </div>
 
             {/* Checked-out with due */}
             <div className="bg-white border border-rose-200 rounded-xl px-5 py-4 shadow-sm">
-              <p className="text-[11px] font-semibold text-rose-400 uppercase tracking-wider mb-1.5">Checked-out With Due</p>
-              <p className="text-[26px] font-bold text-rose-600 leading-none">{dueCheckedOutCount}</p>
+              <p className="text-[11px] font-semibold text-rose-400 uppercase tracking-wider mb-1.5">Checked-Out With Due</p>
+              <p className="text-[26px] font-bold text-rose-600 leading-none">{dueBuckets.checkedOutCount}</p>
               <p className="text-[11.5px] text-slate-400 mt-1.5">
-                {dueOverrideCount > 0
-                  ? `${dueOverrideCount} via admin override`
-                  : "no overrides used"}
+                ৳{dueBuckets.checkedOutSum.toLocaleString()}
+                {dueBuckets.overrideCount > 0 ? ` · ${dueBuckets.overrideCount} via override` : ""}
               </p>
             </div>
           </div>
 
-          {/* ── Filter tabs ────────────────────────────────────── */}
+          {/* ── Filter tabs — four mutually exclusive buckets ───── */}
           <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-1 w-fit shadow-sm">
             {([
-              { key: "all"        as const, label: "All Due",              count: dueBookings.length     },
-              { key: "inhouse"    as const, label: "In-House With Due",    count: dueInHouseCount        },
-              { key: "checkedout" as const, label: "Checked-out With Due", count: dueCheckedOutCount     },
+              { key: "all"        as const, label: "All Due",     count: rangedDueBookings.length    },
+              { key: "upcoming"   as const, label: "Upcoming",    count: dueBuckets.upcomingCount    },
+              { key: "checkedin"  as const, label: "Checked-In",  count: dueBuckets.checkedInCount   },
+              { key: "checkedout" as const, label: "Checked-Out", count: dueBuckets.checkedOutCount  },
             ]).map(f => (
               <button
                 key={f.key}
@@ -4973,11 +5091,19 @@ export default function BookingsClient({ initialRoom }: Props) {
                         <td className="px-5 py-3.5 text-slate-600 whitespace-nowrap">{b.checkIn}</td>
                         <td className="px-5 py-3.5 text-slate-600 whitespace-nowrap">{b.checkOut}</td>
 
-                        {/* Booking Status + override warning badge */}
+                        {/* Booking Status + stale / override warning badges */}
                         <td className="px-5 py-3.5">
                           <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-semibold whitespace-nowrap ${statusBadge(b.status)}`}>
                             {b.status}
                           </span>
+                          {isStaleConfirmed(b) && (
+                            <div
+                              className="mt-1.5 inline-flex items-center gap-1 text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-300 px-2 py-0.5 rounded-full cursor-default"
+                              title={`Still Confirmed but the check-in date (${b.checkIn}) has passed — chase or resolve.`}
+                            >
+                              ⚠ check-in date passed
+                            </div>
+                          )}
                           {b.checkoutOverride?.used && (
                             <div
                               className="mt-1.5 inline-flex items-center gap-1 text-[10.5px] font-semibold text-amber-700 bg-amber-50 border border-amber-300 px-2 py-0.5 rounded-full cursor-default"
@@ -5251,7 +5377,7 @@ export default function BookingsClient({ initialRoom }: Props) {
             {/* Table footer */}
             <div className="px-5 py-3 border-t border-slate-100 bg-rose-50/30 flex items-center justify-between">
               <p className="text-[12px] text-slate-400">
-                Showing {filteredDueBookings.length} of {dueBookings.length} bookings with outstanding dues
+                Showing {filteredDueBookings.length} of {rangedDueBookings.length} bookings with outstanding dues{duePreset !== "all" ? " on stays in range" : ""}
               </p>
               <p className="text-[12px] font-semibold text-rose-600">
                 ৳{filteredDueBookings.reduce((s, b) => s + calcTrueDue(b), 0).toLocaleString()} outstanding in this view
