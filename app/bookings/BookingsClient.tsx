@@ -51,6 +51,7 @@ import { type RoomCategory } from "@/services/roomCategoriesService";
 import { getRatePeriods, findRatePeriod, type RatePeriod } from "@/services/ratePeriodsService";
 import { supabase } from "@/lib/supabase";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
+import { classifyBookingSearch, matchesIdentifier, matchesText, rankIdentifierMatches } from "@/lib/searchBookings";
 import { calcBookingLevelDeductions, earlyNights, localTodayISO, isoAtNoon } from "@/lib/checkoutUtils";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { Refund } from "@/lib/mockData";
@@ -1170,31 +1171,50 @@ export default function BookingsClient({ initialRoom }: Props) {
   const tabFilteredBookings =
     activeFilter === "All" ? bookings : bookings.filter(b => b.status === activeFilter);
 
+  // Identifier-aware search (2026-08-25, lib/searchBookings):
+  // ref/phone queries are EXACT-IDENTIFIER searches and override the date
+  // range (searching for a specific booking must find it regardless of the
+  // visible window); text searches respect the range as before. The range
+  // state is never mutated here — clearing the search restores the ranged
+  // view exactly.
+  const searchClass = useMemo(
+    () => (searchQuery.trim() ? classifyBookingSearch(searchQuery) : null),
+    [searchQuery],
+  );
+  const identifierSearchActive =
+    searchClass !== null && searchClass.kind !== "text";
+  const dateRangeActive = dateFilterActive && !!(dateFrom || dateTo);
+
+  /** True when a booking's check-in falls inside the active range. */
+  const inDateRange = (b: Booking): boolean => {
+    if (!b.checkInISO) return true;   // no ISO date → don't exclude
+    if (dateFrom && b.checkInISO < dateFrom) return false;
+    if (dateTo   && b.checkInISO > dateTo)   return false;
+    return true;
+  };
+
   const filteredBookings = useMemo(() => {
     let result = tabFilteredBookings;
 
-    // Date filter (check-in date range — uses ISO string for safe cross-browser comparison)
-    if (dateFilterActive && (dateFrom || dateTo)) {
-      result = result.filter(b => {
-        if (!b.checkInISO) return true;   // no ISO date → don't exclude
-        if (dateFrom && b.checkInISO < dateFrom) return false;
-        if (dateTo   && b.checkInISO > dateTo)   return false;
-        return true;
-      });
-    }
-
-    // Search filter
-    const q = searchQuery.trim().toLowerCase();
-    if (q) {
-      result = result.filter(b =>
-        b.id.toLowerCase().includes(q) ||
-        b.guestName.toLowerCase().includes(q) ||
-        (b.phone ?? "").toLowerCase().includes(q)
+    if (searchClass && searchClass.kind !== "text") {
+      // Identifier search: ALL dates; refs rank before phone-prefix hits.
+      return rankIdentifierMatches(
+        result.filter(b => matchesIdentifier(b, searchClass)),
+        searchClass,
       );
     }
 
+    // Date filter (check-in date range — uses ISO string for safe cross-browser comparison)
+    if (dateRangeActive) result = result.filter(inDateRange);
+
+    // Text search filter
+    if (searchClass) {
+      result = result.filter(b => matchesText(b, searchClass.q));
+    }
+
     return result;
-  }, [tabFilteredBookings, searchQuery, dateFilterActive, dateFrom, dateTo]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabFilteredBookings, searchClass, dateFilterActive, dateFrom, dateTo]);
 
   // Reset to page 1 whenever the filter set changes
   useEffect(() => {
@@ -4326,6 +4346,18 @@ export default function BookingsClient({ initialRoom }: Props) {
             horizontal scrollbar stays on screen instead of sitting below the fold
             on large monitors. Rows scroll vertically inside; the pagination bar
             below stays put. Uncapped below md: so phones keep normal page flow. */}
+        {/* Identifier-search override notice — the screen must not silently
+            contradict its own range chips (2026-08-25). */}
+        {identifierSearchActive && dateRangeActive && (
+          <div className="flex items-center gap-2 bg-sky-50 border-b border-sky-100 px-5 py-2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-sky-500 flex-shrink-0">
+              <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+            </svg>
+            <p className="text-[12px] font-medium text-sky-800">
+              ID search — showing all dates; the range filter is suspended while searching by {searchClass?.kind === "phone" ? "phone number" : "booking ref"}. Clear the search to restore the range.
+            </p>
+          </div>
+        )}
         <div className="overflow-auto overscroll-x-contain md:max-h-[calc(100vh-22rem)]">
           <table className="w-full text-[13px]">
             <thead className="sticky top-0 z-20">
@@ -4369,6 +4401,14 @@ export default function BookingsClient({ initialRoom }: Props) {
                         {b.isNew && (
                           <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded-full uppercase tracking-wide">
                             New
+                          </span>
+                        )}
+                        {identifierSearchActive && dateRangeActive && !inDateRange(b) && (
+                          <span
+                            className="text-[10px] font-semibold text-sky-700 bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded-full whitespace-nowrap"
+                            title="This row's check-in falls outside the selected date range — shown because ID searches cover all dates."
+                          >
+                            outside selected date range
                           </span>
                         )}
                       </div>
