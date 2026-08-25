@@ -277,6 +277,43 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     loadData();
   }, []);
 
+  // ── Focus refetch (2026-08-25) ─────────────────────────────
+  // A tab left open across a mid-stay edit shows stale dues — one such tab
+  // produced a ৳1,500 phantom discrepancy (BK-1384 extension) that took a
+  // full investigation to explain. On tab focus/visibility, silently
+  // re-pull rooms + bookings so every consumer (dues banner, row dues,
+  // front desk) self-heals. Throttled to once per 60s; replaces state
+  // wholesale with DB truth (in-flight optimistic updates re-sync when
+  // their own service calls resolve).
+  useEffect(() => {
+    let last = Date.now();
+    let inFlight = false;
+    const refresh = async () => {
+      if (document.visibilityState !== "visible") return;
+      if (inFlight || Date.now() - last < 60_000) return;
+      inFlight = true;
+      try {
+        const [fetchedRooms, fetchedBookings] = await Promise.all([
+          roomsService.getAllRooms(),
+          bookingsService.getAllBookings(),
+        ]);
+        setRooms(fetchedRooms);
+        setBookings(fetchedBookings);
+        last = Date.now();
+      } catch (err) {
+        console.error("[HotelContext] focus refetch failed (kept stale state):", err);
+      } finally {
+        inFlight = false;
+      }
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, []);
+
   // ── Booking actions ─────────────────────────────────────────
 
   function createBooking(input: CreateBookingInput): Promise<void> {

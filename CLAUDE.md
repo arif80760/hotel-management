@@ -181,6 +181,24 @@ count — `IF NOT FOUND THEN RAISE` after UPDATE/DELETE in plpgsql,
 tightening done. deny_refund carries the reference implementation
 (`2026-08-20-deny-refund-zero-row-guard.sql`).
 
+### Every displayed due comes from calcTrueDue — never a local total−paid
+The canonical outstanding-balance formula is `calcTrueDue()` in
+`lib/invoiceUtils.ts`: total + extra_charge − additional_discount − paid
+(early deduction is already inside total — never subtracted again). Any
+UI that shows a due — row columns, tiles, banners, SMS, day sheets —
+MUST call it; a locally-written `totalAmount − amountPaid` is the drift
+class. It lies dormant: it matches canonical exactly until the first
+in-house booking carries an extra charge or discount, then silently
+diverges between pages. The 2026-08-25 investigation started from a
+suspected instance of this class on the Bookings page; the page was
+clean (a stale tab across BK-1384's mid-stay extension explained the
+৳1,500), but the sweep found the REAL instance in the Cashbook dues
+tile — fixed to calcTrueDue the same day. Stale-tab insurance: the
+HotelContext focus refetch (60s-throttled) re-pulls rooms + bookings on
+tab focus. KNOWN COUSIN (scoped, unfixed): `derivePaymentStatus` and DB
+trigger `fn_sync_payment_status` compare paid against BARE total — a
+booking fully paid except its extra charge shows a "Paid" pill.
+
 ### Never Break Existing Flow
 - Do not change the booking creation, check-in, check-out, payment, or override flows unless explicitly asked
 - Do not remove or rename context functions — other components depend on them

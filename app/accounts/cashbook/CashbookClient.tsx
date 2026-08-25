@@ -42,6 +42,7 @@ import { getAllBookings, getRoomsForBookingPayments } from "@/services/bookingsS
 import { getExpenseItems } from "@/services/expenseItemsService";
 import { getAllEmployees } from "@/services/employeesService";
 import type { MockBooking } from "@/lib/mockData";
+import { calcTrueDue } from "@/lib/invoiceUtils";
 import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 // ─────────────────────────────────────────────────────────────
@@ -981,11 +982,16 @@ export default function CashbookClient({
         else expenseOut += t.amount;
       }
     }
+    // Canonical true due — calcTrueDue, NEVER a local total−paid (2026-08-25):
+    // the naive form here matched the Bookings page only while no in-house
+    // booking carried an extra charge or discount; it would silently diverge
+    // the moment one did. See the CLAUDE.md due-display rule.
     const outstandingDues = bookings.reduce(
-      (s, b) =>
-        (b.status === "Confirmed" || b.status === "Checked In") && b.amountPaid < b.totalAmount
-          ? s + (b.totalAmount - b.amountPaid)
-          : s,
+      (s, b) => {
+        if (b.status !== "Confirmed" && b.status !== "Checked In") return s;
+        const due = calcTrueDue(b);
+        return due > 0 ? s + due : s;
+      },
       0,
     );
     return { revenueIn, expenseOut, remunerationOut, outstandingDues };
