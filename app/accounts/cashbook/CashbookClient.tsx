@@ -965,11 +965,18 @@ export default function CashbookClient({
   // revenue/expense follow the current date-range (transactions are already
   // filtered to [filterFromDate, filterToDate]); dues are a live snapshot.
   const summary = useMemo(() => {
-    let revenueIn = 0, expenseOut = 0, remunerationOut = 0;
+    let revenueIn = 0, expenseOut = 0, remunerationOut = 0, refundsOut = 0;
     for (const t of transactions) {
       if (t.deletedAt !== null) continue;   // same guard the ledger uses to grey out deleted rows
       if (t.type === "revenue_in") revenueIn += t.amount;
       else if (t.type === "expense_out") {
+        // Refund disbursements FIRST (2026-08-25): identified by the
+        // booking_payment_id LINKAGE, never by category — these rows carry
+        // category_id NULL by design and were falling into Expense Paid,
+        // making it exceed P&L operating by exactly the range's refunds.
+        // Surfaced as their own figure (not dropped) so the tiles still sum
+        // to what the ledger moved, just labelled truthfully.
+        if (t.bookingPaymentId) { refundsOut += t.amount; continue; }
         // Three-kind whitelist (2026-08-18, matching the P&L fix):
         //   remuneration — appropriation of profit, its own tile;
         //   adjustment   — corrections (test-data write-offs), in NEITHER
@@ -994,7 +1001,7 @@ export default function CashbookClient({
       },
       0,
     );
-    return { revenueIn, expenseOut, remunerationOut, outstandingDues };
+    return { revenueIn, expenseOut, remunerationOut, refundsOut, outstandingDues };
   }, [transactions, bookings, expenseCatMap]);
 
   // ── Loading state ──────────────────────────────────────────
@@ -1057,7 +1064,7 @@ export default function CashbookClient({
       </div>
 
       {/* ── P&L-style cash summary strip ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #4F8B36", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#4F8B36" }}>Revenue received</div>
           <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.revenueIn)}</div>
@@ -1066,7 +1073,12 @@ export default function CashbookClient({
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #C5302A", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#C5302A" }}>Expense paid</div>
           <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.expenseOut)}</div>
-          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Cash out · operating expenses</div>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Cash out · operating, excl. refunds</div>
+        </div>
+        <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #B06AB3", borderRadius: 10, padding: "15px 18px" }}>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#B06AB3" }}>Refunds paid out</div>
+          <div style={{ fontFamily: oswaldFamily, fontSize: 30, fontWeight: 600, color: "#3F3F3F", lineHeight: 1.05, marginTop: 6 }}>{formatBdt(summary.refundsOut)}</div>
+          <div style={{ fontFamily: archivoFamily, fontSize: 11.5, color: "#8A8A8A", marginTop: 3 }}>Guest money returned · nets against revenue</div>
         </div>
         <div style={{ background: "#fff", border: "1px solid #E6E6E6", borderTop: "3px solid #8A8A8A", borderRadius: 10, padding: "15px 18px" }}>
           <div style={{ fontFamily: archivoFamily, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "#8A8A8A" }}>Remuneration paid</div>

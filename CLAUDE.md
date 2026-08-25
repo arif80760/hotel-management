@@ -201,6 +201,23 @@ Bug note was stale); the client mirror `derivePaymentStatus` now takes
 optional extra/discount params and every live-booking call site passes
 them.
 
+### Refund rows: the LINKAGE is the identity — never add a category
+Refund-disbursement ledger rows are `expense_out` with `category_id`
+NULL **by design**; their identity is `booking_payment_id IS NOT NULL`,
+stamped by the money-writing path itself. Every canonical consumer
+keys on that linkage: P&L "Less: Refunds", the Monthly Owner Report's
+refunds line, `v_refunds`, the activity-log dedup, the Cashbook
+"Refunds paid out" tile, and the daily report's "Guest refund" label.
+Decision (Arif, 2026-08-25): do NOT create a `guest_refund` system
+category — it would be a second, redundant marker that can drift from
+the structural one and would require touching live money-writing
+functions for zero informational gain. Corollary for new code: any
+`expense_out` bucketing MUST first branch on `booking_payment_id`
+(refunds are not expenses of any kind); forgetting that filter is how
+the Cashbook tile counted refunds as "Expense Paid" until 2026-08-25.
+These rows do NOT belong in `v_unclassified_expenses` — they are not
+unclassified, they are a different row type.
+
 ### Never Break Existing Flow
 - Do not change the booking creation, check-in, check-out, payment, or override flows unless explicitly asked
 - Do not remove or rename context functions — other components depend on them

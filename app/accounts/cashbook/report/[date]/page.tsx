@@ -193,6 +193,10 @@ export default async function CashbookReportPage({ params }: PageProps) {
         return (t.revenue_category_id && revCatName.get(t.revenue_category_id as string)) || "Other revenue";
       }
       case "expense_out": {
+        // Refund disbursements: identified by the booking_payment_id LINKAGE
+        // (category_id is NULL by design) — labelled truthfully instead of
+        // falling through to the bare "Expense" fallback (2026-08-25).
+        if (t.booking_payment_id) return "Guest refund";
         const base = (t.category_id && expCatName.get(t.category_id as string)) || "Expense";
         const item = t.expense_item_id ? itemName.get(t.expense_item_id as string) : undefined;
         const receiver = (t.employee_id ? empName.get(t.employee_id as string) : undefined)
