@@ -126,14 +126,14 @@ export default function MonthlyReportClient({ report }: { report: MonthlyReportD
                 <td />
               </tr>
               <tr className="border-b border-slate-100">
-                <td className="py-2 pr-3 font-semibold text-slate-800">Room revenue (booking payments received)</td>
+                <td className="py-2 pr-3 font-semibold text-slate-800">Room revenue — payments received (cash basis)</td>
                 <td className="py-2 pl-3 text-right tabular-nums font-semibold text-emerald-700">
                   ৳{formatAmount(m.roomRevenue)}
                   <Delta now={m.roomRevenue} before={p?.roomRevenue} />
                 </td>
               </tr>
               <tr className="border-b border-slate-100">
-                <td className="py-2 pr-3 font-semibold text-slate-800">Total collections (all revenue received)</td>
+                <td className="py-2 pr-3 font-semibold text-slate-800">Total collections — all payments received (cash basis)</td>
                 <td className="py-2 pl-3 text-right tabular-nums font-semibold text-emerald-700">
                   ৳{formatAmount(m.totalCollections)}
                   <Delta now={m.totalCollections} before={p?.totalCollections} />

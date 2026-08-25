@@ -480,7 +480,7 @@ export default function RoomAnalyticsClient() {
       <div className="p-8 space-y-5">
         <div>
           <h1 className="text-[22px] font-semibold text-slate-900 tracking-tight">Room Analytics</h1>
-          <p className="text-[13px] text-slate-500 mt-1">Performance metrics across all rooms for the selected period.</p>
+          <p className="text-[13px] text-slate-500 mt-1">Revenue earned (accrual: nights × rate, incl. unpaid dues) — room only, no hall/other. Payments-received view: Revenue Report.</p>
         </div>
         {filterBar}
         <div className="rounded-xl border border-dashed border-slate-200 bg-white px-6 py-16 flex items-center justify-center text-[13px] text-slate-400">
@@ -511,7 +511,7 @@ export default function RoomAnalyticsClient() {
         <div>
           <h1 className="text-[22px] font-semibold text-slate-900 tracking-tight leading-none">Room Analytics</h1>
           <p className="text-[13px] text-slate-500 mt-1">
-            Performance metrics across all rooms for the selected period.
+            Revenue earned (accrual: nights × rate, incl. unpaid dues) — room only, no hall/other. Payments-received view: Revenue Report.
           </p>
         </div>
         <a

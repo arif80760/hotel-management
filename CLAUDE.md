@@ -201,6 +201,24 @@ Bug note was stale); the client mirror `derivePaymentStatus` now takes
 optional extra/discount params and every live-booking call site passes
 them.
 
+### Two revenue bases — never compare figures across them
+**Earned (accrual)**: nights × rate — what stays were worth, including
+unpaid dues. ONLY surface: Room Analytics (room revenue only, no
+hall/other). **Received (cash)**: `revenue_in` ledger rows — money
+that actually arrived. Surfaces: Revenue Report, Monthly Owner Report,
+Cashbook, assistant `v_revenue`. Earned will exceed received by the
+unpaid dues plus timing differences — that gap is information, not a
+bug (2026-08-25 reconciliation: the two cash surfaces were byte-
+identical once display rounding was removed; the "discrepancy" was a
+`Math.round` tile hiding the ledger's legitimate paisa tail from four
+legacy carried-forward split rows — money surfaces format 2dp, never
+round). Within the cash basis: room = `booking_payment_id` linkage;
+hall/other = manual rows with `revenue_category_id`. PAGINATION RULE
+(same sweep): any `.range()`-paged Supabase query MUST carry
+`.order("id")` — unordered pages are nondeterministic and silently
+drop/duplicate rows past 1,000 (the Monthly Owner Report's `paged()`
+was wired this way; fixed before August's 705 rows crossed the line).
+
 ### Refund rows: the LINKAGE is the identity — never add a category
 Refund-disbursement ledger rows are `expense_out` with `category_id`
 NULL **by design**; their identity is `booking_payment_id IS NOT NULL`,

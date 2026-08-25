@@ -26,7 +26,10 @@ function trendDayLabel(iso:string){ const d=new Date(iso+"T00:00:00"); return d.
 function trendMonthLabel(key:string){ const d=new Date(key+"-01T00:00:00"); return d.toLocaleDateString("en-GB",{month:"short",year:"numeric"}); }
 function daysInclusive(fromISO:string,toISO:string){ const a=new Date(fromISO+"T00:00:00").getTime(); const b=new Date(toISO+"T00:00:00").getTime(); if(isNaN(a)||isNaN(b)||b<a)return 0; return Math.floor((b-a)/86400000)+1; }
 function formatMethod(m:string){ return m.split("_").map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(" "); }
-const taka=(n:number)=>`৳${Math.round(Math.abs(n)).toLocaleString()}`;
+// 2dp — never Math.round: rounding hid the ledger's legitimate paisa tail
+// (four legacy carried-forward split rows) and manufactured a phantom .03
+// discrepancy against the Monthly Owner Report (2026-08-25).
+const taka=(n:number)=>`৳${formatAmount(Math.abs(n))}`;
 const k=(v:number)=>(v?`৳${Math.round(v/1000)}k`:"");
 
 type Preset = "this_month" | "last_month" | "this_year" | "all" | "custom";
@@ -167,7 +170,7 @@ export default function RevenueReportClient({ oswaldFamily, archivoFamily }:{ os
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,flexWrap:"wrap",marginBottom:20}}>
         <div>
           <div style={osw({fontSize:26,fontWeight:600,letterSpacing:".05em"})}><span style={{color:C.green}}>REVENUE</span> REPORT</div>
-          <div style={{fontSize:13,color:C.mut,marginTop:4}}>All income — room/booking and manually recorded — for the selected range.</div>
+          <div style={{fontSize:13,color:C.mut,marginTop:4}}>Payments received (cash basis) — money that actually arrived in the range, room/booking and manual. Earned-revenue view: Room Analytics.</div>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <a href="/accounts/revenue-management" style={{fontFamily:archivoFamily,fontSize:12,fontWeight:600,color:C.ink,border:`1px solid ${C.hair}`,borderRadius:8,padding:"8px 12px",textDecoration:"none"}}>← Revenue entries</a>

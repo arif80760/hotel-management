@@ -101,6 +101,7 @@ async function computeMonth(sc: SupabaseClient, month: string): Promise<MonthMet
         .select("room_id, check_in_date, check_out_date, actual_checkout_date, status")
         .not("status", "in", "(cancelled,no_show)")
         .lt("check_in_date", measuredToExclusive)
+        .order("id")
         .range(a, b),
     ),
   ]);
@@ -123,6 +124,7 @@ async function computeMonth(sc: SupabaseClient, month: string): Promise<MonthMet
       .is("deleted_at", null)
       .gte("txn_date", from)
       .lt("txn_date", toExclusive)
+      .order("id")
       .range(a, b),
   );
   const { data: cats } = await sc.from("expense_categories").select("id, name, kind");
@@ -156,10 +158,11 @@ async function computeMonth(sc: SupabaseClient, month: string): Promise<MonthMet
     (a, b) => sc.from("bookings")
       .select("id, created_at, status, total_amount, extra_charge_amount, additional_discount_amount")
       .neq("status", "cancelled")
+      .order("id")
       .range(a, b),
   );
   const payments = await paged<{ booking_id: string; amount: number; created_at: string }>(
-    (a, b) => sc.from("payments").select("booking_id, amount, created_at").range(a, b),
+    (a, b) => sc.from("payments").select("booking_id, amount, created_at").order("id").range(a, b),
   );
   const keptBookingIds = new Set(bookings.map((b) => b.id));
   const eff = (b: (typeof bookings)[number]) =>
