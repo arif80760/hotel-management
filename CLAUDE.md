@@ -195,9 +195,11 @@ clean (a stale tab across BK-1384's mid-stay extension explained the
 ৳1,500), but the sweep found the REAL instance in the Cashbook dues
 tile — fixed to calcTrueDue the same day. Stale-tab insurance: the
 HotelContext focus refetch (60s-throttled) re-pulls rooms + bookings on
-tab focus. KNOWN COUSIN (scoped, unfixed): `derivePaymentStatus` and DB
-trigger `fn_sync_payment_status` compare paid against BARE total — a
-booking fully paid except its extra charge shows a "Paid" pill.
+tab focus. The pill cousin is RESOLVED (2026-08-25): the DB trigger had compared
+against the effective total since May (phase11-20 — the repo's Known
+Bug note was stale); the client mirror `derivePaymentStatus` now takes
+optional extra/discount params and every live-booking call site passes
+them.
 
 ### Never Break Existing Flow
 - Do not change the booking creation, check-in, check-out, payment, or override flows unless explicitly asked
@@ -260,17 +262,19 @@ Optimistic `BookingRoom` entries carry IDs of the form `"optimistic-BK-XXXX-room
 #### ~~Dashboard occupancy showed 0 while Room Board showed correct counts~~ ✅ Resolved
 `DashboardStats` and `page.tsx` were reading `rooms.status` (physical DB column) for Occupied/Available counts. That column lags behind booking state, so the KPI cards and Occupancy-by-Floor showed 0% while the Room Board (which derives status from bookings via `deriveRoomStatusForDate`) showed the true counts. Both dashboard surfaces now call `deriveRoomStatusForDate` from `lib/roomStatus.ts`. The hardcoded `["Floor 1"…"Floor 4"]` floor list was also replaced with a live-derived, numerically-sorted list so all floors show up automatically.
 
-#### Known Bug — fn_sync_payment_status doesn't account for extras
-Location: `sql/schema/05-triggers.sql`
-
-Trigger compares `paid_amount >= total_amount` but does NOT include `extra_charge_amount`, `early_deduction_amount`, or `additional_discount_amount`. Fix:
-```sql
-paid_amount >= (total_amount
-                + COALESCE(extra_charge_amount, 0)
-                - COALESCE(early_deduction_amount, 0)
-                - COALESCE(additional_discount_amount, 0))
-```
-Priority: Medium.
+#### ~~Known Bug — fn_sync_payment_status doesn't account for extras~~ ✅ Resolved (and the note was STALE)
+Verified against the LIVE body 2026-08-25: the trigger has compared paid
+against the effective total (`total_amount + extra_charge_amount −
+additional_discount_amount`) since the 2026-05-12 phase11-20 migration,
+and its `UPDATE OF` list includes both extras columns — this note
+outlived the fix by three months and mis-scoped the 2026-08-25 pill
+work (early deduction is inside total_amount, so it does NOT appear in
+the comparison — the old "fix" sketch above subtracting it was wrong).
+The CLIENT mirror `derivePaymentStatus` was the half actually still
+comparing bare total — fixed 2026-08-25 (optional extras params;
+threaded through every live-booking call site; creation-time sites
+correct without them). Data check at fix time: 0 wrong pills across
+457 non-cancelled bookings.
 
 #### Known Bug — fn_sync_paid_amount doesn't handle UPDATE/DELETE
 Location: `sql/schema/05-triggers.sql`

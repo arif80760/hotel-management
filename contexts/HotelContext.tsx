@@ -529,7 +529,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       prev.map(b => {
         if (b.id !== id) return b;
         const newPaid   = b.amountPaid + additionalAmount;
-        const newStatus = bookingsService.derivePaymentStatus(b.totalAmount, newPaid, b.status);
+        const newStatus = bookingsService.derivePaymentStatus(b.totalAmount, newPaid, b.status, b.extraChargeAmount, b.additionalDiscountAmount);
         return { ...b, amountPaid: newPaid, payment: newStatus, lastPaymentMethod: method };
       })
     );
@@ -733,7 +733,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
           // when updateBooking resolves and the booking is patched with the
           // authoritative re-fetched data in the .then() handler below.
           patch.totalAmount = changes.totalAmount;
-          patch.payment = bookingsService.derivePaymentStatus(changes.totalAmount, b.amountPaid, b.status);
+          patch.payment = bookingsService.derivePaymentStatus(changes.totalAmount, b.amountPaid, b.status, b.extraChargeAmount, b.additionalDiscountAmount);
         }
         if (changes.totalGuests      !== undefined) patch.totalGuests      = changes.totalGuests;
         if (changes.additionalGuests !== undefined) patch.additionalGuests = changes.additionalGuests;
@@ -854,7 +854,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         ...b,
         rooms:       [...b.rooms, optimisticRoom],
         totalAmount: newTotal,
-        payment:     bookingsService.derivePaymentStatus(newTotal, b.amountPaid, b.status),
+        payment:     bookingsService.derivePaymentStatus(newTotal, b.amountPaid, b.status, b.extraChargeAmount, b.additionalDiscountAmount),
       })
     );
     setRooms(prev =>
@@ -930,7 +930,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         ...b,
         rooms:       updatedRooms,
         totalAmount: newTotal,
-        payment:     bookingsService.derivePaymentStatus(newTotal, b.amountPaid, newBookingStatus),
+        payment:     bookingsService.derivePaymentStatus(newTotal, b.amountPaid, newBookingStatus, b.extraChargeAmount, b.additionalDiscountAmount),
         status:      newBookingStatus,
       })
     );
@@ -1038,7 +1038,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         ...b,
         rooms:       updatedRooms,
         totalAmount: newTotal,
-        payment:     bookingsService.derivePaymentStatus(newTotal, b.amountPaid, b.status),
+        payment:     bookingsService.derivePaymentStatus(newTotal, b.amountPaid, b.status, b.extraChargeAmount, b.additionalDiscountAmount),
       })
     );
 
@@ -1143,7 +1143,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       prev.map(b => b.id !== bookingRef ? b : {
         ...b,
         amountPaid: newAmountPaid,
-        payment:    bookingsService.derivePaymentStatus(b.totalAmount, newAmountPaid, b.status),
+        payment:    bookingsService.derivePaymentStatus(b.totalAmount, newAmountPaid, b.status, b.extraChargeAmount, b.additionalDiscountAmount),
       })
     );
 

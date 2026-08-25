@@ -1118,7 +1118,7 @@ export default function FrontDeskClient() {
         const finalPayable              = finalPayableBeforeModalPay - modalPayAmtNum;
         const isOverpayment             = modalPayAmtNum > Math.max(0, finalPayableBeforeModalPay);
         const canOverride               = isAdmin;
-        const payStatus                 = derivePaymentStatus(checkoutConfirm.totalAmount, liveAmountPaid, checkoutConfirm.status);
+        const payStatus                 = derivePaymentStatus(checkoutConfirm.totalAmount, liveAmountPaid, checkoutConfirm.status, checkoutConfirm.extraChargeAmount, checkoutConfirm.additionalDiscountAmount);
         return (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
@@ -1857,11 +1857,11 @@ export default function FrontDeskClient() {
                       ৳{(payModal.amountPaid + parseFloat(payAmount)).toLocaleString()} paid
                     </p>
                     <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
-                      derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status) === "Paid"
+                      derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status, payModal.extraChargeAmount, payModal.additionalDiscountAmount) === "Paid"
                         ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
                         : "bg-blue-50 text-blue-700 ring-1 ring-blue-200"
                     }`}>
-                      {derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status)}
+                      {derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status, payModal.extraChargeAmount, payModal.additionalDiscountAmount)}
                     </span>
                   </div>
                 )}

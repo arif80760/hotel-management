@@ -5291,7 +5291,7 @@ export default function BookingsClient({ initialRoom }: Props) {
         const modalPayAmtNum            = parseFloat(modalPayAmt) || 0;
         const finalPayable              = finalPayableBeforeModalPay - modalPayAmtNum;
         const isOverpayment             = modalPayAmtNum > Math.max(0, finalPayableBeforeModalPay);
-        const payStatus                 = derivePaymentStatus(checkoutConfirm.totalAmount, liveAmountPaid, checkoutConfirm.status);
+        const payStatus                 = derivePaymentStatus(checkoutConfirm.totalAmount, liveAmountPaid, checkoutConfirm.status, checkoutConfirm.extraChargeAmount, checkoutConfirm.additionalDiscountAmount);
         return (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
@@ -6513,12 +6513,12 @@ export default function BookingsClient({ initialRoom }: Props) {
                       ৳{(payModal.amountPaid + parseFloat(payAmount)).toLocaleString()} paid
                     </p>
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                      paymentBadge(derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status))
+                      paymentBadge(derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status, payModal.extraChargeAmount, payModal.additionalDiscountAmount))
                     }`}>
                       <span className={`w-1.5 h-1.5 rounded-full ${
-                        paymentDot(derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status))
+                        paymentDot(derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status, payModal.extraChargeAmount, payModal.additionalDiscountAmount))
                       }`} />
-                      {derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status)}
+                      {derivePaymentStatus(payModal.totalAmount, payModal.amountPaid + parseFloat(payAmount), payModal.status, payModal.extraChargeAmount, payModal.additionalDiscountAmount)}
                     </span>
                   </div>
                 )}

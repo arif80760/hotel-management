@@ -69,9 +69,20 @@ export function calcTrueDue(b: {
 
 /**
  * Derives PaymentStatus from booking status and raw totals (pure, no DB).
- * Mirrors the Postgres trigger fn_sync_payment_status.
- * Cancelled bookings always return "Cancelled" regardless of amounts.
+ * Mirrors the Postgres trigger fn_sync_payment_status EXACTLY — including
+ * the EFFECTIVE-total comparison (2026-08-25): "Paid" means paid covers
+ * total + extra_charge − additional_discount, not the bare total. The DB
+ * has compared against the effective total since the 2026-05-12
+ * phase11-20 migration; this client mirror was the half still comparing
+ * bare total (a mid-stay extra charge on a fully-paid booking would have
+ * shown a "Paid" pill client-side while ৳X remained owed).
  *
+ * extraChargeAmount / additionalDiscountAmount are optional (default 0) —
+ * creation-time call sites, where extras cannot exist yet, are correct
+ * without them. Any call site whose booking CAN carry extras must pass
+ * them.
+ *
+ * Cancelled bookings always return "Cancelled" regardless of amounts.
  * Canonical version — moved here from bookingsService.ts (Phase 11 #28).
  * bookingsService re-exports this to preserve its existing call surface.
  */
@@ -79,10 +90,14 @@ export function derivePaymentStatus(
   totalAmount: number,
   amountPaid:  number,
   status:      BookingStatus,
+  extraChargeAmount?: number,
+  additionalDiscountAmount?: number,
 ): PaymentStatus {
   if (status === "Cancelled")    return "Cancelled";
   if (status === "No Show")      return "Cancelled";   // no-show: settled, deposit kept
   if (amountPaid <= 0)           return "Unpaid";
-  if (amountPaid >= totalAmount) return "Paid";
+  const effectiveTotal =
+    totalAmount + (extraChargeAmount ?? 0) - (additionalDiscountAmount ?? 0);
+  if (amountPaid >= effectiveTotal) return "Paid";
   return "Partial";
 }
