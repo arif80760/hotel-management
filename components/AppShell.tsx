@@ -33,9 +33,13 @@ import { HotelProvider } from "@/contexts/HotelContext";
 import { ReferenceDataProvider } from "@/contexts/ReferenceDataContext";
 import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
+import SlowConnectionNotice, { useSlowWatch } from "@/components/SlowConnectionNotice";
 
 export default function AppShell({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
+  // Incident fix (2026-08-25): if the session check hangs past 8s, say so
+  // instead of spinning silently (2026-08-24 Supabase wobble).
+  useSlowWatch("auth-session", loading);
   const router   = useRouter();
   const pathname = usePathname();
 
@@ -80,6 +84,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
     return (
       <div className="h-full w-full flex items-center justify-center bg-slate-50">
         <div className="w-6 h-6 border-2 border-slate-300 border-t-amber-500 rounded-full animate-spin" />
+        <SlowConnectionNotice />
       </div>
     );
   }
@@ -140,6 +145,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
             </main>
           </div>
         </div>
+        {/* One app-wide instance — covers the admin gate, initial data
+            load, assistant send, and any future armed slow-watch. */}
+        <SlowConnectionNotice />
       </ReferenceDataProvider>
     </HotelProvider>
   );

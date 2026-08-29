@@ -43,6 +43,7 @@ import type { UpdateBookingPayload, BulkCheckinResult } from "@/services/booking
 import { deriveBookingSpan } from "@/lib/bookingSpan";
 import { earlyNights } from "@/lib/checkoutUtils";
 import { getRoomCategories, type RoomCategory } from "@/services/roomCategoriesService";
+import { armSlowWatch, disarmSlowWatch } from "@/lib/slowConnection";
 import { buildCategoryNameMap, displayCategory } from "@/lib/categoryNames";
 
 // Re-export types and ROOM_CATALOG so other files keep working unchanged.
@@ -245,6 +246,9 @@ export function HotelProvider({ children }: { children: ReactNode }) {
   // Fetches rooms and bookings from Supabase once when the app starts.
   useEffect(() => {
     async function loadData() {
+      // Incident fix (2026-08-25): a hung initial load surfaces the
+      // slow-connection notice instead of an indefinitely empty app.
+      armSlowWatch("initial-data");
       try {
         const [fetchedRooms, fetchedBookings, fetchedCategories] = await Promise.all([
           roomsService.getAllRooms(),
@@ -271,6 +275,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       } catch (err) {
         console.error("[HotelContext] Failed to load data from Supabase:", err);
       } finally {
+        disarmSlowWatch("initial-data");
         setLoading(false);
       }
     }

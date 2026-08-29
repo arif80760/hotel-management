@@ -33,6 +33,7 @@
 import { useEffect, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 
 export default function AdminGate({ children }: { children: ReactNode }) {
   const { user, profile, role, loading } = useAuth();
@@ -41,6 +42,9 @@ export default function AdminGate({ children }: { children: ReactNode }) {
   // True while we don't yet know the role for certain.
   // (signed in but profile not loaded yet → still resolving)
   const resolving = loading || (!!user && profile === null);
+  // Incident fix (2026-08-25): a hung role check shows the slow-connection
+  // notice (via AppShell's mounted instance) instead of a bare spinner.
+  useSlowWatch("admin-gate", resolving);
   const isAdmin   = role === "admin";
 
   // Once resolved and confirmed non-admin, send them home.

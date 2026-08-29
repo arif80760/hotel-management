@@ -21,6 +21,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { armSlowWatch, disarmSlowWatch } from "@/lib/slowConnection";
 
 type ToolResult = { tool: string; input: unknown; result: unknown };
 
@@ -86,6 +87,10 @@ export default function AssistantClient() {
     setItems((prev) => [...prev, { id, question, status: "loading" }]);
     setInput("");
     setSending(true);
+    // Incident fix (2026-08-25): waiting-for-reply arms the slow-connection
+    // notice; disarmed on the FIRST stream byte so long answers that are
+    // already streaming never read as a connection problem.
+    armSlowWatch("assistant-send");
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -139,6 +144,9 @@ export default function AssistantClient() {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        // First byte received — the connection is alive; stop the slow-watch
+        // so long streamed answers never read as a connection problem.
+        disarmSlowWatch("assistant-send");
         buffer += decoder.decode(value, { stream: true });
         let nl: number;
         while ((nl = buffer.indexOf("\n")) >= 0) {
@@ -154,6 +162,7 @@ export default function AssistantClient() {
         ? { ...it, status: "error", error: message }
         : it));
     } finally {
+      disarmSlowWatch("assistant-send");   // idempotent — covers error paths
       setSending(false);
       inputRef.current?.focus();
     }
