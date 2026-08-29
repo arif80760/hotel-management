@@ -144,6 +144,10 @@ export const supabase = g._supabase;
 
 ### Number Input Styling
 Use `tabular-nums` class on all currency/number display elements.
+Spin buttons are hidden APP-WIDE (globals.css, 2026-08-26) and wheel /
+arrow-key stepping is neutralised by the delegated NumberInputGuard
+mounted in AppShell — never add per-field onWheel/onKeyDown spinner
+hacks; every current and future `input[type=number]` is covered.
 
 ### Modal z-index Hierarchy
 | Tier | Class | Used for |

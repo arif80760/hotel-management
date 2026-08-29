@@ -44,3 +44,20 @@ body {
     font-size: 16px !important;
   }
 }
+
+/* ── Number-input spinners: hidden app-wide (2026-08-26) ─────────
+   Spin buttons invite accidental value changes on money fields and
+   add visual noise. One rule covers every current and future
+   input[type=number]. The BEHAVIOURAL half lives in
+   components/NumberInputGuard.tsx (delegated listeners): hiding the
+   arrows does not disable wheel/arrow-key stepping, which would now
+   change values with no visual cue — the guard neutralises both. */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}

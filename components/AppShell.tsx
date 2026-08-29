@@ -34,6 +34,7 @@ import { ReferenceDataProvider } from "@/contexts/ReferenceDataContext";
 import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
 import SlowConnectionNotice, { useSlowWatch } from "@/components/SlowConnectionNotice";
+import NumberInputGuard from "@/components/NumberInputGuard";
 
 export default function AppShell({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
@@ -148,6 +149,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
         {/* One app-wide instance — covers the admin gate, initial data
             load, assistant send, and any future armed slow-watch. */}
         <SlowConnectionNotice />
+        {/* Neutralises wheel/arrow-key stepping on all number inputs
+            (spinners hidden in globals.css — see that rule). */}
+        <NumberInputGuard />
       </ReferenceDataProvider>
     </HotelProvider>
   );
