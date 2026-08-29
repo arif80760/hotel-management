@@ -54,6 +54,8 @@ import {
 
 import { getAllRooms } from "@/services/roomsService";
 import type { MockRoom } from "@/lib/mockData";
+import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 
 const ITEM_TYPES: { value: InventoryItemType; label: string }[] = [
   { value: "consumable", label: "Consumable (water bottles, soap, etc.)" },
@@ -93,12 +95,16 @@ function todayISO(): string {
 
 export default function InventoryClient() {
   // ── Data ───────────────────────────────────────────────────
-  const [items,      setItems]      = useState<InventoryItem[]>([]);
-  const [categories, setCategories] = useState<InventoryCategory[]>([]);
-  const [stockMap,   setStockMap]   = useState<Map<string, number>>(new Map());
+  // Content-first (2026-08-25): seed from session cache; background refresh.
+  const cachedInv = readSessionCache<{ it: InventoryItem[]; cats: InventoryCategory[]; stk: [string, number][] }>("inventory-page");
+  const hadInvCache = cachedInv !== null;
+  const [items,      setItems]      = useState<InventoryItem[]>(cachedInv?.it ?? []);
+  const [categories, setCategories] = useState<InventoryCategory[]>(cachedInv?.cats ?? []);
+  const [stockMap,   setStockMap]   = useState<Map<string, number>>(new Map(cachedInv?.stk ?? []));
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching,   setFetching]   = useState(true);
+  useSlowWatch("inventory-page", fetching && !hadInvCache);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   // ── Filter ─────────────────────────────────────────────────
@@ -241,6 +247,7 @@ export default function InventoryClient() {
         setStockMap(stk);
         setEmployees(emps);
         setRooms(rms);
+        writeSessionCache("inventory-page", { it, cats, stk: [...stk.entries()] });
       } catch (err) {
         if (!cancelled) setFetchError(err instanceof Error ? err.message : "Failed to load.");
       } finally {
@@ -633,7 +640,7 @@ export default function InventoryClient() {
   }
 
   // ── Loading / Error ────────────────────────────────────────
-  if (fetching) {
+  if (fetching && !hadInvCache) {
     return (
       <div className="p-8">
         <h1 className="text-2xl font-semibold text-slate-800">Inventory</h1>

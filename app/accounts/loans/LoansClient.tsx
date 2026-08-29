@@ -7,6 +7,8 @@ import {
   type LoanWithStatus,
   type LoanRepayment,
 } from "@/services/loansService";
+import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 function fmtDate(iso: string | null): string {
@@ -16,8 +18,12 @@ function fmtDate(iso: string | null): string {
 function taka(n: number): string { return `৳${n.toLocaleString()}`; }
 
 export default function LoansClient() {
-  const [loans, setLoans]     = useState<LoanWithStatus[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Content-first (2026-08-25): seed from the session cache so repeat
+  // visits render instantly; the mount effect refreshes in the background.
+  const cachedLoans = readSessionCache<LoanWithStatus[]>("loans");
+  const [loans, setLoans]     = useState<LoanWithStatus[]>(cachedLoans ?? []);
+  const [loading, setLoading] = useState(cachedLoans === null);
+  useSlowWatch("loans-page", loading);
   const [error, setError]     = useState<string | null>(null);
 
   // account id -> display name (Cash / Bank / bKash / Nagad) — from session cache
@@ -41,6 +47,7 @@ export default function LoansClient() {
         const loanData = await listLoans();
         if (cancelled) return;
         setLoans(loanData);
+        writeSessionCache("loans", loanData);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load loans.");
       } finally {

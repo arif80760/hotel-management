@@ -44,6 +44,8 @@ import {
   setExpenseItemActive,
   type ExpenseItem,
 } from "@/services/expenseItemsService";
+import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 
 import {
   getExpenses,
@@ -397,14 +399,21 @@ export default function ExpenseClient() {
   // profiles.role gate as everywhere else. Staff see Cash in Hand only.
   const { role } = useAuth();
   const isAdmin = role === "admin";
-  const [expenses,        setExpenses]        = useState<Expense[]>([]);
-  const [employees,       setEmployees]       = useState<Employee[]>([]);
-  const [payeesHistory,   setPayeesHistory]   = useState<string[]>([]);
+  // Content-first (2026-08-25): seed from session cache (valid for the
+  // default today-filter this page mounts with); background refresh.
+  const cachedExp = readSessionCache<{
+    exps: Expense[]; emps: Employee[]; payeesH: string[];
+  }>("expense-page");
+  const hadExpCache = cachedExp !== null;
+  const [expenses,        setExpenses]        = useState<Expense[]>(cachedExp?.exps ?? []);
+  const [employees,       setEmployees]       = useState<Employee[]>(cachedExp?.emps ?? []);
+  const [payeesHistory,   setPayeesHistory]   = useState<string[]>(cachedExp?.payeesH ?? []);
   const [inventoryItems,  setInventoryItems]  = useState<InventoryItem[]>([]);
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching,   setFetching]   = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  useSlowWatch("expense-page", fetching && !hadExpCache);
 
   // ── Filter state ───────────────────────────────────────────
   const [filterFromDate, setFilterFromDate] = useState<string>(todayISO());
@@ -550,6 +559,7 @@ export default function ExpenseClient() {
         // categories come from the reference cache (no per-mount fetch here).
         setEmployees(emps);
         setPayeesHistory(payeesH);
+        writeSessionCache("expense-page", { exps, emps, payeesH });
         setInventoryItems(invItems);
         setInventoryCategories(invCats);
         setExpenseItems(expItems);
@@ -1182,8 +1192,8 @@ export default function ExpenseClient() {
   });
   const groups = groupByDate(visibleExpenses);
 
-  // ── Loading state ──────────────────────────────────────────
-  if (fetching) {
+  // ── Loading state — cold start only; cached visits render instantly ──
+  if (fetching && !hadExpCache) {
     return (
       <div className="p-8">
         <div className="flex items-center justify-between">

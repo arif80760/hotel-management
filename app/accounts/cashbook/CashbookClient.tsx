@@ -43,6 +43,8 @@ import { getExpenseItems } from "@/services/expenseItemsService";
 import { getAllEmployees } from "@/services/employeesService";
 import type { MockBooking } from "@/lib/mockData";
 import { calcTrueDue } from "@/lib/invoiceUtils";
+import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 // ─────────────────────────────────────────────────────────────
@@ -504,12 +506,18 @@ export default function CashbookClient({
   archivoFamily: string;
 }) {
   // ── Data ───────────────────────────────────────────────────
-  const [balances,     setBalances]     = useState<AccountBalance[]>([]);
+  // Content-first (2026-08-25): seed from session cache (valid for the
+  // default today-filter this page mounts with); background refresh.
+  const cachedCB = readSessionCache<{
+    bal: AccountBalance[]; txns: AccountTransaction[]; bks: MockBooking[];
+  }>("cashbook-page");
+  const hadCashbookCache = cachedCB !== null;
+  const [balances,     setBalances]     = useState<AccountBalance[]>(cachedCB?.bal ?? []);
   const [accounts,     setAccounts]     = useState<Account[]>([]);
-  const [transactions, setTransactions] = useState<AccountTransaction[]>([]);
+  const [transactions, setTransactions] = useState<AccountTransaction[]>(cachedCB?.txns ?? []);
   // bookings: live snapshot for the outstanding-dues tile. Loaded ONCE on
   // mount (period-independent) — NOT part of the date-range refetch.
-  const [bookings,     setBookings]     = useState<MockBooking[]>([]);
+  const [bookings,     setBookings]     = useState<MockBooking[]>(cachedCB?.bks ?? []);
   // paymentId -> { bookingRef, roomNumbers[] } for "Room revenue" row labels.
   // Batched: ONE lookup per data change covering every visible transaction
   // (ledger + Day Close activity) — never a per-row query.
@@ -573,6 +581,7 @@ export default function CashbookClient({
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching,   setFetching]   = useState(true);
+  useSlowWatch("cashbook-page", fetching && !hadCashbookCache);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   // ── Modal + form state ─────────────────────────────────────
@@ -688,6 +697,7 @@ export default function CashbookClient({
           setBalances(bal);
           setTransactions(txns);
           setBookings(bks);
+          writeSessionCache("cashbook-page", { bal, txns, bks });
           // accounts + category maps are populated from the reference cache effect.
           // Fire-and-forget the day-close status load. Non-fatal: if it
           // fails the card just stays hidden.
@@ -1004,8 +1014,8 @@ export default function CashbookClient({
     return { revenueIn, expenseOut, remunerationOut, refundsOut, outstandingDues };
   }, [transactions, bookings, expenseCatMap]);
 
-  // ── Loading state ──────────────────────────────────────────
-  if (fetching) {
+  // ── Loading state — cold start only; cached visits render instantly ──
+  if (fetching && !hadCashbookCache) {
     return (
       <div className="p-8">
         <p className="text-sm text-slate-400">Loading accounts…</p>

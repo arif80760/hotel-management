@@ -20,6 +20,8 @@ import {
   type RoomAnalyticsRow,
   type OccupancyTrendRow,
 } from "@/services/roomAnalyticsService";
+import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 import { useHotel } from "@/contexts/HotelContext";
 
 // ─────────────────────────────────────────────────────────────
@@ -230,6 +232,7 @@ export default function RoomAnalyticsClient() {
   const [rows,    setRows]    = useState<RoomAnalyticsRow[]>([]);
   const [trend,   setTrend]   = useState<OccupancyTrendRow[]>([]);
   const [loading, setLoading] = useState(true);
+  useSlowWatch("analytics-page", loading);
   const [error,   setError]   = useState<string | null>(null);
 
   // ── Date range state ────────────────────────────────────
@@ -244,14 +247,20 @@ export default function RoomAnalyticsClient() {
   // ── Load ─────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    // Content-first (2026-08-25): a range seen this session renders its
+    // cached rows instantly while the background refresh runs; unseen
+    // ranges keep the loader (an explicit new query).
+    const cacheKey = `analytics:${fromDate}:${toDate}`;
+    const cached = readSessionCache<{ r: RoomAnalyticsRow[]; t: OccupancyTrendRow[] }>(cacheKey);
+    if (cached) { setRows(cached.r); setTrend(cached.t); setLoading(false); }
+    else setLoading(true);
     setError(null);
     Promise.all([
       getRoomAnalyticsByRoom(fromDate, toDate),
       getRoomOccupancyTrend(fromDate, toDate),
     ])
       .then(([r, t]) => {
-        if (!cancelled) { setRows(r); setTrend(t); }
+        if (!cancelled) { setRows(r); setTrend(t); writeSessionCache(cacheKey, { r, t }); }
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load analytics.");

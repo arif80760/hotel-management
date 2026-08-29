@@ -6273,16 +6273,9 @@ export default function BookingsClient({ initialRoom }: Props) {
                   )}
                 </p>
 
-                {docsLoading && (
-                  <div className="flex items-center gap-2 py-6 justify-center">
-                    <svg className="w-4 h-4 text-slate-400 animate-spin" viewBox="0 0 24 24" fill="none">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
-                    </svg>
-                    <p className="text-[13px] text-slate-400">Loading documents…</p>
-                  </div>
-                )}
-
+                {/* Loader demoted (2026-08-25 loading redesign): sub-second
+                    fetch in a modal whose header already renders — rows
+                    simply appear when ready. */}
                 {!docsLoading && docsError && (
                   <div className="bg-rose-50 border border-rose-200 rounded-lg px-4 py-3 space-y-2">
                     <div className="flex items-start gap-2">
@@ -6941,9 +6934,8 @@ export default function BookingsClient({ initialRoom }: Props) {
                 </div>
 
                 {/* ── Payment History ─────────────────────────── */}
-                {tlLoading && (
-                  <p className="text-[11px] text-slate-400 italic mt-4">Loading payment history…</p>
-                )}
+                {/* Loader demoted (2026-08-25): headers render immediately,
+                    rows appear when the sub-second fetch lands. */}
                 {!tlLoading && tlPayments && tlPayments.length > 0 && (() => {
                   const totalIn  = tlPayments.filter(p => p.amount > 0).reduce((s, p) => s + p.amount, 0);
                   const totalOut = tlPayments.filter(p => p.amount < 0).reduce((s, p) => s + Math.abs(p.amount), 0);

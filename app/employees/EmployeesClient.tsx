@@ -24,6 +24,8 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/supabase";
 import * as employeesService from "@/services/employeesService";
+import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 import type { Employee, Designation, EmployeeAppRole } from "@/services/employeesService";
 import {
   DESIGNATIONS,
@@ -561,8 +563,12 @@ export default function EmployeesClient() {
   const isAdmin = role === "admin";
 
   // ── Remote state ────────────────────────────────────────────
-  const [employees,  setEmployees]  = useState<Employee[]>([]);
+  // Content-first (2026-08-25): seed from session cache; background refresh.
+  const cachedEmp = readSessionCache<Employee[]>("employees-page");
+  const hadEmpCache = cachedEmp !== null;
+  const [employees,  setEmployees]  = useState<Employee[]>(cachedEmp ?? []);
   const [fetching,   setFetching]   = useState(true);
+  useSlowWatch("employees-page", fetching && !hadEmpCache);
   const [fetchError, setFetchError] = useState<string | null>(null);
   // Banner for failed actions (delete, etc.) — distinct from load errors.
   const [actionError, setActionError] = useState<string | null>(null);
@@ -591,7 +597,7 @@ export default function EmployeesClient() {
     async function load() {
       try {
         const data = await employeesService.getAllEmployees();
-        if (!cancelled) setEmployees(data);
+        if (!cancelled) { setEmployees(data); writeSessionCache("employees-page", data); }
       } catch (err) {
         if (!cancelled) setFetchError(err instanceof Error ? err.message : "Failed to load employees.");
       } finally {
@@ -1142,7 +1148,7 @@ export default function EmployeesClient() {
       {/* ══════════════════════════════════════════════════════
           LOADING / ERROR
       ══════════════════════════════════════════════════════ */}
-      {fetching && (
+      {fetching && !hadEmpCache && (
         <div className="flex items-center justify-center py-16">
           <div className="w-6 h-6 border-2 border-slate-200 border-t-amber-500 rounded-full animate-spin" />
         </div>

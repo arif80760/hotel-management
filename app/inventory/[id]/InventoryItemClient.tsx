@@ -14,6 +14,8 @@ import { getInventoryCategories, type InventoryCategory } from "@/services/inven
 import { getAllRooms } from "@/services/roomsService";
 import type { MockRoom } from "@/lib/mockData";
 import { getAllEmployees, type Employee } from "@/services/employeesService";
+import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 
 const TYPE_LABEL: Record<InventoryMovementType, string> = {
   purchase: "Purchase", issue: "Issue", damage: "Damage", adjustment: "Adjustment", transfer: "Transfer",
@@ -40,13 +42,16 @@ function fmtDate(iso: string): string {
 }
 
 export default function InventoryItemClient({ itemId }: { itemId: string }) {
-  const [item, setItem]             = useState<InventoryItem | null>(null);
-  const [movements, setMovements]   = useState<InventoryMovement[]>([]);
-  const [stock, setStock]           = useState<number>(0);
-  const [categories, setCategories] = useState<InventoryCategory[]>([]);
-  const [rooms, setRooms]           = useState<MockRoom[]>([]);
-  const [employees, setEmployees]   = useState<Employee[]>([]);
-  const [loading, setLoading]       = useState(true);
+  // Content-first (2026-08-25): per-item session cache; background refresh.
+  const cachedItem = readSessionCache<{ it: InventoryItem | null; mv: InventoryMovement[]; stk: number; cats: InventoryCategory[]; rms: MockRoom[]; emps: Employee[] }>(`inventory-item:${itemId}`);
+  const [item, setItem]             = useState<InventoryItem | null>(cachedItem?.it ?? null);
+  const [movements, setMovements]   = useState<InventoryMovement[]>(cachedItem?.mv ?? []);
+  const [stock, setStock]           = useState<number>(cachedItem?.stk ?? 0);
+  const [categories, setCategories] = useState<InventoryCategory[]>(cachedItem?.cats ?? []);
+  const [rooms, setRooms]           = useState<MockRoom[]>(cachedItem?.rms ?? []);
+  const [employees, setEmployees]   = useState<Employee[]>(cachedItem?.emps ?? []);
+  const [loading, setLoading]       = useState(cachedItem === null);
+  useSlowWatch("inventory-item", loading);
   const [error, setError]           = useState<string | null>(null);
 
   useEffect(() => {
@@ -64,6 +69,7 @@ export default function InventoryItemClient({ itemId }: { itemId: string }) {
         if (cancelled) return;
         setItem(it); setMovements(mv); setStock(stk);
         setCategories(cats); setRooms(rms); setEmployees(emps);
+        writeSessionCache(`inventory-item:${itemId}`, { it, mv, stk, cats, rms, emps });
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load item.");
       } finally {

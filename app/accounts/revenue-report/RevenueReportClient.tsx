@@ -5,6 +5,8 @@ import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement
 import ChartDataLabels from "chartjs-plugin-datalabels";
 import { Line, Bar } from "react-chartjs-2";
 import { getTransactions, type AccountTransaction } from "@/services/accountsService";
+import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 import { getRevenues, type Revenue } from "@/services/revenueService";
 import { getAllBookings, getBookingPaymentMap } from "@/services/bookingsService";
 import type { MockBooking } from "@/lib/mockData";
@@ -54,11 +56,15 @@ export default function RevenueReportClient({ oswaldFamily, archivoFamily }:{ os
   const accounts   = useMemo(()=>accountDefs.map(a=>({id:a.id,name:a.name})),[accountDefs]);
   const categories = useMemo(()=>revenueCategories.map(c=>({id:c.id,name:c.name})),[revenueCategories]);
 
-  const [txns,setTxns]=useState<AccountTransaction[]>([]);
-  const [manual,setManual]=useState<Revenue[]>([]);
+  // Content-first (2026-08-25): seed from session cache (mount defaults); background refresh.
+  const cachedRR = readSessionCache<{ tx: AccountTransaction[]; rv: Revenue[] }>("revenue-report");
+  const hadRRCache = cachedRR !== null;
+  const [txns,setTxns]=useState<AccountTransaction[]>(cachedRR?.tx ?? []);
+  const [manual,setManual]=useState<Revenue[]>(cachedRR?.rv ?? []);
   const [bookingsByRef,setBookingsByRef]=useState<Map<string,MockBooking>>(new Map());
   const [paymentMap,setPaymentMap]=useState<Awaited<ReturnType<typeof getBookingPaymentMap>>>(new Map());
   const [fetching,setFetching]=useState(true);
+  useSlowWatch("revenue-report", fetching && !hadRRCache);
   const [fetchError,setFetchError]=useState<string|null>(null);
   const [Y,setY]=useState({ booking:Array(12).fill(0) as number[], other:Array(12).fill(0) as number[], ready:false });
   const [page,setPage]=useState(1);
@@ -70,6 +76,7 @@ export default function RevenueReportClient({ oswaldFamily, archivoFamily }:{ os
         if(cancelled)return;
         setTxns(tx); setManual(rv); setPaymentMap(pm);
         setBookingsByRef(new Map(bks.map(b=>[b.id,b])));
+        writeSessionCache("revenue-report", { tx, rv });
       }catch(err){ if(!cancelled) setFetchError(err instanceof Error?err.message:"Failed to load."); }
       finally{ if(!cancelled) setFetching(false); }
     })();

@@ -16,6 +16,8 @@ import {
   type RatePeriod,
 } from "@/services/ratePeriodsService";
 import { getRoomCategories, type RoomCategory } from "@/services/roomCategoriesService";
+import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 
 function todayISO() {
   const d = new Date();
@@ -37,9 +39,13 @@ type FormState = {
 const EMPTY_FORM: FormState = { id: null, category: "", label: "", startDate: "", endDate: "", rate: "" };
 
 export default function RateCalendarClient() {
-  const [periods, setPeriods] = useState<RatePeriod[]>([]);
-  const [categories, setCategories] = useState<RoomCategory[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Content-first (2026-08-25): seed from session cache; background refresh.
+  const cachedRC = readSessionCache<{ p: RatePeriod[]; c: RoomCategory[] }>("rate-calendar-page");
+  const hadRCCache = cachedRC !== null;
+  const [periods, setPeriods] = useState<RatePeriod[]>(cachedRC?.p ?? []);
+  const [categories, setCategories] = useState<RoomCategory[]>(cachedRC?.c ?? []);
+  const [loading, setLoading] = useState(!hadRCCache);
+  useSlowWatch("rate-calendar-page", loading);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [form, setForm] = useState<FormState | null>(null);   // null = closed
@@ -57,7 +63,9 @@ export default function RateCalendarClient() {
     try {
       const [p, c] = await Promise.all([getRatePeriods(), getRoomCategories()]);
       setPeriods(p);
-      setCategories(c.filter((x) => x.isActive));
+      const activeCats = c.filter((x) => x.isActive);
+      setCategories(activeCats);
+      writeSessionCache("rate-calendar-page", { p, c: activeCats });
       setLoadError(null);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));

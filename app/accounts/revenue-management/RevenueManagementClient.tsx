@@ -37,6 +37,8 @@ import {
 } from "@/services/revenueService";
 
 import { type Account } from "@/services/accountsService";
+import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 
@@ -86,11 +88,15 @@ export default function RevenueManagementClient() {
   // reference cache. `categories` is aliased so existing reads are unchanged;
   // category mutations call refreshRevenueCategories() to propagate edits.
   const { revenueCategories: categories, accountDefs: accounts, refreshRevenueCategories } = useReferenceData();
-  const [revenues,       setRevenues]       = useState<Revenue[]>([]);
-  const [payeesHistory,  setPayeesHistory]  = useState<string[]>([]);
+  // Content-first (2026-08-25): seed from session cache; background refresh.
+  const cachedRM = readSessionCache<{ revs: Revenue[]; payeesH: string[] }>("revenue-management");
+  const [revenues,       setRevenues]       = useState<Revenue[]>(cachedRM?.revs ?? []);
+  const [payeesHistory,  setPayeesHistory]  = useState<string[]>(cachedRM?.payeesH ?? []);
+  const hadRMCache = cachedRM !== null;
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching,   setFetching]   = useState(true);
+  useSlowWatch("revenue-management-page", fetching && !hadRMCache);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   // ── Filter state ───────────────────────────────────────────
@@ -144,6 +150,7 @@ export default function RevenueManagementClient() {
         setRevenues(revs);
         // categories + accounts come from the reference cache (no per-mount fetch).
         setPayeesHistory(payeesH);
+        writeSessionCache("revenue-management", { revs, payeesH });
       } catch (err) {
         if (!cancelled) {
           setFetchError(err instanceof Error ? err.message : "Failed to load.");
@@ -375,7 +382,7 @@ export default function RevenueManagementClient() {
   const groups = groupByDate(revenues);
 
   // ── Loading / Error states ─────────────────────────────────
-  if (fetching) {
+  if (fetching && !hadRMCache) {
     return (
       <div className="p-8">
         <div className="flex items-center justify-between">

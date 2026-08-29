@@ -30,6 +30,8 @@ import {
 } from "@/services/employeesService";
 
 import { getExpenseCategoryBySystemKey } from "@/services/expenseCategoriesService";
+import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
+import { useSlowWatch } from "@/components/SlowConnectionNotice";
 import { useReferenceData } from "@/contexts/ReferenceDataContext";
 
 // ── Payment kinds ──────────────────────────────────────────
@@ -99,12 +101,16 @@ function kindBadgeCls(kind: PayKind): string {
 export default function PayrollClient() {
   const { expenseCategories } = useReferenceData();
   // ── Data ───────────────────────────────────────────────────
-  const [employees, setEmployees] = useState<Employee[]>([]);
-  const [expenses, setExpenses] = useState<Expense[]>([]);
+  // Content-first (2026-08-25): seed from session cache; background refresh.
+  const cachedPay = readSessionCache<{ emps: Employee[]; exps: Expense[] }>("payroll-page");
+  const hadPayCache = cachedPay !== null;
+  const [employees, setEmployees] = useState<Employee[]>(cachedPay?.emps ?? []);
+  const [expenses, setExpenses] = useState<Expense[]>(cachedPay?.exps ?? []);
   const [salaryCategoryId, setSalaryCategoryId] = useState<string | null>(null);
 
   // ── Load state ─────────────────────────────────────────────
   const [fetching, setFetching] = useState(true);
+  useSlowWatch("payroll-page", fetching && !hadPayCache);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   // ── Month filter ───────────────────────────────────────────
@@ -138,6 +144,7 @@ export default function PayrollClient() {
         if (cancelled) return;
         setEmployees(emps);
         setExpenses(exps);
+        writeSessionCache("payroll-page", { emps, exps });
         // salaryCategoryId is derived from the cached expense categories (effect below).
       } catch (err) {
         if (!cancelled) setFetchError(err instanceof Error ? err.message : "Failed to load.");
@@ -294,7 +301,7 @@ export default function PayrollClient() {
   }
 
   // ── Loading / error ────────────────────────────────────────
-  if (fetching) {
+  if (fetching && !hadPayCache) {
     return (
       <div className="p-8">
         <h1 className="text-2xl font-semibold text-slate-800">Payroll</h1>
