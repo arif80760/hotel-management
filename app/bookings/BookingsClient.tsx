@@ -863,6 +863,14 @@ export default function BookingsClient({ initialRoom }: Props) {
   const [dateTo,          setDateTo]          = useState<string>(() => dateOffsetISO(30));
   const [dateFilterActive, setDateFilterActive] = useState<boolean>(true);
 
+  // Guests-field drafts (2026-08-26): string-while-editing so the field can
+  // be CLEARED — the old eager `Math.max(1, parseInt(v) || 1)` on change
+  // snapped empty input straight back to "1", making retyping a fight.
+  // null = not editing (render the committed number); commit + clamp
+  // (integer, min 1; empty restores 1) happens on blur and on submit paths.
+  const [guestsDraft,     setGuestsDraft]     = useState<string | null>(null);
+  const [editGuestsDraft, setEditGuestsDraft] = useState<string | null>(null);
+
   // ── Payment modal state ─────────────────────────────────────
   // payModal holds the booking being paid against; null = modal closed.
   const [payModal,     setPayModal]     = useState<Booking | null>(null);
@@ -1582,6 +1590,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       rooms:            editRooms,
       amountPaid:       String(editTarget.amountPaid),
     });
+    setEditGuestsDraft(null);
     setEditErrors({});
   }, [editTarget?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -2528,6 +2537,7 @@ export default function BookingsClient({ initialRoom }: Props) {
     setPendingDocs([]);
     setPendingDocError("");
     setForm({ ...EMPTY_FORM, rooms: [makeEmptyRoomRow()] });
+    setGuestsDraft(null);
     setBlocks([]);
     setBlockDialog(null);
     setBookingPayMethod("cash");
@@ -2545,6 +2555,7 @@ export default function BookingsClient({ initialRoom }: Props) {
       ...EMPTY_FORM,
       rooms: initialRoom ? [{ ...makeEmptyRoomRow(), room: initialRoom }] : [makeEmptyRoomRow()],
     });
+    setGuestsDraft(null);
     setBlocks([]);
     setBlockDialog(null);
     setBookingPayMethod("cash");
@@ -3825,10 +3836,19 @@ export default function BookingsClient({ initialRoom }: Props) {
                     type="number"
                     min={1}
                     max={10}
-                    value={form.totalGuests}
-                    onChange={e =>
-                      setField("totalGuests", Math.max(1, parseInt(e.target.value) || 1))
-                    }
+                    value={guestsDraft ?? String(form.totalGuests)}
+                    onChange={e => {
+                      const raw = e.target.value;
+                      setGuestsDraft(raw);
+                      const n = parseInt(raw, 10);
+                      if (!isNaN(n) && n >= 1) setField("totalGuests", n);   // live labels
+                    }}
+                    onBlur={() => {
+                      if (guestsDraft === null) return;
+                      const n = parseInt(guestsDraft, 10);
+                      setField("totalGuests", !isNaN(n) && n >= 1 ? n : 1);
+                      setGuestsDraft(null);
+                    }}
                     className="w-full px-3.5 py-2.5 text-[13.5px] text-slate-800 bg-white border border-slate-200 rounded-lg
                       focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent transition"
                   />
@@ -7527,8 +7547,19 @@ export default function BookingsClient({ initialRoom }: Props) {
                       <input
                         type="number"
                         min={1}
-                        value={editForm.totalGuests}
-                        onChange={e => setEditForm(p => ({ ...p, totalGuests: Math.max(1, parseInt(e.target.value) || 1) }))}
+                        value={editGuestsDraft ?? String(editForm.totalGuests)}
+                        onChange={e => {
+                          const raw = e.target.value;
+                          setEditGuestsDraft(raw);
+                          const n = parseInt(raw, 10);
+                          if (!isNaN(n) && n >= 1) setEditForm(p => ({ ...p, totalGuests: n }));
+                        }}
+                        onBlur={() => {
+                          if (editGuestsDraft === null) return;
+                          const n = parseInt(editGuestsDraft, 10);
+                          setEditForm(p => ({ ...p, totalGuests: !isNaN(n) && n >= 1 ? n : 1 }));
+                          setEditGuestsDraft(null);
+                        }}
                         className="w-20 px-3 py-2 text-[13px] rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:border-violet-400"
                       />
                     </div>
