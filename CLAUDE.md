@@ -60,6 +60,8 @@ Last updated: 2026-08-19 (rev 34)
 > **3.** `checkoutWithOverride` reordered: override audit fields persisted BEFORE the RPC (Step 0.5) so the trigger sees `override_checkout=true` at flip time; `trg_enforce_override_is_admin` validates the flip. A stale stamp on a failed RPC is visible and true — accepted.
 > **4.** `updateBookingStatus` bare-UPDATE fallback DELETED — now throws for anything other than the Confirmed ↔ Checked In RPC pair (silent success there would be the RLS-silent-write failure shape).
 
+> **rev 38 (2026-08-26)** — Guard-ordering fix (BK-1575): `assert_checkout_allowed` now runs AFTER `update_booking_total` in EVERY checkout door (`checkout_booking`, `checkout_booking_room`, `cancel_booking_room` — `2026-08-26-checkout-guard-after-recompute.sql`). The old ordering read the pre-deduction cached total, so DISCOUNTS cleared the guard (written before it) while EARLY DEDUCTIONS did not (applied after) — a 2-nights-early guest whose deduction settled the balance was falsely blocked with a phantom due. Guard body untouched (one semantics everywhere); staged-stay early-return unaffected (counts OTHER rooms only); door-4 trigger was already post-recompute. Probes: settle-by-deduction completes clean (BK-1589); zero-paid still raises, now quoting the POST-deduction due (BK-1611: 2500 where pre-fix said 5000). **RULE: any future checkout-shaped door calls update_booking_total BEFORE assert_checkout_allowed** — deductions and discounts must clear the guard symmetrically.
+
 ### Role Permissions
 | Action | staff | admin |
 |---|---|---|
@@ -377,6 +379,7 @@ When today > `check_in_date` and status is still `"Confirmed"`. Planned: add `no
 - **Room Analytics** — admin-only dashboard at `/rooms/analytics`; 7 KPI cards (occupancy %, revenue, RevPAR, ADR, avg stay, top room, occupied now); sortable per-room performance table; most/least booked lists; room-type performance table; CSS-bar revenue chart; SVG polyline occupancy trend with daily/monthly auto-granularity; maintenance rooms excluded from occupancy/RevPAR/ADR denominators; date-range presets (Today / Last 7 / Last 30 / This Month / This Year / Custom); powered by `room_analytics_by_room` + `room_occupancy_trend` RPCs via `roomAnalyticsService.ts`
 
 ### Pending / Next Steps
+- **Checkout-modal payment pill ignores the pending early deduction** — first live sighting on BK-1575: the modal showed "Partial" beside "Settled ✓". The 2026-08-25 `derivePaymentStatus` fix threads extras/discounts, but the checkout modal derives its pill from the PRE-deduction `totalAmount` while Final Payable already subtracts the client-computed deduction. Fix: the modal's `payStatus` call should use `totalAmount − earlyDeductionAmt` as its base (preview-only; the DB pill is correct post-checkout). Same class as extras-blindness, deduction flavour.
 - **Transfer modal smoke test** — transfer movement implemented but not browser-tested
 - **Loans repayment history UI** — `getLoanRepayments()` exists but not surfaced in the Loans register
 
@@ -557,6 +560,7 @@ outside a transaction.
 | 2026-08-20 | `2026-08-20-deny-refund-zero-row-guard.sql` | deny_refund raises on zero-row UPDATE (RLS-silent-write class, reference implementation); SECURITY INVOKER kept — UI gates refund decisions admin-only | ✅ Applied |
 | 2026-08-20 | `2026-08-20-cancel-room-checkout-guard.sql` | cancel_booking_room early-departure branch: balance guard (per-room scope) + check_out_date stomp removed + Dhaka clamp (BK-1425 walkout door 1) | ✅ Applied |
 | 2026-08-20 | `2026-08-20-checkout-status-trigger.sql` | trg_guard_checkout_status: active→checked_out(_early) requires due ≤ 0 or override_checkout (door 4 backstop; override-only bypass) | ✅ Applied |
+| 2026-08-26 | `2026-08-26-checkout-guard-after-recompute.sql` | assert_checkout_allowed runs AFTER update_booking_total in all three checkout doors (BK-1575 false block; deductions now clear the guard like discounts) | ✅ Applied |
 **Key rule:** `2026-05-08-multi-room-enum-prep.sql` must be applied in a **separate SQL Editor session** (new tab) before `2026-05-08-multi-room-foundation.sql`.
 
 ---
