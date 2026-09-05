@@ -2024,11 +2024,13 @@ export async function addRoomToBooking(
     );
   }
 
-  // Step 3: compute nights
+  // Step 3: compute nights — noon-anchored (calcNights convention), though
+  // the RPC now DERIVES nights server-side and ignores this value entirely
+  // (2026-09-05); kept for the 0-nights pre-flight error below.
   const nights = Math.max(
     0,
-    Math.floor(
-      (new Date(checkOut).getTime() - new Date(checkIn).getTime()) / 86_400_000,
+    Math.round(
+      (new Date(`${checkOut}T12:00:00`).getTime() - new Date(`${checkIn}T12:00:00`).getTime()) / 86_400_000,
     ),
   );
   if (nights === 0) {
@@ -2057,6 +2059,9 @@ export async function addRoomToBooking(
     console.error("  roomNumber :", roomNumber);
     console.error("  message    :", rpcErr.message);
     console.error("  code       :", rpcErr.code);
+    // The guard's rejection is user-facing ("Room X is unavailable … booking
+    // BK-#### covers …") — surface it verbatim, no prefix (2026-09-05).
+    if (rpcErr.message.startsWith("Room ")) throw new Error(rpcErr.message);
     throw new Error(
       `[addRoomToBooking] ${rpcErr.message}` +
       (rpcErr.code ? ` (code: ${rpcErr.code})` : ""),

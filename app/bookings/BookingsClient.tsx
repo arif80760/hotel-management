@@ -256,6 +256,18 @@ type EditFormErrors = {
 // ─────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────
+/** Latest checkout among a booking's still-BLOCKING rows — the honest
+ *  default span end for "add a room to this booking" (2026-09-05, BK-1644).
+ *  Falls back to rooms[0] for fully-completed edge cases. */
+function latestBlockingCheckout(b: Booking): string {
+  let latest = "";
+  for (const r of b.rooms) {
+    if (!ROOM_BLOCKING_STATUSES.has(r.status)) continue;
+    if ((r.checkOutISO ?? "") > latest) latest = r.checkOutISO ?? "";
+  }
+  return latest || (b.rooms[0]?.checkOutISO ?? "");
+}
+
 function calcNights(checkIn: string, checkOut: string): number {
   // Normalise to ISO first (tolerates display-format strings), then anchor
   // BOTH operands at noon per CLAUDE.md's date rule. The previous bare
@@ -4643,7 +4655,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                             {(b.status === "Confirmed" || b.status === "Checked In") && (
                               <button
                                 type="button"
-                                onClick={() => openBlockDialog(b.id, b.rooms[0]?.checkInISO ?? "", b.rooms[0]?.checkOutISO ?? "")}
+                                onClick={() => openBlockDialog(b.id, localTodayISO(), latestBlockingCheckout(b))}
                                 className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold text-violet-600 hover:text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 px-2 py-0.5 rounded-md transition-colors"
                               >
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3"><path d="M12 5v14M5 12h14"/></svg>
@@ -5221,7 +5233,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                                 {(b.status === "Confirmed" || b.status === "Checked In") && (
                                   <button
                                     type="button"
-                                    onClick={() => openBlockDialog(b.id, b.rooms[0]?.checkInISO ?? "", b.rooms[0]?.checkOutISO ?? "")}
+                                    onClick={() => openBlockDialog(b.id, localTodayISO(), latestBlockingCheckout(b))}
                                     className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold text-violet-600 hover:text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 px-2 py-0.5 rounded-md transition-colors"
                                   >
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3"><path d="M12 5v14M5 12h14"/></svg>
