@@ -4316,20 +4316,26 @@ export default function BookingsClient({ initialRoom }: Props) {
           </div>
         )}
         <div className="overflow-auto overscroll-x-contain md:max-h-[calc(100vh-22rem)]">
-          <table className="w-full text-[13px]">
+          {/* PINNED WIDTHS (2026-09-06, third layout pass): table-fixed +
+              explicit per-column widths so auto-layout can never distribute
+              slack into mid-table gaps or push Action off-screen. Budget:
+              content = viewport − 240px sidebar − 56px padding → 1070px at
+              1366, 1240px at 1536. Base sum 1058px; Total/Paid (90px each)
+              join at 2xl → 1238px. Zero horizontal scroll at both targets. */}
+          <table className="w-full table-fixed text-[13px]">
             <thead className="sticky top-0 z-20">
               <tr className="bg-slate-50 border-b border-slate-200">
                 {([
-                  { h: "ID",            cls: "text-left"  },
-                  { h: "Primary Guest", cls: "text-left"  },
-                  { h: "Room",          cls: "text-left"  },
-                  { h: "Stay",          cls: "text-left"  },
-                  { h: "Status",        cls: "text-left"  },
-                  { h: "Total",         cls: "text-right hidden xl:table-cell" },
-                  { h: "Paid",          cls: "text-right hidden xl:table-cell" },
-                  { h: "Due",           cls: "text-right" },
-                  { h: "Payment",       cls: "text-left"  },
-                  { h: "Action",        cls: "text-left"  },
+                  { h: "ID",            cls: "text-left w-[64px]"  },
+                  { h: "Primary Guest", cls: "text-left w-[160px]" },
+                  { h: "Room",          cls: "text-left w-[130px]" },
+                  { h: "Stay",          cls: "text-left w-[150px]" },
+                  { h: "Status",        cls: "text-left w-[120px]" },
+                  { h: "Total",         cls: "text-right w-[90px] hidden 2xl:table-cell" },
+                  { h: "Paid",          cls: "text-right w-[90px] hidden 2xl:table-cell" },
+                  { h: "Due",           cls: "text-right w-[90px]" },
+                  { h: "Payment",       cls: "text-left w-[104px]" },
+                  { h: "Action",        cls: "text-left w-[240px]" },
                 ]).map(({ h, cls }) => (
                   <th key={h} className={`${cls} px-4 py-3 text-[11px] font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]`}>
                     {h}
@@ -4363,7 +4369,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     }`}
                   >
                     {/* ID — BK- de-emphasized, number prominent */}
-                    <td className="px-4 py-4">
+                    <td className="px-3 py-4">
                       <div className="flex items-center gap-1.5">
                         <span className="font-mono text-[11.5px] whitespace-nowrap">
                           <span className="text-slate-300">BK-</span>
@@ -4386,15 +4392,15 @@ export default function BookingsClient({ initialRoom }: Props) {
                     </td>
 
                     {/* Primary Guest */}
-                    <td className="px-4 py-4">
-                      <div className="flex items-center gap-2.5">
+                    <td className="px-3 py-4">
+                      <div className="flex items-center gap-2.5 min-w-0">
                         <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold ${avatarColor(b.guestName)}`}>
                           {initials(b.guestName)}
                         </div>
                         <div>
-                          <p className="font-semibold text-slate-800 whitespace-nowrap">{b.guestName}</p>
+                          <p className="font-semibold text-slate-800 truncate">{b.guestName}</p>
                           {b.phone && b.phone !== "—" && (
-                            <p className="text-[11px] text-slate-400">{b.phone}</p>
+                            <p className="text-[11px] text-slate-400 truncate">{b.phone}</p>
                           )}
                         </div>
                       </div>
@@ -4411,23 +4417,23 @@ export default function BookingsClient({ initialRoom }: Props) {
                         ? `Additional: ${b.additionalGuests.map(g => g.name).join(", ")}` : undefined;
                       return (
                         <td
-                          className="px-4 py-4 cursor-pointer select-none"
+                          className="px-3 py-4 cursor-pointer select-none"
                           onClick={() => toggleExpandedBooking(b.id)}
                           title={namesTitle}
                         >
                           <div className="flex items-center gap-1">
-                            <p className="font-semibold text-slate-800 whitespace-nowrap">{top}</p>
+                            <p className="font-semibold text-slate-800 truncate">{top}</p>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}>
                               <path d="M6 9l6 6 6-6"/>
                             </svg>
                           </div>
-                          <p className="text-[11px] text-slate-400 whitespace-nowrap">{sub ? `${sub} · ` : ""}{guestsBit}</p>
+                          <p className="text-[11px] text-slate-400 truncate">{sub ? `${sub} · ` : ""}{guestsBit}</p>
                         </td>
                       );
                     })()}
 
                     {/* Stay — dates + nights merged; full dates in the tooltip */}
-                    <td className="px-4 py-4 text-slate-600 whitespace-nowrap" title={`${b.checkIn} → ${b.checkOut}`}>
+                    <td className="px-3 py-4 text-[12.5px] text-slate-600 whitespace-nowrap" title={`${b.checkIn} → ${b.checkOut}`}>
                       {b.checkIn.replace(/, \d{4}$/, "")} → {b.checkOut.replace(/, \d{4}$/, "")}
                       <span className="text-slate-400 text-[12px]"> · {b.nights}nt</span>
                     </td>
@@ -4438,7 +4444,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                         • due = 0 + override used → HISTORY NOTE (slate): settled after checkout
                         • no override            → nothing extra shown
                         `due` is already computed above from live booking data, never stale. */}
-                    <td className="px-4 py-4">
+                    <td className="px-3 py-4">
                       <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-semibold whitespace-nowrap ${statusBadge(b.status)}`}>
                         {b.status}
                       </span>
@@ -4471,19 +4477,19 @@ export default function BookingsClient({ initialRoom }: Props) {
                     </td>
 
                     {/* Total Amount */}
-                    <td className="px-4 py-4 font-semibold text-slate-800 whitespace-nowrap text-right tabular-nums hidden xl:table-cell">
+                    <td className="px-3 py-4 font-semibold text-slate-800 whitespace-nowrap text-right tabular-nums hidden 2xl:table-cell">
                       ৳{b.totalAmount.toLocaleString()}
                     </td>
 
                     {/* Amount Paid */}
-                    <td className="px-4 py-4 whitespace-nowrap text-right tabular-nums hidden xl:table-cell">
+                    <td className="px-3 py-4 whitespace-nowrap text-right tabular-nums hidden 2xl:table-cell">
                       <span className={`font-semibold ${b.amountPaid > 0 ? "text-emerald-700" : "text-slate-400"}`}>
                         {b.amountPaid > 0 ? `৳${b.amountPaid.toLocaleString()}` : "—"}
                       </span>
                     </td>
 
                     {/* Due Amount */}
-                    <td className="px-4 py-4 whitespace-nowrap text-right tabular-nums">
+                    <td className="px-3 py-4 whitespace-nowrap text-right tabular-nums">
                       {due > 0 ? (
                         <span className="font-semibold text-rose-600">৳{due.toLocaleString()}</span>
                       ) : (
@@ -4492,7 +4498,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                     </td>
 
                     {/* Payment Status badge */}
-                    <td className="px-4 py-4">
+                    <td className="px-3 py-4">
                       <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-semibold whitespace-nowrap ${paymentBadge(b.payment)}`}>
                         <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${paymentDot(b.payment)}`} />
                         {b.payment}
@@ -4503,7 +4509,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                         two state-appropriate pill buttons STACKED, then the
                         secondary actions as small text links below. All actions
                         visible — no overflow menu. Same handlers throughout. */}
-                    <td className="px-4 py-4">
+                    <td className="px-3 py-4">
                       <div className="flex flex-col gap-1.5 items-start">
 
                         {/* ── Booking workflow: Check In → Check Out ── */}
@@ -4992,21 +4998,21 @@ export default function BookingsClient({ initialRoom }: Props) {
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             {/* Same bounded viewport + sticky header as the main bookings table. */}
             <div className="overflow-auto overscroll-x-contain md:max-h-[calc(100vh-22rem)]">
-              <table className="w-full text-[13px]">
+              <table className="w-full table-fixed text-[13px]">
                 <thead className="sticky top-0 z-20">
                   <tr className="bg-rose-50 border-b border-rose-100">
                     {([
-                      { h: "ID",            cls: "text-left"  },
-                      { h: "Primary Guest", cls: "text-left"  },
-                      { h: "Room",          cls: "text-left"  },
-                      { h: "Stay",          cls: "text-left"  },
-                      { h: "Status",        cls: "text-left"  },
-                      { h: "Total",         cls: "text-right hidden xl:table-cell" },
-                      { h: "Paid",          cls: "text-right hidden xl:table-cell" },
-                      { h: "Method",        cls: "text-left hidden xl:table-cell"  },
-                      { h: "Due",           cls: "text-right" },
-                      { h: "Payment",       cls: "text-left"  },
-                      { h: "Action",        cls: "text-left"  },
+                      { h: "ID",            cls: "text-left w-[64px]"  },
+                      { h: "Primary Guest", cls: "text-left w-[150px]" },
+                      { h: "Room",          cls: "text-left w-[130px]" },
+                      { h: "Stay",          cls: "text-left w-[150px]" },
+                      { h: "Status",        cls: "text-left w-[120px]" },
+                      { h: "Total",         cls: "text-right w-[90px] hidden 2xl:table-cell" },
+                      { h: "Paid",          cls: "text-right w-[90px] hidden 2xl:table-cell" },
+                      { h: "Method",        cls: "text-left w-[100px] hidden 2xl:table-cell"  },
+                      { h: "Due",           cls: "text-right w-[96px]" },
+                      { h: "Payment",       cls: "text-left w-[104px]" },
+                      { h: "Action",        cls: "text-left w-[140px]" },
                     ]).map(({ h, cls }) => (
                       <th key={h} className={`${cls} px-4 py-3 text-[11px] font-semibold text-rose-400 uppercase tracking-wider whitespace-nowrap bg-rose-50 shadow-[0_1px_0_0_#ffe4e6]`}>
                         {h}
@@ -5043,7 +5049,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                       >
 
                         {/* ID — BK- de-emphasized, number prominent */}
-                        <td className="px-4 py-4">
+                        <td className="px-3 py-4">
                           <span className="font-mono text-[11.5px] whitespace-nowrap">
                             <span className="text-slate-300">BK-</span>
                             <span className="text-slate-500 font-semibold">{b.id.replace(/^BK-/, "")}</span>
@@ -5051,15 +5057,15 @@ export default function BookingsClient({ initialRoom }: Props) {
                         </td>
 
                         {/* Primary Guest */}
-                        <td className="px-4 py-4">
+                        <td className="px-3 py-4">
                           <div className="flex items-center gap-2.5">
                             <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold ${avatarColor(b.guestName)}`}>
                               {initials(b.guestName)}
                             </div>
                             <div>
-                              <p className="font-semibold text-slate-800 whitespace-nowrap">{b.guestName}</p>
+                              <p className="font-semibold text-slate-800 truncate">{b.guestName}</p>
                               {b.phone && b.phone !== "—" && (
-                                <p className="text-[11px] text-slate-400">{b.phone}</p>
+                                <p className="text-[11px] text-slate-400 truncate">{b.phone}</p>
                               )}
                             </div>
                           </div>
@@ -5071,11 +5077,11 @@ export default function BookingsClient({ initialRoom }: Props) {
                           const expanded = expandedBookingId === b.id;
                           return (
                             <td
-                              className="px-4 py-4 cursor-pointer select-none"
+                              className="px-3 py-4 cursor-pointer select-none"
                               onClick={() => toggleExpandedBooking(b.id)}
                             >
                               <div className="flex items-center gap-1">
-                                <p className="font-semibold text-slate-800 whitespace-nowrap">{top}</p>
+                                <p className="font-semibold text-slate-800 truncate">{top}</p>
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 text-slate-400 ml-0.5 flex-shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}>
                                   <path d="M6 9l6 6 6-6"/>
                                 </svg>
@@ -5086,13 +5092,13 @@ export default function BookingsClient({ initialRoom }: Props) {
                         })()}
 
                         {/* Stay — dates + nights merged; full dates in the tooltip */}
-                        <td className="px-4 py-4 text-slate-600 whitespace-nowrap" title={`${b.checkIn} → ${b.checkOut}`}>
+                        <td className="px-3 py-4 text-[12.5px] text-slate-600 whitespace-nowrap" title={`${b.checkIn} → ${b.checkOut}`}>
                           {b.checkIn.replace(/, \d{4}$/, "")} → {b.checkOut.replace(/, \d{4}$/, "")}
                           <span className="text-slate-400 text-[12px]"> · {b.nights}nt</span>
                         </td>
 
                         {/* Booking Status + stale / override warning badges */}
-                        <td className="px-4 py-4">
+                        <td className="px-3 py-4">
                           <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-semibold whitespace-nowrap ${statusBadge(b.status)}`}>
                             {b.status}
                           </span>
@@ -5119,26 +5125,26 @@ export default function BookingsClient({ initialRoom }: Props) {
                         </td>
 
                         {/* Total */}
-                        <td className="px-4 py-4 font-semibold text-slate-800 whitespace-nowrap text-right tabular-nums hidden xl:table-cell">
+                        <td className="px-3 py-4 font-semibold text-slate-800 whitespace-nowrap text-right tabular-nums hidden 2xl:table-cell">
                           ৳{b.totalAmount.toLocaleString()}
                         </td>
 
                         {/* Paid */}
-                        <td className="px-4 py-4 whitespace-nowrap text-right tabular-nums hidden xl:table-cell">
+                        <td className="px-3 py-4 whitespace-nowrap text-right tabular-nums hidden 2xl:table-cell">
                           <span className={`font-semibold ${b.amountPaid > 0 ? "text-emerald-700" : "text-slate-400"}`}>
                             {b.amountPaid > 0 ? `৳${b.amountPaid.toLocaleString()}` : "—"}
                           </span>
                         </td>
 
                         {/* Last Payment Method */}
-                        <td className="px-4 py-4 whitespace-nowrap hidden xl:table-cell">
+                        <td className="px-3 py-4 whitespace-nowrap hidden 2xl:table-cell">
                           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-600">
                             {formatPaymentMethod(b.lastPaymentMethod)}
                           </span>
                         </td>
 
                         {/* Due — flame icon when ≥ HIGH_DUE_THRESHOLD */}
-                        <td className="px-4 py-4 whitespace-nowrap text-right tabular-nums">
+                        <td className="px-3 py-4 whitespace-nowrap text-right tabular-nums">
                           <div className="flex items-center gap-1 justify-end">
                             {isHighDue && (
                               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 text-rose-500 flex-shrink-0">
@@ -5152,7 +5158,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                         </td>
 
                         {/* Payment Status */}
-                        <td className="px-4 py-4">
+                        <td className="px-3 py-4">
                           <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-semibold whitespace-nowrap ${paymentBadge(b.payment)}`}>
                             <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${paymentDot(b.payment)}`} />
                             {b.payment}
@@ -5164,7 +5170,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                             the same by/reason tooltip; the column was duplication. */}
 
                         {/* Add Payment — same rule as booking row: staff only when Checked In */}
-                        <td className="px-4 py-4">
+                        <td className="px-3 py-4">
                           {(() => {
                             const checkedIn = b.status === "Checked In";
                             if (!isAdmin && !checkedIn) {
