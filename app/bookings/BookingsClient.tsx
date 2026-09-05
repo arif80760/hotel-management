@@ -795,6 +795,22 @@ export default function BookingsClient({ initialRoom }: Props) {
   // snapped empty input straight back to "1", making retyping a fight.
   // null = not editing (render the committed number); commit + clamp
   // (integer, min 1; empty restores 1) happens on blur and on submit paths.
+  // "⋯" action-menu open state — one menu at a time, keyed by booking id.
+  // FINAL FORM (2026-09-06, user-chosen after seeing both alternatives live):
+  // primary pills visible, secondaries in this menu. Closed by outside
+  // click, Escape, or use.
+  const [actionMenuFor, setActionMenuFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (!actionMenuFor) return;
+    const close = (e: MouseEvent) => {
+      if (!(e.target instanceof Element) || !e.target.closest("[data-action-menu]")) setActionMenuFor(null);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setActionMenuFor(null); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", onKey); };
+  }, [actionMenuFor]);
+
   const [guestsDraft,     setGuestsDraft]     = useState<string | null>(null);
   const [editGuestsDraft, setEditGuestsDraft] = useState<string | null>(null);
 
@@ -4327,15 +4343,15 @@ export default function BookingsClient({ initialRoom }: Props) {
               <tr className="bg-slate-50 border-b border-slate-200">
                 {([
                   { h: "ID",            cls: "text-left w-[64px]"  },
-                  { h: "Primary Guest", cls: "text-left w-[160px]" },
-                  { h: "Room",          cls: "text-left w-[130px]" },
-                  { h: "Stay",          cls: "text-left w-[150px]" },
-                  { h: "Status",        cls: "text-left w-[120px]" },
+                  { h: "Primary Guest", cls: "text-left w-[180px]" },
+                  { h: "Room",          cls: "text-left w-[140px]" },
+                  { h: "Stay",          cls: "text-left w-[156px]" },
+                  { h: "Status",        cls: "text-left w-[126px]" },
                   { h: "Total",         cls: "text-right w-[90px] hidden 2xl:table-cell" },
                   { h: "Paid",          cls: "text-right w-[90px] hidden 2xl:table-cell" },
                   { h: "Due",           cls: "text-right w-[90px]" },
                   { h: "Payment",       cls: "text-left w-[104px]" },
-                  { h: "Action",        cls: "text-left w-[240px]" },
+                  { h: "Action",        cls: "text-left w-[180px]" },
                 ]).map(({ h, cls }) => (
                   <th key={h} className={`${cls} px-4 py-3 text-[11px] font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]`}>
                     {h}
@@ -4505,119 +4521,139 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </span>
                     </td>
 
-                    {/* Action — reference layout (BK-1604 standard, 2026-09-05):
-                        two state-appropriate pill buttons STACKED, then the
-                        secondary actions as small text links below. All actions
-                        visible — no overflow menu. Same handlers throughout. */}
+                    {/* Action — FINAL FORM (2026-09-06, user-chosen): the two
+                        state-appropriate pills stay visible, stacked; the four
+                        secondary actions live in the "⋯" menu (vertical
+                        dropdown, one item per line with icons — the rework-#2
+                        kebab, restored). Same handlers throughout. */}
                     <td className="px-3 py-4">
-                      <div className="flex flex-col gap-1.5 items-start">
+                      <div className="flex items-start gap-1.5">
+                        <div className="flex flex-col gap-1.5 items-start">
 
-                        {/* ── Booking workflow: Check In → Check Out ── */}
-                        {action && (
-                          <button
-                            onClick={isFutureCheckIn ? undefined : () => handleWorkflowAction(b, action.next)}
-                            disabled={isFutureCheckIn}
-                            title={isFutureCheckIn ? `Check-in available on ${b.checkIn}` : undefined}
-                            className={`text-[11.5px] font-semibold border px-3 py-1.5 rounded-lg whitespace-nowrap
-                              ${isFutureCheckIn ? "opacity-50 cursor-not-allowed" : "transition-colors"} ${action.style}`}
-                          >
-                            {action.label}
-                          </button>
-                        )}
-
-                        {/* ── Add Payment
-                             Rule: staff can only pay when guest is Checked In.
-                             Admin can always pay but sees a warning if not checked in yet. */}
-                        {due > 0 && b.status !== "Checked Out" && (() => {
-                          const checkedIn = b.status === "Checked In";
-                          if (!isAdmin && !checkedIn) {
-                            return (
-                              <p className="text-[10.5px] text-slate-400 italic leading-tight">
-                                Payment available<br/>after check-in
-                              </p>
-                            );
-                          }
-                          const warnAdmin = isAdmin && !checkedIn;
-                          return (
+                          {/* ── Booking workflow: Check In → Check Out ── */}
+                          {action && (
                             <button
-                              onClick={() => openPayModal(b)}
-                              title={warnAdmin ? "Guest not yet checked in — verify before recording" : undefined}
-                              className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
-                                warnAdmin
-                                  ? "text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100"
-                                  : "text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100"
-                              }`}
+                              onClick={isFutureCheckIn ? undefined : () => handleWorkflowAction(b, action.next)}
+                              disabled={isFutureCheckIn}
+                              title={isFutureCheckIn ? `Check-in available on ${b.checkIn}` : undefined}
+                              className={`text-[11.5px] font-semibold border px-3 py-2 rounded-lg whitespace-nowrap
+                                ${isFutureCheckIn ? "opacity-50 cursor-not-allowed" : "transition-colors"} ${action.style}`}
                             >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
-                                <path d="M12 5v14M5 12h14"/>
-                              </svg>
-                              Add Payment
-                            </button>
-                          );
-                        })()}
-
-                        {/* ── Secondary actions — small text links on shared lines ── */}
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-0.5">
-                          <button
-                            onClick={() => handleResendSms(b.id)}
-                            disabled={smsResend.get(b.id) === "sending"}
-                            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-sky-600 transition-colors disabled:opacity-50"
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 flex-shrink-0">
-                              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                            </svg>
-                            {smsResend.get(b.id) === "sending" ? "Sending…" : "Resend SMS"}
-                          </button>
-                          <button
-                            onClick={() => openDocsModal(b)}
-                            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-violet-600 transition-colors"
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
-                              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
-                              <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>
-                            </svg>
-                            Documents
-                          </button>
-                          <button
-                            onClick={() => setTimelineModal(b)}
-                            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-amber-600 transition-colors"
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
-                              <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
-                            </svg>
-                            Timeline
-                          </button>
-                          {(b.status === "Confirmed" || b.status === "Checked In") && (
-                            <button
-                              onClick={() => setEditTarget(b)}
-                              className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-violet-600 transition-colors"
-                            >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 flex-shrink-0">
-                                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
-                                <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                              </svg>
-                              Edit
+                              {action.label}
                             </button>
                           )}
-                          {b.status === "Confirmed" && b.rooms.every(r => r.status === "Confirmed") && (
-                            <button
-                              onClick={() => openCancelBookingModal(b)}
-                              className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-400 hover:text-rose-600 transition-colors"
-                            >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
-                                <circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/>
-                              </svg>
-                              Cancel
-                            </button>
+
+                          {/* ── Add Payment (staff: checked-in only; admin always, warned) ── */}
+                          {due > 0 && b.status !== "Checked Out" && (() => {
+                            const checkedIn = b.status === "Checked In";
+                            if (!isAdmin && !checkedIn) {
+                              return (
+                                <p className="text-[10.5px] text-slate-400 italic leading-tight">
+                                  Payment available<br/>after check-in
+                                </p>
+                              );
+                            }
+                            const warnAdmin = isAdmin && !checkedIn;
+                            return (
+                              <button
+                                onClick={() => openPayModal(b)}
+                                title={warnAdmin ? "Guest not yet checked in — verify before recording" : undefined}
+                                className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-2 rounded-lg transition-colors whitespace-nowrap ${
+                                  warnAdmin
+                                    ? "text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100"
+                                    : "text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100"
+                                }`}
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
+                                  <path d="M12 5v14M5 12h14"/>
+                                </svg>
+                                Add Payment
+                              </button>
+                            );
+                          })()}
+
+                          {/* Transient SMS outcome — visible after the menu closes */}
+                          {smsStatusText(smsResend.get(b.id)) && (
+                            <p className={`text-[10.5px] leading-tight ${smsResend.get(b.id) === "sent" ? "text-emerald-600" : "text-amber-600"}`}>
+                              {smsStatusText(smsResend.get(b.id))}
+                            </p>
                           )}
                         </div>
 
-                        {/* Transient SMS outcome */}
-                        {smsStatusText(smsResend.get(b.id)) && (
-                          <p className={`text-[10.5px] leading-tight ${smsResend.get(b.id) === "sent" ? "text-emerald-600" : "text-amber-600"}`}>
-                            {smsStatusText(smsResend.get(b.id))}
-                          </p>
-                        )}
+                        {/* ── "⋯" menu — Resend SMS / Documents / Timeline / Edit / Cancel ── */}
+                        <div className="relative">
+                          <button
+                            onClick={e => { e.stopPropagation(); setActionMenuFor(prev => prev === b.id ? null : b.id); }}
+                            title="More actions"
+                            className={`w-7 h-7 flex items-center justify-center rounded-lg border text-[15px] font-bold leading-none transition-colors ${
+                              actionMenuFor === b.id
+                                ? "text-slate-700 bg-slate-100 border-slate-300"
+                                : "text-slate-400 bg-white border-slate-200 hover:text-slate-700 hover:bg-slate-50"
+                            }`}
+                          >
+                            ⋯
+                          </button>
+                          {actionMenuFor === b.id && (
+                            <div
+                              data-action-menu
+                              className="absolute right-0 top-8 z-40 w-48 bg-white border border-slate-200 rounded-xl shadow-lg py-1"
+                              onClick={e => e.stopPropagation()}
+                            >
+                              <button
+                                onClick={() => { handleResendSms(b.id); setActionMenuFor(null); }}
+                                disabled={smsResend.get(b.id) === "sending"}
+                                className="w-full flex items-center gap-2 text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-sky-50 hover:text-sky-700 transition-colors disabled:opacity-50"
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5 flex-shrink-0">
+                                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                                </svg>
+                                {smsResend.get(b.id) === "sending" ? "Sending SMS…" : "Resend SMS"}
+                              </button>
+                              <button
+                                onClick={() => { openDocsModal(b); setActionMenuFor(null); }}
+                                className="w-full flex items-center gap-2 text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-violet-50 hover:text-violet-700 transition-colors"
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 flex-shrink-0">
+                                  <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                                  <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>
+                                </svg>
+                                Documents
+                              </button>
+                              <button
+                                onClick={() => { setTimelineModal(b); setActionMenuFor(null); }}
+                                className="w-full flex items-center gap-2 text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-amber-50 hover:text-amber-700 transition-colors"
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 flex-shrink-0">
+                                  <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                                </svg>
+                                Timeline
+                              </button>
+                              {(b.status === "Confirmed" || b.status === "Checked In") && (
+                                <button
+                                  onClick={() => { setEditTarget(b); setActionMenuFor(null); }}
+                                  className="w-full flex items-center gap-2 text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-violet-50 hover:text-violet-700 transition-colors"
+                                >
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5 flex-shrink-0">
+                                    <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+                                    <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                                  </svg>
+                                  Edit
+                                </button>
+                              )}
+                              {b.status === "Confirmed" && b.rooms.every(r => r.status === "Confirmed") && (
+                                <button
+                                  onClick={() => { openCancelBookingModal(b); setActionMenuFor(null); }}
+                                  className="w-full flex items-center gap-2 text-left px-3 py-2 text-[12px] font-medium text-rose-500 hover:bg-rose-50 hover:text-rose-700 transition-colors"
+                                >
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3.5 h-3.5 flex-shrink-0">
+                                    <circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/>
+                                  </svg>
+                                  Cancel Booking
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </td>
                   </tr>
