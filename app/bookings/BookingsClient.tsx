@@ -795,20 +795,6 @@ export default function BookingsClient({ initialRoom }: Props) {
   // snapped empty input straight back to "1", making retyping a fight.
   // null = not editing (render the committed number); commit + clamp
   // (integer, min 1; empty restores 1) happens on blur and on submit paths.
-  // "⋯" action-menu open state — one menu at a time, keyed by booking id
-  // (2026-08-26 layout rework #2). Closed by outside click, Escape, or use.
-  const [actionMenuFor, setActionMenuFor] = useState<string | null>(null);
-  useEffect(() => {
-    if (!actionMenuFor) return;
-    const close = (e: MouseEvent) => {
-      if (!(e.target instanceof Element) || !e.target.closest("[data-action-menu]")) setActionMenuFor(null);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setActionMenuFor(null); };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", onKey); };
-  }, [actionMenuFor]);
-
   const [guestsDraft,     setGuestsDraft]     = useState<string | null>(null);
   const [editGuestsDraft, setEditGuestsDraft] = useState<string | null>(null);
 
@@ -4513,16 +4499,12 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </span>
                     </td>
 
-                    {/* Action — two primaries on ONE line + a "⋯" overflow menu
-                        (2026-08-26 rework #2): the flex-wrap attempt still
-                        stacked one-per-line because table auto-layout squeezed
-                        this td below the wrap threshold. Now the cell renders a
-                        single non-wrapping row — workflow + Add Payment — and
-                        the low-frequency actions (Resend SMS, Documents,
-                        Timeline, Edit, Cancel) live in the kebab menu. Same
-                        handlers, layout only. */}
+                    {/* Action — reference layout (BK-1604 standard, 2026-09-05):
+                        two state-appropriate pill buttons STACKED, then the
+                        secondary actions as small text links below. All actions
+                        visible — no overflow menu. Same handlers throughout. */}
                     <td className="px-4 py-4">
-                      <div className="flex items-center gap-1.5 whitespace-nowrap">
+                      <div className="flex flex-col gap-1.5 items-start">
 
                         {/* ── Booking workflow: Check In → Check Out ── */}
                         {action && (
@@ -4530,7 +4512,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                             onClick={isFutureCheckIn ? undefined : () => handleWorkflowAction(b, action.next)}
                             disabled={isFutureCheckIn}
                             title={isFutureCheckIn ? `Check-in available on ${b.checkIn}` : undefined}
-                            className={`text-[11.5px] font-semibold border px-2.5 py-1.5 rounded-lg whitespace-nowrap
+                            className={`text-[11.5px] font-semibold border px-3 py-1.5 rounded-lg whitespace-nowrap
                               ${isFutureCheckIn ? "opacity-50 cursor-not-allowed" : "transition-colors"} ${action.style}`}
                           >
                             {action.label}
@@ -4544,12 +4526,9 @@ export default function BookingsClient({ initialRoom }: Props) {
                           const checkedIn = b.status === "Checked In";
                           if (!isAdmin && !checkedIn) {
                             return (
-                              <span
-                                className="text-[10px] text-slate-400 italic whitespace-nowrap"
-                                title="Payment available after check-in"
-                              >
-                                pay after check-in
-                              </span>
+                              <p className="text-[10.5px] text-slate-400 italic leading-tight">
+                                Payment available<br/>after check-in
+                              </p>
                             );
                           }
                           const warnAdmin = isAdmin && !checkedIn;
@@ -4557,7 +4536,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                             <button
                               onClick={() => openPayModal(b)}
                               title={warnAdmin ? "Guest not yet checked in — verify before recording" : undefined}
-                              className={`inline-flex items-center gap-1 text-[11.5px] font-semibold px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
+                              className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
                                 warnAdmin
                                   ? "text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100"
                                   : "text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100"
@@ -4566,76 +4545,74 @@ export default function BookingsClient({ initialRoom }: Props) {
                               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
                                 <path d="M12 5v14M5 12h14"/>
                               </svg>
-                              Payment
+                              Add Payment
                             </button>
                           );
                         })()}
 
-                        {/* ── "⋯" overflow menu — Resend SMS / Documents / Timeline / Edit / Cancel ── */}
-                        <div className="relative">
+                        {/* ── Secondary actions — small text links on shared lines ── */}
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-0.5">
                           <button
-                            onClick={e => { e.stopPropagation(); setActionMenuFor(prev => prev === b.id ? null : b.id); }}
-                            title="More actions"
-                            className={`w-7 h-7 flex items-center justify-center rounded-lg border text-[15px] font-bold leading-none transition-colors ${
-                              actionMenuFor === b.id
-                                ? "text-slate-700 bg-slate-100 border-slate-300"
-                                : "text-slate-400 bg-white border-slate-200 hover:text-slate-700 hover:bg-slate-50"
-                            }`}
+                            onClick={() => handleResendSms(b.id)}
+                            disabled={smsResend.get(b.id) === "sending"}
+                            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-sky-600 transition-colors disabled:opacity-50"
                           >
-                            ⋯
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 flex-shrink-0">
+                              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                            </svg>
+                            {smsResend.get(b.id) === "sending" ? "Sending…" : "Resend SMS"}
                           </button>
-                          {actionMenuFor === b.id && (
-                            <div
-                              data-action-menu
-                              className="absolute right-0 top-8 z-40 w-44 bg-white border border-slate-200 rounded-xl shadow-lg py-1"
-                              onClick={e => e.stopPropagation()}
+                          <button
+                            onClick={() => openDocsModal(b)}
+                            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-violet-600 transition-colors"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
+                              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                              <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>
+                            </svg>
+                            Documents
+                          </button>
+                          <button
+                            onClick={() => setTimelineModal(b)}
+                            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-amber-600 transition-colors"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
+                              <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                            </svg>
+                            Timeline
+                          </button>
+                          {(b.status === "Confirmed" || b.status === "Checked In") && (
+                            <button
+                              onClick={() => setEditTarget(b)}
+                              className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-violet-600 transition-colors"
                             >
-                              <button
-                                onClick={() => { handleResendSms(b.id); setActionMenuFor(null); }}
-                                disabled={smsResend.get(b.id) === "sending"}
-                                className="w-full text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-sky-50 hover:text-sky-700 transition-colors disabled:opacity-50"
-                              >
-                                {smsResend.get(b.id) === "sending" ? "Sending SMS…" : "Resend SMS"}
-                              </button>
-                              <button
-                                onClick={() => { openDocsModal(b); setActionMenuFor(null); }}
-                                className="w-full text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-violet-50 hover:text-violet-700 transition-colors"
-                              >
-                                Documents
-                              </button>
-                              <button
-                                onClick={() => { setTimelineModal(b); setActionMenuFor(null); }}
-                                className="w-full text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-amber-50 hover:text-amber-700 transition-colors"
-                              >
-                                Timeline
-                              </button>
-                              {(b.status === "Confirmed" || b.status === "Checked In") && (
-                                <button
-                                  onClick={() => { setEditTarget(b); setActionMenuFor(null); }}
-                                  className="w-full text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-violet-50 hover:text-violet-700 transition-colors"
-                                >
-                                  Edit
-                                </button>
-                              )}
-                              {b.status === "Confirmed" && b.rooms.every(r => r.status === "Confirmed") && (
-                                <button
-                                  onClick={() => { openCancelBookingModal(b); setActionMenuFor(null); }}
-                                  className="w-full text-left px-3 py-2 text-[12px] font-medium text-rose-500 hover:bg-rose-50 hover:text-rose-700 transition-colors"
-                                >
-                                  Cancel Booking
-                                </button>
-                              )}
-                            </div>
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 flex-shrink-0">
+                                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+                                <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                              </svg>
+                              Edit
+                            </button>
+                          )}
+                          {b.status === "Confirmed" && b.rooms.every(r => r.status === "Confirmed") && (
+                            <button
+                              onClick={() => openCancelBookingModal(b)}
+                              className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-400 hover:text-rose-600 transition-colors"
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
+                                <circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/>
+                              </svg>
+                              Cancel
+                            </button>
                           )}
                         </div>
-                      </div>
 
-                      {/* Transient SMS outcome — visible after the menu closes */}
-                      {smsStatusText(smsResend.get(b.id)) && (
-                        <p className={`text-[10.5px] leading-tight mt-1 ${smsResend.get(b.id) === "sent" ? "text-emerald-600" : "text-amber-600"}`}>
-                          {smsStatusText(smsResend.get(b.id))}
-                        </p>
-                      )}
+                        {/* Transient SMS outcome */}
+                        {smsStatusText(smsResend.get(b.id)) && (
+                          <p className={`text-[10.5px] leading-tight ${smsResend.get(b.id) === "sent" ? "text-emerald-600" : "text-amber-600"}`}>
+                            {smsStatusText(smsResend.get(b.id))}
+                          </p>
+                        )}
+                      </div>
                     </td>
                   </tr>
 
