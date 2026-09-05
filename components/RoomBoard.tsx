@@ -11,6 +11,7 @@ import { useState, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useHotel, type RoomStatus, type Room, type Booking, type BookingStatus } from "@/contexts/HotelContext";
 import { deriveRoomStatusForDate, localDateToISO, TODAY_ISO } from "@/lib/roomStatus";
+import { ROOM_BLOCKING_STATUSES } from "@/lib/availability";
 
 // ── Status colour config — single source of truth ────────────
 type BoardStatus = RoomStatus | "DepartsToday";
@@ -52,12 +53,18 @@ function getBookingForRoomOnDate(
       b.status !== "Cancelled" &&
       ((dateISO > todayISO && (b.status === "Confirmed" || b.status === "Checked In")) ||
        (dateISO < todayISO && (b.status === "Checked In" || b.status === "Checked Out"))) &&
-      b.rooms.some(
-        r =>
-          r.roomNumber === room.roomNumber &&
-          r.status !== "Cancelled" &&
-          r.checkInISO <= dateISO && dateISO < r.checkOutISO,
-      ),
+      b.rooms.some(r => {
+        if (r.roomNumber !== room.roomNumber || r.status === "Cancelled") return false;
+        // FUTURE dates: only BLOCKING rows route to the old booking — a
+        // released (checked-out/early) row's future span is bookable, so the
+        // click must reach the create flow (2026-08-31, one-formula rule).
+        if (dateISO > todayISO && !ROOM_BLOCKING_STATUSES.has(r.status)) return false;
+        // PAST dates (history view): completed rows occupy through their
+        // ACTUAL departure, not the scheduled one — the BK-1331 room-104
+        // misread class. COALESCE(actual, scheduled).
+        const effOut = r.actualCheckoutDate ?? r.checkOutISO;
+        return (r.checkInISO ?? "") <= dateISO && dateISO < (effOut ?? "");
+      }),
   );
 }
 

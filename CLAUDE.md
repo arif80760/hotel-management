@@ -187,6 +187,21 @@ count — `IF NOT FOUND THEN RAISE` after UPDATE/DELETE in plpgsql,
 tightening done. deny_refund carries the reference implementation
 (`2026-08-20-deny-refund-zero-row-guard.sql`).
 
+### Availability + room click-routing go through findRoomConflict — never a local check
+`lib/availability.ts` is THE client-side availability formula, mirroring
+the create-RPC guard exactly: row whitelist `ROOM_BLOCKING_STATUSES`
+("Confirmed"/"Checked In" — a whitelist so future statuses default
+non-blocking), half-open `[)` ranges. Every availability computation AND
+every "is this room occupied" routing decision must call
+`findRoomConflict` / use these exports — the Bookings `?room=` handler
+ran its own containment check (no dates, no row status) for months and
+silently ate rebookings: a partially released multi-room booking made
+its freed rooms unbookable from the Room Board for its whole remaining
+life (fixed 2026-08-31). Corollary for HISTORY display: completed rows
+occupy through `COALESCE(actualCheckoutDate, checkOutISO)` — scheduled-
+span history is the BK-1331 room-104 misread class (lib/roomStatus +
+RoomBoard past-date branches).
+
 ### Every displayed due comes from calcTrueDue — never a local total−paid
 The canonical outstanding-balance formula is `calcTrueDue()` in
 `lib/invoiceUtils.ts`: total + extra_charge − additional_discount − paid

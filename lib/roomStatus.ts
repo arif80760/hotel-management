@@ -50,12 +50,16 @@ export function deriveRoomStatusForDate(
   //    Iterates b.rooms[] so multi-room bookings match each room correctly.
   for (const b of bookings) {
     if (b.status === "Cancelled" || b.status === "No Show") continue;
-    const matched = b.rooms.find(
-      r =>
-        r.roomNumber === room.roomNumber &&
-        r.status !== "Cancelled" &&
-        r.checkInISO <= dateISO && dateISO < r.checkOutISO,
-    );
+    const matched = b.rooms.find(r => {
+      if (r.roomNumber !== room.roomNumber || r.status === "Cancelled") return false;
+      // Completed rows occupy through their ACTUAL departure, not the
+      // scheduled one (2026-08-31 — the BK-1331 room-104 misread class):
+      // an early checkout's freed tail reads Available in history too.
+      const effOut = (r.status === "Checked Out" || r.status === "Checked Out Early")
+        ? (r.actualCheckoutDate ?? r.checkOutISO)
+        : r.checkOutISO;
+      return (r.checkInISO ?? "") <= dateISO && dateISO < (effOut ?? "");
+    });
     if (matched) {
       const s = matched.status;
       if (s === "Checked In")                                                        return "Occupied";

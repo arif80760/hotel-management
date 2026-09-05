@@ -52,6 +52,7 @@ import { getRatePeriods, findRatePeriod, type RatePeriod } from "@/services/rate
 import { supabase } from "@/lib/supabase";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
 import { classifyBookingSearch, matchesIdentifier, matchesText, rankIdentifierMatches } from "@/lib/searchBookings";
+import { findRoomConflict, bookingDatesOverlap, toISODate, ROOM_BLOCKING_STATUSES } from "@/lib/availability";
 import { calcBookingLevelDeductions, earlyNights, localTodayISO, isoAtNoon } from "@/lib/checkoutUtils";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { Refund } from "@/lib/mockData";
@@ -504,92 +505,6 @@ const EMPTY_EDIT_FORM: EditFormData = {
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Statuses that hold a room and must block new bookings for overlapping dates.
- * "Checked Out" and "Cancelled" release the room — they don't block.
- */
-const BLOCKING_STATUSES = new Set<BookingStatus>(["Confirmed", "Checked In"]);
-
-/**
- * Room-row-level counterpart — mirrors the live DB overlap guard in
- * create_booking_with_rooms / add_room_to_booking, which whitelists
- * x.status IN ('confirmed','checked_in') on booking_rooms. A whitelist
- * (not a blocklist) so any future room status defaults to NON-blocking,
- * matching the server: Cancelled / Checked Out / Checked Out Early rows
- * release their dates even while the parent booking stays Confirmed.
- */
-const ROOM_BLOCKING_STATUSES = new Set<BookingRoomStatus>(["Confirmed", "Checked In"]);
-
-/**
- * Normalise any date string to "YYYY-MM-DD" for safe lexicographic comparison.
- * Accepts ISO dates ("2026-04-22") and display dates ("Apr 22, 2026").
- * Returns "" on parse failure so callers can skip the overlap test safely.
- */
-function toISODate(s: string): string {
-  if (!s) return "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;         // already ISO
-  // Display-format string — append time so the Date constructor uses local
-  // interpretation and getFullYear/Month/Date stay on the right calendar day.
-  const d = new Date(`${s} 12:00:00`);
-  if (isNaN(d.getTime())) return "";
-  return [
-    d.getFullYear(),
-    String(d.getMonth() + 1).padStart(2, "0"),
-    String(d.getDate()).padStart(2, "0"),
-  ].join("-");
-}
-
-/**
- * True when two date ranges for the SAME room overlap.
- * Uses the half-open [checkIn, checkOut) convention so that a checkout on
- * the same day as a new check-in is explicitly ALLOWED:
- *
- *   existingCheckIn  < newCheckOut
- *   existingCheckOut > newCheckIn
- *
- * Accepts any mix of ISO or display-format date strings.
- */
-function bookingDatesOverlap(
-  existingIn:  string, existingOut: string,
-  newIn:       string, newOut:      string,
-): boolean {
-  const eIn  = toISODate(existingIn);
-  const eOut = toISODate(existingOut);
-  const nIn  = toISODate(newIn);
-  const nOut = toISODate(newOut);
-  if (!eIn || !eOut || !nIn || !nOut) return false;
-  return eIn < nOut && eOut > nIn;
-}
-
-/**
- * Scan the live local bookings array for a conflict.
- * Returns the first conflicting booking or undefined.
- *
- * @param excludeId  Optional booking_ref to skip (used when editing a booking).
- */
-function findRoomConflict(
-  bookings:   Booking[],
-  roomNumber: string,
-  checkIn:    string,   // ISO "YYYY-MM-DD"
-  checkOut:   string,   // ISO "YYYY-MM-DD"
-  excludeId?: string,
-): Booking | undefined {
-  if (!roomNumber || !checkIn || !checkOut) return undefined;
-  return bookings.find(b => {
-    if (excludeId && b.id === excludeId) return false;
-    if (!BLOCKING_STATUSES.has(b.status)) return false;
-    // Iterate all rooms in the booking — the legacy shim b.roomNumber only
-    // reflects rooms[0] and silently misses conflicts against rooms 2+.
-    // Each row must ALSO be blocking in its own right: a partially-cancelled
-    // booking stays "Confirmed", but its cancelled rows release their dates.
-    return b.rooms.some(br =>
-      ROOM_BLOCKING_STATUSES.has(br.status) &&
-      br.roomNumber.trim() === roomNumber.trim() &&
-      bookingDatesOverlap(br.checkInISO, br.checkOutISO, checkIn, checkOut)
-    );
-  });
-}
-
-/**
  * Find all hotel rooms of a given category that are available for the
  * specified date window — i.e., not conflicting with any existing booking
  * AND not already used by another row in the current form.
@@ -852,7 +767,7 @@ export default function BookingsClient({ initialRoom }: Props) {
   const [formOpen,     setFormOpen]     = useState<boolean>(!!initialRoom);
   const [form,         setForm]         = useState<FormData>({
     ...EMPTY_FORM,
-    rooms: [{ ...makeEmptyRoomRow(), room: initialRoom ?? "" }],
+    rooms: [{ ...makeEmptyRoomRow(), room: initialRoom ?? "", checkIn: initialRoom ? localTodayISO() : "" }],
   });
   const [errors,       setErrors]       = useState<FormErrors>({});
   const [successMsg,   setSuccessMsg]   = useState<string>("");
@@ -868,6 +783,20 @@ export default function BookingsClient({ initialRoom }: Props) {
   // snapped empty input straight back to "1", making retyping a fight.
   // null = not editing (render the committed number); commit + clamp
   // (integer, min 1; empty restores 1) happens on blur and on submit paths.
+  // "⋯" action-menu open state — one menu at a time, keyed by booking id
+  // (2026-08-26 layout rework #2). Closed by outside click, Escape, or use.
+  const [actionMenuFor, setActionMenuFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (!actionMenuFor) return;
+    const close = (e: MouseEvent) => {
+      if (!(e.target instanceof Element) || !e.target.closest("[data-action-menu]")) setActionMenuFor(null);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setActionMenuFor(null); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", onKey); };
+  }, [actionMenuFor]);
+
   const [guestsDraft,     setGuestsDraft]     = useState<string | null>(null);
   const [editGuestsDraft, setEditGuestsDraft] = useState<string | null>(null);
 
@@ -1403,11 +1332,21 @@ export default function BookingsClient({ initialRoom }: Props) {
   // ── Auto-scroll effect for ?room= param ────────────────────
   useEffect(() => {
     if (roomParam && !hasAutoScrolled && pageView === "bookings") {
-      // Check if this room is currently occupied (exists in any active booking)
-      const occupiedBooking = bookings.find(b => {
-        return (b.status === "Checked In" || b.status === "Confirmed") &&
-               b.rooms.some(r => r.roomNumber === roomParam);
-      });
+      // Route via THE availability formula (2026-08-31): the old containment
+      // check here (any active booking merely CONTAINING the room, no dates,
+      // no row status) hijacked clicks on released rooms into the parent
+      // booking's edit modal — a partially released multi-room booking made
+      // its freed rooms unbookable from the Room Board for its whole
+      // remaining life. Now: edit modal ONLY when a BLOCKING row occupies
+      // the room TODAY (half-open [today, tomorrow)); released rooms fall
+      // through to the create form with the room pre-selected.
+      const today = localTodayISO();
+      const tomorrow = (() => {
+        const d = new Date(`${today}T12:00:00`);
+        d.setDate(d.getDate() + 1);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      })();
+      const occupiedBooking = findRoomConflict(bookings, roomParam, today, tomorrow);
 
       if (occupiedBooking) {
         // Room is occupied — open that booking's details instead of new booking form
@@ -1437,7 +1376,7 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (initialRoom) {
       setForm(f => ({
         ...f,
-        rooms: f.rooms.map((r, i) => i === 0 ? { ...r, room: initialRoom } : r),
+        rooms: f.rooms.map((r, i) => i === 0 ? { ...r, room: initialRoom, checkIn: r.checkIn || localTodayISO() } : r),
       }));
       setFormOpen(true);
     }
@@ -4562,12 +4501,16 @@ export default function BookingsClient({ initialRoom }: Props) {
                       </span>
                     </td>
 
-                    {/* Action — workflow, payment, documents, timeline.
-                        HORIZONTAL wrap (2026-08-26): the old flex-col stacked up
-                        to five full-height buttons and inflated one-line rows to
-                        ~300px. Same buttons, same handlers — layout only. */}
+                    {/* Action — two primaries on ONE line + a "⋯" overflow menu
+                        (2026-08-26 rework #2): the flex-wrap attempt still
+                        stacked one-per-line because table auto-layout squeezed
+                        this td below the wrap threshold. Now the cell renders a
+                        single non-wrapping row — workflow + Add Payment — and
+                        the low-frequency actions (Resend SMS, Documents,
+                        Timeline, Edit, Cancel) live in the kebab menu. Same
+                        handlers, layout only. */}
                     <td className="px-3 py-2.5">
-                      <div className="flex flex-wrap gap-x-2 gap-y-1 items-center max-w-[250px]">
+                      <div className="flex items-center gap-1.5 whitespace-nowrap">
 
                         {/* ── Booking workflow: Check In → Check Out ── */}
                         {action && (
@@ -4575,7 +4518,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                             onClick={isFutureCheckIn ? undefined : () => handleWorkflowAction(b, action.next)}
                             disabled={isFutureCheckIn}
                             title={isFutureCheckIn ? `Check-in available on ${b.checkIn}` : undefined}
-                            className={`text-[11.5px] font-semibold border px-3 py-1.5 rounded-lg whitespace-nowrap
+                            className={`text-[11.5px] font-semibold border px-2.5 py-1.5 rounded-lg whitespace-nowrap
                               ${isFutureCheckIn ? "opacity-50 cursor-not-allowed" : "transition-colors"} ${action.style}`}
                           >
                             {action.label}
@@ -4588,20 +4531,21 @@ export default function BookingsClient({ initialRoom }: Props) {
                         {due > 0 && b.status !== "Checked Out" && (() => {
                           const checkedIn = b.status === "Checked In";
                           if (!isAdmin && !checkedIn) {
-                            // Staff: guest not yet checked in — show locked message
                             return (
-                              <p className="text-[10.5px] text-slate-400 italic leading-tight">
-                                Payment available<br/>after check-in
-                              </p>
+                              <span
+                                className="text-[10px] text-slate-400 italic whitespace-nowrap"
+                                title="Payment available after check-in"
+                              >
+                                pay after check-in
+                              </span>
                             );
                           }
-                          // Admin (any status) or Staff (checked-in only)
                           const warnAdmin = isAdmin && !checkedIn;
                           return (
                             <button
                               onClick={() => openPayModal(b)}
                               title={warnAdmin ? "Guest not yet checked in — verify before recording" : undefined}
-                              className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
+                              className={`inline-flex items-center gap-1 text-[11.5px] font-semibold px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
                                 warnAdmin
                                   ? "text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100"
                                   : "text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100"
@@ -4610,81 +4554,76 @@ export default function BookingsClient({ initialRoom }: Props) {
                               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="w-3 h-3">
                                 <path d="M12 5v14M5 12h14"/>
                               </svg>
-                              Add Payment
+                              Payment
                             </button>
                           );
                         })()}
 
-                        {/* ── Resend confirmation SMS (manual; outcomes in sms_log) ── */}
-                        <div>
+                        {/* ── "⋯" overflow menu — Resend SMS / Documents / Timeline / Edit / Cancel ── */}
+                        <div className="relative">
                           <button
-                            onClick={() => handleResendSms(b.id)}
-                            disabled={smsResend.get(b.id) === "sending"}
-                            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-sky-600 transition-colors disabled:opacity-50"
+                            onClick={e => { e.stopPropagation(); setActionMenuFor(prev => prev === b.id ? null : b.id); }}
+                            title="More actions"
+                            className={`w-7 h-7 flex items-center justify-center rounded-lg border text-[15px] font-bold leading-none transition-colors ${
+                              actionMenuFor === b.id
+                                ? "text-slate-700 bg-slate-100 border-slate-300"
+                                : "text-slate-400 bg-white border-slate-200 hover:text-slate-700 hover:bg-slate-50"
+                            }`}
                           >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 flex-shrink-0">
-                              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                            </svg>
-                            {smsResend.get(b.id) === "sending" ? "Sending…" : "Resend SMS"}
+                            ⋯
                           </button>
-                          {smsStatusText(smsResend.get(b.id)) && (
-                            <p className={`text-[10.5px] leading-tight mt-0.5 ${smsResend.get(b.id) === "sent" ? "text-emerald-600" : "text-amber-600"}`}>
-                              {smsStatusText(smsResend.get(b.id))}
-                            </p>
+                          {actionMenuFor === b.id && (
+                            <div
+                              data-action-menu
+                              className="absolute right-0 top-8 z-40 w-44 bg-white border border-slate-200 rounded-xl shadow-lg py-1"
+                              onClick={e => e.stopPropagation()}
+                            >
+                              <button
+                                onClick={() => { handleResendSms(b.id); setActionMenuFor(null); }}
+                                disabled={smsResend.get(b.id) === "sending"}
+                                className="w-full text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-sky-50 hover:text-sky-700 transition-colors disabled:opacity-50"
+                              >
+                                {smsResend.get(b.id) === "sending" ? "Sending SMS…" : "Resend SMS"}
+                              </button>
+                              <button
+                                onClick={() => { openDocsModal(b); setActionMenuFor(null); }}
+                                className="w-full text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-violet-50 hover:text-violet-700 transition-colors"
+                              >
+                                Documents
+                              </button>
+                              <button
+                                onClick={() => { setTimelineModal(b); setActionMenuFor(null); }}
+                                className="w-full text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-amber-50 hover:text-amber-700 transition-colors"
+                              >
+                                Timeline
+                              </button>
+                              {(b.status === "Confirmed" || b.status === "Checked In") && (
+                                <button
+                                  onClick={() => { setEditTarget(b); setActionMenuFor(null); }}
+                                  className="w-full text-left px-3 py-2 text-[12px] font-medium text-slate-600 hover:bg-violet-50 hover:text-violet-700 transition-colors"
+                                >
+                                  Edit
+                                </button>
+                              )}
+                              {b.status === "Confirmed" && b.rooms.every(r => r.status === "Confirmed") && (
+                                <button
+                                  onClick={() => { openCancelBookingModal(b); setActionMenuFor(null); }}
+                                  className="w-full text-left px-3 py-2 text-[12px] font-medium text-rose-500 hover:bg-rose-50 hover:text-rose-700 transition-colors"
+                                >
+                                  Cancel Booking
+                                </button>
+                              )}
+                            </div>
                           )}
                         </div>
-
-                        {/* ── Documents ── */}
-                        <button
-                          onClick={() => openDocsModal(b)}
-                          className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-violet-600 transition-colors"
-                        >
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
-                            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
-                            <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>
-                          </svg>
-                          Documents
-                        </button>
-
-                        {/* ── Timeline ── */}
-                        <button
-                          onClick={() => setTimelineModal(b)}
-                          className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-amber-600 transition-colors"
-                        >
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
-                            <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
-                          </svg>
-                          Timeline
-                        </button>
-
-                        {/* ── Edit (pencil) — only for editable statuses ── */}
-                        {(b.status === "Confirmed" || b.status === "Checked In") && (
-                          <button
-                            onClick={() => setEditTarget(b)}
-                            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-violet-600 transition-colors"
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 flex-shrink-0">
-                              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
-                              <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                            </svg>
-                            Edit
-                          </button>
-                        )}
-
-                        {/* ── Cancel Booking — all-confirmed only ── */}
-                        {b.status === "Confirmed" && b.rooms.every(r => r.status === "Confirmed") && (
-                          <button
-                            onClick={() => openCancelBookingModal(b)}
-                            className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-400 hover:text-rose-600 transition-colors"
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-3 h-3 flex-shrink-0">
-                              <circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/>
-                            </svg>
-                            Cancel
-                          </button>
-                        )}
-
                       </div>
+
+                      {/* Transient SMS outcome — visible after the menu closes */}
+                      {smsStatusText(smsResend.get(b.id)) && (
+                        <p className={`text-[10.5px] leading-tight mt-1 ${smsResend.get(b.id) === "sent" ? "text-emerald-600" : "text-amber-600"}`}>
+                          {smsStatusText(smsResend.get(b.id))}
+                        </p>
+                      )}
                     </td>
                   </tr>
 
