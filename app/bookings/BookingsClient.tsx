@@ -4585,10 +4585,10 @@ export default function BookingsClient({ initialRoom }: Props) {
                           <button
                             onClick={e => { e.stopPropagation(); setActionMenuFor(prev => prev === b.id ? null : b.id); }}
                             title="More actions"
-                            className={`w-7 h-7 flex items-center justify-center rounded-lg border text-[15px] font-bold leading-none transition-colors ${
+                            className={`w-9 h-9 flex items-center justify-center rounded-full border text-[17px] font-extrabold leading-none cursor-pointer transition-colors ${
                               actionMenuFor === b.id
-                                ? "text-slate-700 bg-slate-100 border-slate-300"
-                                : "text-slate-400 bg-white border-slate-200 hover:text-slate-700 hover:bg-slate-50"
+                                ? "text-indigo-700 bg-indigo-100 border-indigo-300"
+                                : "text-indigo-500 bg-indigo-50 border-indigo-200 hover:bg-indigo-100 hover:text-indigo-700"
                             }`}
                           >
                             ⋯
