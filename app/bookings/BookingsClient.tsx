@@ -2725,6 +2725,24 @@ export default function BookingsClient({ initialRoom }: Props) {
       });
       return;
     }
+    // ── Payment FIRST (2026-09-19, BK-1713) ──────────────────────────────
+    // Recorded BEFORE the checkout RPC so the server-side balance guard sees
+    // it — previously recorded after, so a discount+payment combination that
+    // settled the bill on screen still raised "outstanding balance" (the
+    // guard saw the discount, an RPC parameter, but not the pending payment).
+    // Mirrors the checkoutWithOverride persist-before-RPC pattern. If
+    // checkout then fails, the payment STAYS recorded — the money was
+    // physically collected — and the pay fields are cleared so a retry
+    // cannot re-charge.
+    if (capturedPayAmt > 0) {
+      const paid = await recordPayment(bookingId, capturedPayAmt, capturedMethod, "admin");
+      if (!paid) {
+        setModalPayError("Could not record the payment — nothing was charged and checkout was not attempted. Please try again.");
+        return;
+      }
+      setModalPayAmt("");
+      setShowModalPay(false);
+    }
     try {
       await checkoutNormal(
         bookingId,
@@ -2737,18 +2755,14 @@ export default function BookingsClient({ initialRoom }: Props) {
       );
     } catch (err) {
       // Server-side balance guard (or any RPC failure): state already rolled
-      // back in HotelContext — keep the modal open and show why.
-      setOverrideError(err instanceof Error ? err.message : "Check-out failed — please try again.");
+      // back in HotelContext — keep the modal open and show why. If a
+      // payment was recorded above it STAYS recorded — say so, or the desk
+      // re-enters it and double-charges on retry.
+      const msg = err instanceof Error ? err.message : "Check-out failed — please try again.";
+      setOverrideError(capturedPayAmt > 0
+        ? `Payment of ৳${capturedPayAmt.toLocaleString()} was recorded. Checkout did not complete: ${msg} The balance now includes the payment — confirm again to retry (do not re-enter the payment).`
+        : msg);
       return;
-    }
-    // Soft-fail payment step — DB scalar committed by checkoutNormal, trueDue guard passes.
-    // callerRole="admin" bypasses the "Checked In" status guard (optimistic state is "Checked Out").
-    if (capturedPayAmt > 0) {
-      try {
-        recordPayment(bookingId, capturedPayAmt, capturedMethod, "admin");
-      } catch (err) {
-        console.error("[handleConfirmCheckout] recordPayment soft-fail:", err instanceof Error ? err.message : err);
-      }
     }
     setSuccessMsg(
       activeRoomCount <= 1
@@ -2812,6 +2826,24 @@ export default function BookingsClient({ initialRoom }: Props) {
       return;
     }
 
+    // ── Payment FIRST (2026-09-19, BK-1713) ──────────────────────────────
+    // Recorded BEFORE the checkout RPC so the server-side balance guard sees
+    // it — previously recorded after, so a discount+payment combination that
+    // settled the bill on screen still raised "outstanding balance" (the
+    // guard saw the discount, an RPC parameter, but not the pending payment).
+    // Mirrors the checkoutWithOverride persist-before-RPC pattern. If
+    // checkout then fails, the payment STAYS recorded — the money was
+    // physically collected — and the pay fields are cleared so a retry
+    // cannot re-charge.
+    if (capturedPayAmt > 0) {
+      const paid = await recordPayment(bookingId, capturedPayAmt, capturedMethod, "admin");
+      if (!paid) {
+        setModalPayError("Could not record the payment — nothing was charged and checkout was not attempted. Please try again.");
+        return;
+      }
+      setModalPayAmt("");
+      setShowModalPay(false);
+    }
     try {
       await checkoutWithOverride(
         bookingId,
@@ -2824,19 +2856,11 @@ export default function BookingsClient({ initialRoom }: Props) {
         capturedMethod,
       );
     } catch (err) {
-      setOverrideError(err instanceof Error ? err.message : "Override check-out failed — please try again.");
+      const oMsg = err instanceof Error ? err.message : "Override check-out failed — please try again.";
+      setOverrideError(capturedPayAmt > 0
+        ? `Payment of ৳${capturedPayAmt.toLocaleString()} was recorded. Checkout did not complete: ${oMsg} The balance now includes the payment — confirm again to retry (do not re-enter the payment).`
+        : oMsg);
       return;
-    }
-
-    // Soft-fail payment step — DB now has extra_charge_amount written (Step 2 in
-    // bookingsService), so recordPayment's trueDue guard will pass.
-    // callerRole="admin" bypasses the "Checked In" status guard after optimistic checkout.
-    if (capturedPayAmt > 0) {
-      try {
-        recordPayment(bookingId, capturedPayAmt, capturedMethod, "admin");
-      } catch (err) {
-        console.error("[handleAdminOverride] recordPayment soft-fail:", err instanceof Error ? err.message : err);
-      }
     }
 
     setSuccessMsg(
@@ -5909,7 +5933,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                   {showModalPay && (
                     <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-4 space-y-3">
                       <p className="text-[12px] text-emerald-700 font-medium">
-                        Enter the payment amount to collect from the guest. It will be recorded when you confirm checkout.
+                        Enter the payment amount collected from the guest. It is recorded first, then checkout completes — if checkout is stopped, the payment stays on the booking and the balance updates.
                       </p>
                       <div>
                         <label

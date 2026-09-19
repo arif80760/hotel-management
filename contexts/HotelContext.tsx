@@ -95,7 +95,10 @@ type HotelContextType = {
   setRoomActive:       (id: string, isActive: boolean)                             => Promise<void>;
   /** Flip a room back to Available (legacy helper retained for compatibility). */
   markRoomAvailable:   (roomNumber: string)                                        => Promise<void>;
-  recordPayment:       (id: string, additionalAmount: number, method: PaymentMethod, callerRole?: string) => void;
+  /** Records a payment. Resolves true when the DB write persisted, false
+   *  when blocked or failed (already rolled back + logged) — checkout flows
+   *  AWAIT this so the balance guard sees the payment (BK-1713). */
+  recordPayment:       (id: string, additionalAmount: number, method: PaymentMethod, callerRole?: string) => Promise<boolean>;
   /** Normal checkout — no outstanding balance. Stores extra charges, early deduction, and additional discount. */
   checkoutNormal: (
     id: string,
@@ -489,7 +492,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     );
   }
 
-  function recordPayment(id: string, additionalAmount: number, method: PaymentMethod, callerRole?: string) {
+  function recordPayment(id: string, additionalAmount: number, method: PaymentMethod, callerRole?: string): Promise<boolean> {
     // ── Final hard wall — cannot be bypassed regardless of UI state ──
     //
     // Pseudo logic (matches component-level guard):
@@ -510,7 +513,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
           liveStatus: targetBooking.status,
           callerRole: callerRole ?? "unknown",
         });
-        return;   // hard stop — no optimistic update, no Supabase write
+        return Promise.resolve(false);   // hard stop — no optimistic update, no Supabase write
       }
       // Admin paying before check-in: allowed, audit log only
       if (callerRole === "admin" && targetBooking.status !== "Checked In") {
@@ -540,10 +543,13 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     );
     // 2. Persist to Supabase in the background. Roll back if persist fails —
     //    prevBookings restores amountPaid, payment status, AND lastPaymentMethod.
-    bookingsService.recordPayment(id, additionalAmount, method).catch(err => {
-      setBookings(prevBookings);
-      console.error("[HotelContext recordPayment] failed — rolled back:", err instanceof Error ? err.message : err);
-    });
+    return bookingsService.recordPayment(id, additionalAmount, method)
+      .then(() => true)
+      .catch(err => {
+        setBookings(prevBookings);
+        console.error("[HotelContext recordPayment] failed — rolled back:", err instanceof Error ? err.message : err);
+        return false;   // awaited callers react; fire-and-forget callers unchanged
+      });
   }
 
   function checkoutNormal(
