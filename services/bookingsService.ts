@@ -1513,6 +1513,25 @@ export async function checkoutNormal(
   const bookingUUID = (bookingRow as { id: string }).id;
   console.log("[checkoutNormal] Step 0 — resolved UUID:", bookingUUID);
 
+  // ── Step 0.6 — Persist the extra charge BEFORE the RPC (2026-09-24,
+  //     BK-1820 family): step 3.5's overpayment/auto-refund and the balance
+  //     guard read bookings.extra_charge_amount — a post-RPC write meant the
+  //     refund judged a total WITHOUT the in-modal charge. Same persist-
+  //     before-RPC doctrine as the override audit and the BK-1713 payment.
+  //     Raising extra_charge only widens chk_paid_not_exceed_total, so this
+  //     write is always constraint-safe; if the RPC then fails, the charge
+  //     stays recorded (it was a real billing decision). ──
+  if (extraChargeAmount > 0) {
+    const { error: exErr } = await supabase
+      .from("bookings")
+      .update({ extra_charge_amount: extraChargeAmount, extra_charge_reason: extraChargeReason || null })
+      .eq("id", bookingUUID);
+    if (exErr) {
+      throw new Error(`[checkoutNormal] Could not record the extra charge before checkout — ${exErr.message}`);
+    }
+    console.log("[checkoutNormal] Step 0.6 — extra charge persisted:", extraChargeAmount);
+  }
+
   // ── Step 1 — checkout_booking RPC ─────────────────────────────────────────
   // Atomically sets ALL active booking_rooms.status = checked_out,
   // ALL associated rooms.status = cleaning, recomputes total, and
@@ -1553,18 +1572,10 @@ export async function checkoutNormal(
 
   console.log("[checkoutNormal] Step 1 — RPC succeeded for booking_ref:", id);
 
-  // ── Step 2 — Update bookings for fields the RPC doesn't own ────────────────
-  // extra_charge_* and additional_discount_* live only on the bookings table.
-  // Skip the UPDATE entirely when neither is present.
+  // ── Step 2 — RETIRED (2026-09-24): extra_charge_* moved to Step 0.6 so
+  //     the RPC's refund/guard maths see it; additional_discount_* is
+  //     written inside the RPC (step 3.6, #58b). Nothing remains here. ──
   const bookingsPayload: Record<string, unknown> = {};
-
-  if (extraChargeAmount > 0) {
-    bookingsPayload.extra_charge_amount = extraChargeAmount;
-    bookingsPayload.extra_charge_reason = extraChargeReason || null;
-  }
-  // additional_discount_* is now written inside checkout_booking RPC (step 3.6).
-  // Removed from bookingsPayload to avoid the chk_paid_not_exceed_total
-  // constraint violation that fired when discount was applied post-RPC (#58b).
 
   if (Object.keys(bookingsPayload).length > 0) {
     console.log("[checkoutNormal] Step 2 — UPDATE bookings, booking_ref:", id, "| payload:", bookingsPayload);
@@ -1721,6 +1732,8 @@ export async function checkoutWithOverride(
   // only, by/at stamped there). If the RPC then fails, the stamp stays —
   // deliberate (Arif, 2026-08-20): a stale override stamp is visible and
   // true (an admin DID authorize release), unlike a silently blocked one.
+  // Extra charge rides in the same pre-RPC write (2026-09-24, BK-1820
+  // family): step 3.5's refund maths and the guard must see it.
   const { error: ovErr } = await supabase
     .from("bookings")
     .update({
@@ -1728,6 +1741,9 @@ export async function checkoutWithOverride(
       override_reason:   overrideReason.trim(),   // non-empty — validated above and in the modal
       override_by:       overrideBy,
       override_at:       new Date().toISOString(),
+      ...(extraChargeAmount && extraChargeAmount > 0
+        ? { extra_charge_amount: extraChargeAmount, extra_charge_reason: extraChargeReason || null }
+        : {}),
     })
     .eq("id", bookingUUID);
 
@@ -1787,16 +1803,11 @@ export async function checkoutWithOverride(
 
   console.log("[checkoutWithOverride] Step 1 — RPC succeeded for booking_ref:", id);
 
-  // ── Step 2 — Update bookings for fields the RPC doesn't own ──────────────
-  // Override audit moved to Step 0.5 (must precede the status flip — see
-  // trg_guard_checkout_status note there). Only extra charges remain here;
-  // additional_discount_* is written inside checkout_booking RPC (step 3.6,
-  // #58b). Skipped entirely when there is no extra charge.
+  // ── Step 2 — RETIRED (2026-09-24, BK-1820 family): the extra charge now
+  //     rides in the Step 0.5 pre-RPC write so the RPC's refund maths and
+  //     guard see it; additional_discount_* is written inside the RPC
+  //     (step 3.6, #58b). Nothing remains here.
   const updatePayload: Record<string, unknown> = {};
-  if (extraChargeAmount && extraChargeAmount > 0) {
-    updatePayload.extra_charge_amount = extraChargeAmount;
-    updatePayload.extra_charge_reason = extraChargeReason || null;
-  }
 
   if (Object.keys(updatePayload).length > 0) {
   console.log("[checkoutWithOverride] Step 2 — UPDATE bookings, booking_ref:", id, "| payload:", updatePayload);

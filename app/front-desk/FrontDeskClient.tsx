@@ -246,6 +246,11 @@ export default function FrontDeskClient() {
   const [moreDiscountAmt,    setMoreDiscountAmt]    = useState<string>("");
   const [moreDiscountReason, setMoreDiscountReason] = useState<string>("");
   const [discountError,      setDiscountError]      = useState<string>("");
+  // BK-1820 fix 3 — "charge the unused night(s)" toggle (waives the
+  // early-departure deduction by charging it back as an extra charge).
+  const [waiveDeduction, setWaiveDeduction] = useState<boolean>(false);
+  const [waiveReason,    setWaiveReason]    = useState<string>("");
+  const [waiveError,     setWaiveError]     = useState<string>("");
   // Disclosure state — charge/discount fields are hidden behind quiet
   // buttons so Add Payment stays the obvious path. Staff typing a payment
   // amount into the always-visible discount field is the likely cause of
@@ -358,6 +363,7 @@ export default function FrontDeskClient() {
     setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
     setOverrideReason(""); setOverrideError("");
     setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
+    setWaiveDeduction(false); setWaiveReason(""); setWaiveError("");
     setShowChargeSection(false); setShowDiscountSection(false);   // collapsed every open
     setCheckoutPayMethod("cash");
   }
@@ -370,6 +376,7 @@ export default function FrontDeskClient() {
     setShowModalPay(false); setModalPayAmt(""); setModalPayError("");
     setOverrideReason(""); setOverrideError("");
     setMoreDiscountAmt(""); setMoreDiscountReason(""); setDiscountError("");
+    setWaiveDeduction(false); setWaiveReason(""); setWaiveError("");
     setShowChargeSection(false); setShowDiscountSection(false);
     setCheckoutPayMethod("cash");
   }
@@ -403,25 +410,55 @@ export default function FrontDeskClient() {
   }
 
   /**
-   * Validates "More Discount" inputs.
-   * remainingAfterPayment = totalAmount + extraChargeAmt − earlyDeductionAmt − amountPaid
+   * Validates "More Discount" inputs — unified with BookingsClient
+   * (2026-09-24, BK-1820): the cap is the BILLABLE TOTAL, not the remaining
+   * balance. The old remaining-balance cap silently rejected a discount the
+   * moment an in-modal payment covered the bill, which is how BK-1820's
+   * ৳400 discount was dropped on retry.
+   * billableTotal = totalAmount + extraChargeAmt − earlyDeductionAmt
    * Returns { amount } on success, undefined on validation failure (sets discountError).
    */
   function validateAndBuildDiscount(
-    remainingAfterPayment: number,
+    billableTotal: number,
   ): { amount: number } | undefined {
     const amt = parseFloat(moreDiscountAmt) || 0;
     if (amt < 0) {
       setDiscountError("Discount amount cannot be negative.");
       return undefined;
     }
-    if (amt > remainingAfterPayment) {
+    if (amt > 0 && amt > billableTotal) {
       setDiscountError(
-        `Discount cannot exceed remaining balance of ৳${remainingAfterPayment.toLocaleString()}.`
+        `Discount cannot exceed the billable total of ৳${billableTotal.toLocaleString()}.`
       );
       return undefined;
     }
     return { amount: amt };
+  }
+
+  /**
+   * BK-1820 fix 3 — folds the "charge the unused night(s)" toggle into the
+   * extra charge. The server still deducts the unused nights (early-checkout
+   * clamp); this charge adds them back, so an extension night the hotel
+   * agreed to charge is not silently refunded. Reason is MANDATORY — it is
+   * the sole record of why the deduction was overridden. No schema change:
+   * the amount rides the pre-RPC extra-charge write, so the RPC's refund
+   * maths and the balance guard both see it.
+   * Returns undefined (sets waiveError) when the reason is missing.
+   */
+  function applyWaiveToCharge(
+    charge: { amount: number; reason: string | null },
+    earlyDeductionAmt: number,
+  ): { amount: number; reason: string | null } | undefined {
+    if (!waiveDeduction || earlyDeductionAmt <= 0) return charge;
+    if (!waiveReason.trim()) {
+      setWaiveError("A reason is required to charge the unused night(s) — record why the guest still pays for them.");
+      return undefined;
+    }
+    const waiveLine = `Unused night(s) charged — ${waiveReason.trim()}`;
+    return {
+      amount: charge.amount + earlyDeductionAmt,
+      reason: charge.reason ? `${charge.reason} | ${waiveLine}` : waiveLine,
+    };
   }
 
   async function handleConfirmCheckout(confirmed = false) {
@@ -433,9 +470,11 @@ export default function FrontDeskClient() {
     const actualDateISO = checkoutDepartISO || localTodayISO();
     const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
       calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], isoAtNoon(actualDateISO));
-    const remainingAfterPayment =
-      checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt - liveAmountPaid;
-    const discount = validateAndBuildDiscount(remainingAfterPayment);
+    const effCharge = applyWaiveToCharge(charge, earlyDeductionAmt);
+    if (effCharge === undefined) return;
+    const billableTotal         = checkoutConfirm.totalAmount + effCharge.amount - earlyDeductionAmt;
+    const remainingAfterPayment = billableTotal - liveAmountPaid;
+    const discount = validateAndBuildDiscount(billableTotal);
     if (discount === undefined) return;
     const finalPayableBeforeCapture = remainingAfterPayment - discount.amount;
 
@@ -489,8 +528,8 @@ export default function FrontDeskClient() {
     try {
       await checkoutNormal(
         bookingId,
-        charge.amount,
-        charge.reason,
+        effCharge.amount,
+        effCharge.reason,
         actualDateISO,
         discount.amount,
         moreDiscountReason.trim() || null,
@@ -532,9 +571,11 @@ export default function FrontDeskClient() {
     const actualDateISO = checkoutDepartISO || localTodayISO();
     const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
       calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], isoAtNoon(actualDateISO));
-    const remainingAfterPayment =
-      checkoutConfirm.totalAmount + charge.amount - earlyDeductionAmt - liveAmountPaid;
-    const discount = validateAndBuildDiscount(remainingAfterPayment);
+    const effCharge = applyWaiveToCharge(charge, earlyDeductionAmt);
+    if (effCharge === undefined) return;
+    const billableTotal         = checkoutConfirm.totalAmount + effCharge.amount - earlyDeductionAmt;
+    const remainingAfterPayment = billableTotal - liveAmountPaid;
+    const discount = validateAndBuildDiscount(billableTotal);
     if (discount === undefined) return;
     const finalPayableBeforeCapture = remainingAfterPayment - discount.amount;
 
@@ -585,8 +626,8 @@ export default function FrontDeskClient() {
       await checkoutWithOverride(
         bookingId,
         overrideReason,
-        charge.amount,
-        charge.reason,
+        effCharge.amount,
+        effCharge.reason,
         actualDateISO,
         discount.amount,
         moreDiscountReason.trim() || null,
@@ -1133,7 +1174,10 @@ export default function FrontDeskClient() {
           .reduce((m, r) => (r.checkInISO && r.checkInISO > m ? r.checkInISO : m), "");
         const { totalDays: earlyDays, totalAmt: earlyDeductionAmt } =
           calcBookingLevelDeductions(checkoutConfirm.rooms ?? [], isoAtNoon(departISO));
-        const finalTotal                = checkoutConfirm.totalAmount + extraChargeAmt;
+        // BK-1820 fix 3 — the waived deduction is charged back, cancelling
+        // the deduction in the preview exactly as the server maths will.
+        const waivedAmt                 = waiveDeduction && earlyDeductionAmt > 0 ? earlyDeductionAmt : 0;
+        const finalTotal                = checkoutConfirm.totalAmount + extraChargeAmt + waivedAmt;
         const finalPayableBeforeModalPay = finalTotal - earlyDeductionAmt - moreDiscountAmtNum - liveAmountPaid;
         const modalPayAmtNum            = parseFloat(modalPayAmt) || 0;
         const finalPayable              = finalPayableBeforeModalPay - modalPayAmtNum;
@@ -1309,6 +1353,15 @@ export default function FrontDeskClient() {
                           <span className="text-[13.5px] font-semibold text-emerald-700">−৳{earlyDeductionAmt.toLocaleString()}</span>
                         </div>
                       )}
+                      {waivedAmt > 0 && (
+                        <div className="flex items-center justify-between px-4 py-2.5 bg-amber-50/50">
+                          <span className="text-[13px] text-amber-700">
+                            Unused Night(s) Charged
+                            <span className="ml-1.5 text-[11.5px] font-normal text-amber-600">(deduction waived)</span>
+                          </span>
+                          <span className="text-[13.5px] font-semibold text-amber-700">+৳{waivedAmt.toLocaleString()}</span>
+                        </div>
+                      )}
                       {moreDiscountAmtNum > 0 && (
                         <div className="flex items-center justify-between px-4 py-2.5 bg-violet-50/50">
                           <span className="text-[13px] text-violet-700">Additional Discount</span>
@@ -1338,6 +1391,45 @@ export default function FrontDeskClient() {
                     <span className="text-[11.5px] text-slate-400">payment status</span>
                   </div>
                 </div>
+
+                {/* ── CHARGE UNUSED NIGHT(S) — BK-1820 fix 3. Shown only when
+                       the picked departure produces a deduction; a guest whose
+                       extension night was agreed should still pay for it. ── */}
+                {earlyDeductionAmt > 0 && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3.5">
+                    <label className="flex items-start gap-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={waiveDeduction}
+                        onChange={e => {
+                          setWaiveDeduction(e.target.checked);
+                          setWaiveError("");
+                          if (!e.target.checked) setWaiveReason("");
+                        }}
+                        className="mt-0.5 w-4 h-4 accent-amber-600 flex-shrink-0"
+                      />
+                      <span className="text-[12.5px] text-amber-800 leading-snug">
+                        <span className="font-semibold">Charge the unused night{earlyDays !== 1 ? "s" : ""}</span>
+                        {" "}— the guest still pays the ৳{earlyDeductionAmt.toLocaleString()} deduction
+                        (e.g. an extension night the hotel agreed to charge).
+                      </span>
+                    </label>
+                    {waiveDeduction && (
+                      <div className="mt-2.5">
+                        <input
+                          type="text"
+                          value={waiveReason}
+                          onChange={e => { setWaiveReason(e.target.value); setWaiveError(""); }}
+                          placeholder="Reason (required) — e.g. extension night agreed with guest"
+                          className="w-full px-3 py-2 text-[13px] border border-amber-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                        />
+                        {waiveError && (
+                          <p className="mt-1.5 text-[12px] font-medium text-rose-600">{waiveError}</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* ── EXTRA CHARGES — hidden behind a quiet outline button so
                        Add Payment stays the obvious action ──────────── */}
