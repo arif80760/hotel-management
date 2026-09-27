@@ -1762,15 +1762,23 @@ export default function BookingsClient({ initialRoom }: Props) {
     if (!bd) return;
 
     // ── Add-to-existing mode (opened from booking drawer) ──────────────
-    // Call addRoomToBooking() for each selected room instead of pushing to form.rooms[].
+    // Call addRoomToBooking() for each selected room instead of pushing to
+    // form.rooms[]. SEQUENTIALLY (2026-09-27, BK-1928): un-awaited parallel
+    // adds raced the total recompute — each transaction's SUM missed the
+    // other's uncommitted row and the last commit stored a short total.
     if (bd.bookingContextRef) {
+      const ref = bd.bookingContextRef;
+      const toAdd: { roomNumber: string; rate: number }[] = [];
       for (const [, section] of Object.entries(bd.sections)) {
         if (section.selected.size === 0) continue;
         const rate = parseFloat(section.bookingRate) || 0;
-        for (const roomNumber of section.selected) {
-          ctxAddRoomToBooking(bd.bookingContextRef, roomNumber, bd.checkIn, bd.checkOut, rate);
-        }
+        for (const roomNumber of section.selected) toAdd.push({ roomNumber, rate });
       }
+      void (async () => {
+        for (const { roomNumber, rate } of toAdd) {
+          await ctxAddRoomToBooking(ref, roomNumber, bd.checkIn, bd.checkOut, rate);
+        }
+      })();
       setBlockDialog(null);
       return;
     }
@@ -2269,6 +2277,11 @@ export default function BookingsClient({ initialRoom }: Props) {
         e.email = "Invalid email format.";
     }
     const rowErrors: NonNullable<FormErrors["rooms"]> = {};
+    // BK-1915 — status-at-birth guard: a booking cannot be BORN Checked In
+    // with a future check-in (the Check In button's date restriction was
+    // bypassed by setting the status at creation; room went occupied for a
+    // guest not present). Back-dated check-ins stay allowed (late entry).
+    const todayISO = localTodayISO();
     for (const r of form.rooms) {
       const re: NonNullable<FormErrors["rooms"]>[string] = {};
       if (!r.room.trim())  re.room     = "Room number is required.";
@@ -2276,6 +2289,8 @@ export default function BookingsClient({ initialRoom }: Props) {
       if (!r.checkOut)     re.checkOut = "Check-out date is required.";
       if (r.checkIn && r.checkOut && calcNights(r.checkIn, r.checkOut) <= 0)
         re.checkOut = "Check-out must be after check-in.";
+      if (form.status === "Checked In" && r.checkIn && r.checkIn > todayISO)
+        re.checkIn = "Check-in date is in the future — save as Confirmed, or correct the date for a walk-in.";
       if (Object.keys(re).length > 0) rowErrors[r.id] = re;
     }
     if (Object.keys(rowErrors).length > 0) e.rooms = rowErrors;

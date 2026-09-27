@@ -126,14 +126,17 @@ type HotelContextType = {
     changes: UpdateBookingPayload,
     original: MockBooking,
   ) => void;
-  /** Append a new room to an existing confirmed/checked-in booking. */
+  /** Append a new room to an existing confirmed/checked-in booking.
+   *  Resolves when the DB write settled (never rejects — rollback is
+   *  internal). Callers adding several rooms MUST await sequentially
+   *  (BK-1928 parallel-recompute race). */
   addRoomToBooking: (
     bookingRef:  string,
     roomNumber:  string,
     checkIn:     string,
     checkOut:    string,
     bookingRate: number,
-  ) => void;
+  ) => Promise<void>;
   /** Cancel a confirmed room or mark a checked-in room as early departure. */
   cancelBookingRoom: (
     bookingRoomId:       string,
@@ -830,7 +833,7 @@ export function HotelProvider({ children }: { children: ReactNode }) {
     bookingRate: number,
   ) {
     const target = bookings.find(b => b.id === bookingRef);
-    if (!target) return;
+    if (!target) return Promise.resolve();
 
     const hotelRoom = rooms.find(r => r.roomNumber === roomNumber);
     const prevRoomStatus = hotelRoom?.status;
@@ -872,7 +875,12 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       prev.map(r => r.roomNumber === roomNumber ? { ...r, status: "Reserved" as RoomStatus } : r)
     );
 
-    bookingsService.addRoomToBooking(bookingRef, roomNumber, checkIn, checkOut, bookingRate)
+    // Returned so callers can AWAIT (2026-09-27, BK-1928): two un-awaited
+    // adds ran as parallel transactions whose total recomputes couldn't see
+    // each other's uncommitted row — last commit clobbered the total. The
+    // rollback stays internal (promise always resolves); ordering is what
+    // callers need, not error propagation.
+    return bookingsService.addRoomToBooking(bookingRef, roomNumber, checkIn, checkOut, bookingRate)
       .then(() => bookingsService.getBookingByRef(bookingRef))
       .then(updated => {
         if (!updated) return;
