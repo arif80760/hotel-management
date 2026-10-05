@@ -534,3 +534,28 @@ export async function getPastDayActivity(closeDate: string): Promise<PastDayActi
     transactions,
   };
 }
+
+// ─────────────────────────────────────────────────────────────
+// reopenDay — admin-only undo of the NEWEST day close (2026-10-05
+// accidental-close incident). Calls the reopen_latest_day_close RPC,
+// which hard-refuses any close that isn't the latest (older reopens
+// would break the carry-forward chain), deletes the snapshot row,
+// moves entries that close carried forward back to their true date,
+// and records who/why in the activity log. day_closes is snapshot-only,
+// so the deletion itself touches no transaction or balance data.
+// ─────────────────────────────────────────────────────────────
+export async function reopenDay(
+  closeDate: string,
+  reason: string,
+): Promise<{ ok: true; restoredRows: number } | { ok: false; message: string }> {
+  const { data, error } = await supabase.rpc("reopen_latest_day_close", {
+    p_close_date: closeDate,
+    p_reason:     reason,
+  });
+  if (error) {
+    console.error("[reopenDay] RPC failed:", error.message, "| code:", error.code);
+    return { ok: false, message: error.message };
+  }
+  const restored = (data as { restored_rows?: number } | null)?.restored_rows ?? 0;
+  return { ok: true, restoredRows: restored };
+}

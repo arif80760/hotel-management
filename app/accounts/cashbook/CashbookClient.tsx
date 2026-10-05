@@ -33,6 +33,7 @@ import {
   getPastDayActivity,
   closeDay,
   closePastDay,
+  reopenDay,
   type DayCloseStatus,
   type PastDayActivity,
 } from "@/services/dayCloseService";
@@ -46,6 +47,7 @@ import { calcTrueDue } from "@/lib/invoiceUtils";
 import { readSessionCache, writeSessionCache } from "@/lib/sessionCache";
 import { useSlowWatch } from "@/components/SlowConnectionNotice";
 import { useReferenceData } from "@/contexts/ReferenceDataContext";
+import { useAuth } from "@/contexts/AuthContext";
 
 // ─────────────────────────────────────────────────────────────
 // COPIED FROM app/employees/EmployeesClient.tsx
@@ -638,6 +640,25 @@ export default function CashbookClient({
   // closeDayError: error message from a failed close attempt (banner under the button).
   // null when no error to show.
   const [closeDayError, setCloseDayError] = useState<string | null>(null);
+
+  // ── Day-close safety pair (2026-10-05, accidental-close incident) ──
+  // closeConfirm: snapshot of the card's figures at click time, shown in the
+  // confirmation dialog; closeAck gates the confirm button (an explicit
+  // acknowledgement, not just an OK — this is the second accidental-close
+  // class, early closes were already a flagged habit).
+  const { role } = useAuth();
+  const isAdmin = role === "admin";
+  const [closeConfirm, setCloseConfirm] = useState<null | {
+    mode: "catchup" | "today"; displayDate: string;
+    opening: number; net: number; count: number; closing: number;
+  }>(null);
+  const [closeAck, setCloseAck] = useState(false);
+  // Reopen (admin-only): deletes the NEWEST day_closes row via the
+  // reopen_latest_day_close RPC; reason is mandatory.
+  const [reopenConfirm, setReopenConfirm] = useState<null | { closeDate: string }>(null);
+  const [reopenReason,  setReopenReason]  = useState("");
+  const [reopenError,   setReopenError]   = useState("");
+  const [reopening,     setReopening]     = useState(false);
 
   // Helper: refresh dayCloseStatus, plus pastActivity when there's a backlog.
   // Errors are non-fatal — we leave the state null and the card skips itself.
@@ -1259,6 +1280,7 @@ export default function CashbookClient({
 
         // ── Handlers ─────────────────────────────────────────
         async function handleClose() {
+          setCloseConfirm(null);
           setCloseDayError(null);
           setClosingDay(true);
           try {
@@ -1371,11 +1393,34 @@ export default function CashbookClient({
               <span style={{ fontFamily: oswaldFamily, fontSize: 19, fontWeight: 600, color: "#3F3F3F" }} className="tabular-nums whitespace-nowrap flex-shrink-0">{formatBdt(closingShown)}</span>
             </div>
 
+            {mode === "closed" && isAdmin && (
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => { setReopenReason(""); setReopenError(""); setReopenConfirm({ closeDate: today }); }}
+                  style={{ fontFamily: archivoFamily }}
+                  className="w-full px-4 py-2.5 rounded-lg text-[13px] font-semibold border border-amber-300 text-amber-800 bg-amber-50 hover:bg-amber-100 transition-colors"
+                >
+                  Reopen day
+                </button>
+              </div>
+            )}
+
             {mode !== "closed" && (
               <div className="pt-2">
                 <button
                   type="button"
-                  onClick={handleClose}
+                  onClick={() => {
+                    setCloseAck(false);
+                    setCloseConfirm({
+                      mode: mode === "catchup" ? "catchup" : "today",
+                      displayDate,
+                      opening,
+                      net: closingShown - opening,
+                      count: displayRows.length,
+                      closing: closingShown,
+                    });
+                  }}
                   disabled={isClosing}
                   style={{ fontFamily: archivoFamily, background: mode === "catchup" ? "#D9822B" : "#3F3F3F" }}
                   className="w-full px-4 py-2.5 rounded-lg text-white text-[13px] font-semibold transition-opacity hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -1388,6 +1433,111 @@ export default function CashbookClient({
                     {closeDayError}
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* ── Day-close confirmation dialog (2026-10-05) ── */}
+            {closeConfirm && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+                onClick={e => { if (e.target === e.currentTarget) setCloseConfirm(null); }}>
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+                  <h3 style={{ fontFamily: oswaldFamily, fontSize: 17, fontWeight: 600, color: "#3F3F3F" }}>
+                    Confirm Day Close — {closeConfirm.displayDate}
+                  </h3>
+                  <div style={{ fontFamily: archivoFamily }} className="space-y-1.5 text-[13px] text-slate-700">
+                    <div className="flex justify-between"><span>Opening balance</span><span className="font-semibold tabular-nums">{formatBdt(closeConfirm.opening)}</span></div>
+                    <div className="flex justify-between">
+                      <span>Net activity ({closeConfirm.count} entr{closeConfirm.count === 1 ? "y" : "ies"})</span>
+                      <span className={`font-semibold tabular-nums ${closeConfirm.net >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                        {closeConfirm.net >= 0 ? "+" : "−"}{formatBdt(Math.abs(closeConfirm.net))}
+                      </span>
+                    </div>
+                    <div className="flex justify-between border-t border-slate-100 pt-1.5"><span className="font-semibold">Closing balance</span><span className="font-bold tabular-nums">{formatBdt(closeConfirm.closing)}</span></div>
+                  </div>
+                  {closeConfirm.count === 0 && (
+                    <p style={{ fontFamily: archivoFamily }} className="text-[12.5px] font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">
+                      No transactions recorded on {closeConfirm.displayDate} yet — closing an empty day is usually a mistake.
+                    </p>
+                  )}
+                  <p style={{ fontFamily: archivoFamily }} className="text-[12.5px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    Closing locks all of {closeConfirm.displayDate}&rsquo;s entries — corrections after this require Amend. This should be done at end of trading.
+                  </p>
+                  <label style={{ fontFamily: archivoFamily }} className="flex items-start gap-2.5 cursor-pointer text-[12.5px] text-slate-700">
+                    <input type="checkbox" checked={closeAck} onChange={e => setCloseAck(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 accent-slate-700 flex-shrink-0" />
+                    <span>I confirm trading has ended for {closeConfirm.displayDate}.</span>
+                  </label>
+                  <div className="flex gap-2.5 pt-1">
+                    <button type="button" onClick={() => setCloseConfirm(null)}
+                      style={{ fontFamily: archivoFamily }}
+                      className="flex-1 px-4 py-2.5 rounded-lg text-[13px] font-semibold border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors">
+                      Cancel
+                    </button>
+                    <button type="button" disabled={!closeAck || isClosing} onClick={handleClose}
+                      style={{ fontFamily: archivoFamily, background: "#3F3F3F" }}
+                      className="flex-1 px-4 py-2.5 rounded-lg text-white text-[13px] font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity">
+                      Close the day
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ── Reopen-day dialog (admin-only) ── */}
+            {reopenConfirm && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+                onClick={e => { if (e.target === e.currentTarget && !reopening) setReopenConfirm(null); }}>
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+                  <h3 style={{ fontFamily: oswaldFamily, fontSize: 17, fontWeight: 600, color: "#3F3F3F" }}>
+                    Reopen {reopenConfirm.closeDate}?
+                  </h3>
+                  <p style={{ fontFamily: archivoFamily }} className="text-[12.5px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    Entries become editable again, and any entries recorded after the close move back to {reopenConfirm.closeDate}. Close the day again at end of trading.
+                  </p>
+                  <div>
+                    <input type="text" value={reopenReason}
+                      onChange={e => { setReopenReason(e.target.value); setReopenError(""); }}
+                      placeholder="Reason (required) — e.g. closed accidentally at 1:43 PM"
+                      style={{ fontFamily: archivoFamily }}
+                      className="w-full px-3 py-2 text-[13px] border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400" />
+                    {reopenError && (
+                      <p style={{ fontFamily: archivoFamily }} className="mt-1.5 text-[12px] font-medium text-rose-600">{reopenError}</p>
+                    )}
+                  </div>
+                  <div className="flex gap-2.5 pt-1">
+                    <button type="button" disabled={reopening} onClick={() => setReopenConfirm(null)}
+                      style={{ fontFamily: archivoFamily }}
+                      className="flex-1 px-4 py-2.5 rounded-lg text-[13px] font-semibold border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40 transition-colors">
+                      Cancel
+                    </button>
+                    <button type="button" disabled={!reopenReason.trim() || reopening}
+                      onClick={async () => {
+                        setReopening(true);
+                        setReopenError("");
+                        try {
+                          const r = await reopenDay(reopenConfirm.closeDate, reopenReason.trim());
+                          if (r.ok) {
+                            setSuccessMsg(
+                              `Day ${reopenConfirm.closeDate} reopened` +
+                              (r.restoredRows > 0
+                                ? ` — ${r.restoredRows} carried-forward entr${r.restoredRows === 1 ? "y" : "ies"} moved back.`
+                                : ".")
+                            );
+                            setReopenConfirm(null);
+                            await loadDayCloseStatus();
+                          } else {
+                            setReopenError(r.message);
+                          }
+                        } finally {
+                          setReopening(false);
+                        }
+                      }}
+                      style={{ fontFamily: archivoFamily, background: "#B45309" }}
+                      className="flex-1 px-4 py-2.5 rounded-lg text-white text-[13px] font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity">
+                      {reopening ? "Reopening..." : "Reopen day"}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </div>
