@@ -22,6 +22,7 @@
 import { supabase }             from "@/lib/supabase";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { deriveBookingSpan }    from "@/lib/bookingSpan";
+import { activeRooms }          from "@/lib/bookingRooms";
 import {
   type MockBooking,
   type BookingStatus,
@@ -246,11 +247,15 @@ function mapBooking(row: BookingRow): MockBooking {
       appliedAt:      ec.applied_at,
     }));
 
-  // ── Backward-compat shims — sourced from rooms[0] ─────────
-  // For single-room bookings (rooms.length === 1) these match
-  // existing behaviour exactly. For multi-room bookings, callers
-  // that need per-room detail should read booking.rooms[i] directly.
-  const r0 = rooms[0];
+  // ── Backward-compat shims — sourced from the REPRESENTING room ──
+  // BK-2077: rows[0] could be a cancelled row, so the card-level
+  // roomNumber/roomCategory named a phantom room. The representing row
+  // comes from activeRooms() (active, else non-cancelled historical);
+  // rows[0] remains only as a last-resort fallback for fully-cancelled
+  // bookings, whose labels should come from primaryRoomLabel() anyway.
+  // For multi-room bookings, callers that need per-room detail read
+  // booking.rooms[i] directly.
+  const r0 = activeRooms(rooms)[0] ?? rooms[0];
 
   // Booking-level stay span — earliest check-in … latest check-out … nights —
   // derived through the shared helper so this matches the optimistic writers.

@@ -1,6 +1,6 @@
 # CLAUDE.md — Hotel Management System
 
-Last updated: 2026-10-05 (rev 43)
+Last updated: 2026-10-10 (rev 44)
 
 > **rev 19** — Removed the cleaning/maintenance lifecycle from the dashboard Room Board. Checkout now releases a room straight to Available (`checkoutNormal`/`checkoutWithOverride` set the physical room Available and optimistically mark `booking_rooms` Checked Out). `lib/roomStatus.deriveRoomStatusForDate` no longer special-cases Cleaning/Maintenance — the board shows only Available/Reserved/Occupied, derived from bookings; summary/legend trimmed to those three.
 >
@@ -71,6 +71,8 @@ Last updated: 2026-10-05 (rev 43)
 > **rev 42 (2026-09-27)** — BK-1928: total-recompute race. Reported as "add_room_to_booking doesn't recompute" — WRONG premise: the RPC has called `update_booking_total` since 2026-09-05. Real cause: the Add Room dialog fired one UN-AWAITED `addRoomToBooking` per selected room, so two RPC transactions ran in parallel (rooms created 114 ms apart); each recompute's SUM ran under READ COMMITTED and missed the other's uncommitted row — last commit stored the short total (5,500 vs a real 7,500; invoice printed line items above a contradicting TOTAL DUE; Add Payment capped at the phantom due). Self-healed when checking out two rooms re-ran the recompute serially; sweep of ALL 855 non-cancelled bookings found ZERO other drift — no corrections needed anywhere. Fixes, both layers: `update_booking_total` now takes `FOR UPDATE` on the bookings row BEFORE the SUM (`2026-09-27-update-booking-total-row-lock.sql`) — a blocked concurrent caller's SUM then sees the committed row, protecting every caller path; client `addRoomToBooking` returns its promise and the dialog awaits each add sequentially. **RULES:** (1) any function that recomputes a booking-level aggregate from child rows locks the parent row before reading the children; (2) never fire multiple mutating service calls for one booking without awaiting in sequence; (3) a regression probe must assert the AGGREGATE OUTCOME (total rose by nights×rate), not just the row fields — the rejoin probe checked nights/dates and this slipped exactly through that gap.
 
 > **rev 43 (2026-10-05)** — Day-close safety pair, after a director accidentally closed 2026-10-05 at ~1:43 PM with zero transactions (second accidental-close class; the Close button had NO confirmation — handleClose wired straight to onClick; until reopened, every entry that day carried forward to Oct 6). (1) **Close confirmation**: dialog with date, opening, net activity, closing, end-of-trading warning, and a CHECKBOX acknowledgement gating the button (OK-only dialogs don't stop habit errors); red callout when closing a day with zero transactions. Serves both today and catch-up closes. (2) **Reopen Day** (`reopen_latest_day_close`, `2026-10-05-reopen-day-close.sql`): admin-only, LATEST close only (hard-refused otherwise — older reopens would unlock a span later snapshots chain off), deletes the snapshot row (day_closes is snapshot-only; the immutability lock derives from MAX(close_date), so nothing else is touched), RESTORES rows that close carried forward (txn_date back, marker cleared, note suffix stripped — else the books stay split one day over), mandatory reason to activity_log ('day_reopened'). SECURITY DEFINER deliberately (activity_log has no INSERT policy; explicit is_admin() with the auth.uid()-NULL service exemption); admin-only DELETE policy added as defense-in-depth. day_closes rows: closing an already-closed day is refused by closeDay's already_closed check; the carry-forward INSERT path remains the trigger's job. Incident data: fixed same day via guarded one-off (latest-only DELETE, 0 carried rows).
+
+> **rev 44 (2026-10-10)** — BK-2077: room-label derivation. A 4-room booking with 3 cancelled rows showed the cancelled first row's room on the FrontDesk card (dues/dates were right — `deriveBookingSpan` filters Cancelled; the `roomNumber` shim did not). **RULE: any surface that summarizes a booking's rooms derives through `activeRooms()` / `primaryRoomLabel()` (`lib/bookingRooms.ts`) — never rows[0]** (calcTrueDue / findRoomConflict precedent). Representing rows = active (Confirmed/Checked In), else non-cancelled historical, else none → label "Cancelled", never a phantom room. Wired: mapBooking's roomNumber/roomCategory/early shims (fixes every `booking.roomNumber` reader centrally), `roomCellDisplay` (Bookings list + Dues), the `?room=` scroll data-attr, FD cards, and all four checkout/pay modal headers (multi-active shows "N rooms"). Verified clean already: SMS route (`.neq status cancelled`), RoomBoard (per-row status checks), invoice/reservation prints (render all rows with cancelled struck through — deliberate), assistant day-sheet (per-row, status-filtered), NotificationBell/docs modal (no room labels). Probe-level check on live data: BK-2077 rows[0] gave "Room 303" → helper gives "Room 111"; fully-cancelled BK-1057 gave "Room 201" → helper gives "Cancelled". No data corrections — row statuses were always right.
 
 ### Role Permissions
 | Action | staff | admin |
@@ -513,6 +515,20 @@ truthful audit trail (preferred), or use the same
 transaction-wrapped DISABLE TRIGGER pattern as above with
 `trg_guard_checkout_status` on `public.bookings`. Never disable it
 outside a transaction.
+
+### Runbook — Reopen Day vs carried-forward rows
+`reopen_latest_day_close` RESTORES the rows the deleted close carried
+forward — matching on `carried_forward_from = close_date AND txn_date =
+close_date + 1`: `txn_date` moves back to the true date, the marker
+clears, and the 'Carried forward — collected …' note suffix is stripped
+(probe-verified 2026-10-05). So after a reopen, nothing from that close
+stays on the forwarded date and no operator cleanup is needed; the
+reopen dialog states this rather than warning, and the RPC's
+`restored_rows` count surfaces in the success banner. Rows carried by
+OLDER closes keep their forwarded date and annotation permanently —
+that is correct history (the money genuinely arrived after those days
+closed), never "fix" them. Only the LATEST close can be reopened, so a
+chain of stale carried rows across multiple closes cannot occur.
 
 ### Database Migrations (manual)
 1. Open Supabase Dashboard → SQL Editor → New query

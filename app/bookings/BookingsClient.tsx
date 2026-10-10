@@ -51,6 +51,7 @@ import { type RoomCategory } from "@/services/roomCategoriesService";
 import { getRatePeriods, findRatePeriod, type RatePeriod } from "@/services/ratePeriodsService";
 import { supabase } from "@/lib/supabase";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
+import { activeRooms as representingRooms, primaryRoomLabel } from "@/lib/bookingRooms";
 import { classifyBookingSearch, matchesIdentifier, matchesText, rankIdentifierMatches } from "@/lib/searchBookings";
 import { findRoomConflict, bookingDatesOverlap, toISODate, ROOM_BLOCKING_STATUSES } from "@/lib/availability";
 import { calcBookingLevelDeductions, earlyNights, localTodayISO, isoAtNoon } from "@/lib/checkoutUtils";
@@ -298,10 +299,14 @@ function roomCellDisplay(
   bRooms: BookingRoom[],
   catDisplay: (c: string) => string,
 ): { top: string; sub: string; multi: boolean } {
-  const n = bRooms.length;
-  if (n === 0) return { top: "—", sub: "", multi: false };
-  if (n === 1) return { top: `Room ${bRooms[0].roomNumber}`, sub: catDisplay(bRooms[0].roomCategory), multi: false };
-  const cats = [...new Set(bRooms.map(r => r.roomCategory))];
+  // BK-2077 — summarize the REPRESENTING rooms only (active, else
+  // non-cancelled historical), never raw rows: a cancelled rows[0] put a
+  // phantom room on the card while dues/dates were correct.
+  const act = representingRooms(bRooms);
+  const n = act.length;
+  if (n === 0) return { top: bRooms.length > 0 ? "Cancelled" : "—", sub: "", multi: false };
+  if (n === 1) return { top: `Room ${act[0].roomNumber}`, sub: catDisplay(act[0].roomCategory), multi: false };
+  const cats = [...new Set(act.map(r => r.roomCategory))];
   const sub  = cats.length === 1 ? `${n} × ${catDisplay(cats[0])}` : `Mixed (${n})`;
   return { top: `${n} rooms`, sub, multi: true };
 }
@@ -4449,8 +4454,9 @@ export default function BookingsClient({ initialRoom }: Props) {
                 const isFutureCheckIn = action?.next === "Checked In" && !canCheckInToday(b.checkInISO);
                 const confirmedRoomsInBooking = b.rooms.filter(rm => rm.status === "Confirmed");
                 const showBulkCheckboxes = confirmedRoomsInBooking.length >= 2;
-                // Extract first room number for data attr
-                const firstRoomNum = b.rooms[0]?.roomNumber ?? "";
+                // Data attr for the ?room= scroll highlight — the
+                // representing room, never a cancelled rows[0] (BK-2077).
+                const firstRoomNum = representingRooms(b.rooms)[0]?.roomNumber ?? "";
                 return (
                   <Fragment key={b.id}>
                   <tr
@@ -5578,7 +5584,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                       if (activeRooms.length <= 1) {
                         return (
                           <p className="text-[12px] text-slate-500">
-                            Room {checkoutConfirm.roomNumber} · {catDisplay(checkoutConfirm.roomCategory)} · {checkoutConfirm.nights} nt
+                            {primaryRoomLabel(checkoutConfirm.rooms ?? [])}{representingRooms(checkoutConfirm.rooms ?? []).length === 1 ? ` · ${catDisplay(checkoutConfirm.roomCategory)}` : ""} · {checkoutConfirm.nights} nt
                           </p>
                         );
                       }
@@ -6655,7 +6661,7 @@ export default function BookingsClient({ initialRoom }: Props) {
                 <div>
                   <p className="text-[13.5px] font-semibold text-slate-800">{payModal.guestName}</p>
                   <p className="text-[12px] text-slate-400">
-                    Room {payModal.roomNumber} · {catDisplay(payModal.roomCategory)} · {payModal.nights} night{payModal.nights !== 1 ? "s" : ""}
+                    {primaryRoomLabel(payModal.rooms ?? [])}{representingRooms(payModal.rooms ?? []).length === 1 ? ` · ${catDisplay(payModal.roomCategory)}` : ""} · {payModal.nights} night{payModal.nights !== 1 ? "s" : ""}
                   </p>
                 </div>
               </div>

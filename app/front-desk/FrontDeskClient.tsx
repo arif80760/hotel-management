@@ -30,6 +30,7 @@ import {
   PAYMENT_METHOD_LABELS,
 } from "@/lib/mockData";
 import { calcTrueDue, derivePaymentStatus } from "@/lib/invoiceUtils";
+import { activeRooms, primaryRoomLabel } from "@/lib/bookingRooms";
 import { calcBookingLevelDeductions, localTodayISO, isoAtNoon } from "@/lib/checkoutUtils";
 import ConfirmDialog from "@/components/ConfirmDialog";
 
@@ -839,7 +840,7 @@ export default function FrontDeskClient() {
                         {b.guestName}
                       </p>
                       <p className="text-[12px] text-slate-400 mt-0.5">
-                        Room {b.roomNumber} · {categoryName(b.roomCategory)} · {b.nights} nt
+                        {primaryRoomLabel(b.rooms ?? [])}{activeRooms(b.rooms ?? []).length === 1 ? ` · ${categoryName(b.roomCategory)}` : ""} · {b.nights} nt
                       </p>
                       {/* Payment indicator */}
                       <div className="flex items-center gap-1.5 mt-1.5">
@@ -977,7 +978,7 @@ export default function FrontDeskClient() {
                         )}
                       </div>
                       <p className="text-[12px] text-slate-400 mt-0.5">
-                        Room {b.roomNumber} · {categoryName(b.roomCategory)} · {b.nights} nt
+                        {primaryRoomLabel(b.rooms ?? [])}{activeRooms(b.rooms ?? []).length === 1 ? ` · ${categoryName(b.roomCategory)}` : ""} · {b.nights} nt
                       </p>
                       <p className="text-[11.5px] text-slate-400 mt-0.5">
                         In {b.checkIn} · Out {b.checkOut}
@@ -1079,7 +1080,7 @@ export default function FrontDeskClient() {
                         {b.guestName}
                       </p>
                       <p className="text-[12px] text-slate-400 mt-0.5">
-                        Room {b.roomNumber} · {categoryName(b.roomCategory)} · {b.nights} nt
+                        {primaryRoomLabel(b.rooms ?? [])}{activeRooms(b.rooms ?? []).length === 1 ? ` · ${categoryName(b.roomCategory)}` : ""} · {b.nights} nt
                       </p>
                       {/* Status + balance */}
                       <div className="flex items-center gap-2 flex-wrap mt-1.5">
@@ -1231,7 +1232,7 @@ export default function FrontDeskClient() {
                   </div>
                   <div>
                     <p className="text-[13.5px] font-semibold text-slate-800">{checkoutConfirm.guestName}</p>
-                    <p className="text-[12px] text-slate-500">Room {checkoutConfirm.roomNumber} · {categoryName(checkoutConfirm.roomCategory)} · {checkoutConfirm.nights} nt</p>
+                    <p className="text-[12px] text-slate-500">{primaryRoomLabel(checkoutConfirm.rooms ?? [])}{activeRooms(checkoutConfirm.rooms ?? []).length === 1 ? ` · ${categoryName(checkoutConfirm.roomCategory)}` : ""} · {checkoutConfirm.nights} nt</p>
                     <p className="text-[12px] text-slate-400">{checkoutConfirm.checkIn} → {checkoutConfirm.checkOut}</p>
                   </div>
                   <span className={`ml-auto flex-shrink-0 text-[11.5px] font-semibold px-2.5 py-0.5 rounded-full ${statusBadge(checkoutConfirm.status)}`}>
@@ -1862,7 +1863,7 @@ export default function FrontDeskClient() {
                 <div>
                   <p className="text-[13.5px] font-semibold text-slate-800">{payModal.guestName}</p>
                   <p className="text-[12px] text-slate-400">
-                    Room {payModal.roomNumber} · {categoryName(payModal.roomCategory)}
+                    {primaryRoomLabel(payModal.rooms ?? [])}{activeRooms(payModal.rooms ?? []).length === 1 ? ` · ${categoryName(payModal.roomCategory)}` : ""}
                   </p>
                 </div>
               </div>
