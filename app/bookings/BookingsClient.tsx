@@ -570,8 +570,9 @@ function nextAction(status: BookingStatus): ActionDef {
 /** Returns true if the booking's check-in date is today or in the past. */
 function canCheckInToday(checkInISO: string | undefined): boolean {
   if (!checkInISO) return true;   // no ISO date → don't block (safe fallback)
-  const today = new Date().toISOString().slice(0, 10);
-  return checkInISO <= today;
+  // Dhaka-local (BK-2118 pass): the old UTC comparison wrongly BLOCKED
+  // legitimate check-ins between midnight and 6 AM Dhaka.
+  return checkInISO <= localTodayISO();
 }
 
 /** Get price for a room category from the categories list. Returns 0 if not found. */
@@ -2629,7 +2630,17 @@ export default function BookingsClient({ initialRoom }: Props) {
         });
         return;
       }
-      changeBookingStatus(booking.id, nextStatus);
+      void (async () => {
+        const result = await changeBookingStatus(booking.id, nextStatus);
+        if (nextStatus === "Checked In" && result) {
+          const skippedNote = result.skipped.length > 0
+            ? ` · ${result.skipped.length} room${result.skipped.length !== 1 ? "s" : ""} remain scheduled (${result.skipped.map(s => `${s.roomNumber}: ${formatDate(s.checkInDate)}`).join(", ")})`
+            : "";
+          setSuccessMsg(
+            `${booking.id}: ${result.checkedInCount} room${result.checkedInCount !== 1 ? "s" : ""} checked in${skippedNote}`
+          );
+        }
+      })();
     }
   }
 

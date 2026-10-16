@@ -86,8 +86,9 @@ function paymentDot(p: PaymentStatus): string {
 /** Returns true if the booking's check-in date is today or in the past. */
 function canCheckInToday(checkInISO: string | undefined): boolean {
   if (!checkInISO) return true;   // no ISO date → don't block (safe fallback)
-  const today = new Date().toISOString().slice(0, 10);
-  return checkInISO <= today;
+  // Dhaka-local (BK-2118 pass): the old UTC comparison wrongly BLOCKED
+  // legitimate check-ins between midnight and 6 AM Dhaka.
+  return checkInISO <= localTodayISO();
 }
 
 // Format today's date in exactly the same format used in MockBooking.checkIn/checkOut:
@@ -346,10 +347,17 @@ export default function FrontDeskClient() {
       });
       return;
     }
-    changeBookingStatus(booking.id, "Checked In");
-    setSuccessMsg(
-      `${booking.guestName} checked in · Room ${booking.roomNumber} is now Occupied.`
-    );
+    void (async () => {
+      const result = await changeBookingStatus(booking.id, "Checked In");
+      if (result && result.skipped.length > 0) {
+        setSuccessMsg(
+          `${booking.guestName}: ${result.checkedInCount} room${result.checkedInCount !== 1 ? "s" : ""} checked in · ` +
+          `${result.skipped.length} remain scheduled (${result.skipped.map(s => `${s.roomNumber}: ${s.checkInDate}`).join(", ")})`
+        );
+      } else {
+        setSuccessMsg(`${booking.guestName} checked in · ${primaryRoomLabel(booking.rooms ?? [])} now Occupied.`);
+      }
+    })();
   }
 
   /**

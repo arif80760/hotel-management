@@ -1275,10 +1275,16 @@ export async function updateBooking(
  *
  * The id parameter is the booking_ref ("BK-1041"), not the UUID.
  */
+/** Result of the checked_in cascade — which rows flipped, which stay scheduled. */
+export type CheckinCascadeResult = {
+  checkedInCount: number;
+  skipped: { roomNumber: string; checkInDate: string }[];
+} | null;
+
 export async function updateBookingStatus(
   id: string,
   newStatus: BookingStatus
-): Promise<void> {
+): Promise<CheckinCascadeResult> {
   const dbStatus = BOOKING_STATUS_TO_DB[newStatus];
 
   // ── Confirmed ↔ Checked In: use atomic RPC ───────────────────────────────
@@ -1298,7 +1304,7 @@ export async function updateBookingStatus(
       );
     }
 
-    const { error: rpcErr } = await supabase.rpc("checkin_booking_atomic", {
+    const { data: rpcData, error: rpcErr } = await supabase.rpc("checkin_booking_atomic", {
       p_booking_id:    row.id,
       p_target_status: dbStatus,   // 'confirmed' or 'checked_in'
     });
@@ -1314,7 +1320,16 @@ export async function updateBookingStatus(
     }
 
     if (typeof window !== "undefined") window.dispatchEvent(new Event("albatross:bookings-changed"));
-    return;
+    // BK-2118: the RPC now reports the per-row date cascade — N flipped,
+    // future rows skipped (they stay Confirmed until their own date).
+    if (newStatus === "Checked In" && rpcData && typeof rpcData === "object") {
+      const d = rpcData as { checked_in_count?: number; skipped?: { room_number: string; check_in_date: string }[] };
+      return {
+        checkedInCount: d.checked_in_count ?? 0,
+        skipped: (d.skipped ?? []).map(s => ({ roomNumber: s.room_number, checkInDate: s.check_in_date })),
+      };
+    }
+    return null;
   }
 
   // ── All other transitions: REFUSED (2026-08-20, BK-1425 incident) ─────────

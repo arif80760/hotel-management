@@ -41,7 +41,7 @@ import * as roomsService    from "@/services/roomsService";
 import * as bookingsService from "@/services/bookingsService";
 import type { UpdateBookingPayload, BulkCheckinResult } from "@/services/bookingsService";
 import { deriveBookingSpan } from "@/lib/bookingSpan";
-import { earlyNights } from "@/lib/checkoutUtils";
+import { earlyNights, localTodayISO } from "@/lib/checkoutUtils";
 import { getRoomCategories, type RoomCategory } from "@/services/roomCategoriesService";
 import { armSlowWatch, disarmSlowWatch } from "@/lib/slowConnection";
 import { buildCategoryNameMap, displayCategory } from "@/lib/categoryNames";
@@ -87,7 +87,8 @@ type HotelContextType = {
   /** Resolves when the booking is persisted; rejects (after rolling back the
    *  optimistic insert) when the DB refuses it — callers must surface that. */
   createBooking:       (input: CreateBookingInput)                                => Promise<void>;
-  changeBookingStatus: (id: string, status: BookingStatus)                        => void;
+  changeBookingStatus: (id: string, status: BookingStatus)
+    => Promise<import("@/services/bookingsService").CheckinCascadeResult>;
   addRoom:             (room: MockRoom)                                            => void;
   updateRoom:          (id: string, updates: Partial<Omit<MockRoom, "id"|"status">>) => void;
   /** Deactivate/reactivate a room (rooms are never deleted — FK RESTRICT).
@@ -445,9 +446,10 @@ export function HotelProvider({ children }: { children: ReactNode }) {
       });
   }
 
-  function changeBookingStatus(id: string, newStatus: BookingStatus) {
+  function changeBookingStatus(id: string, newStatus: BookingStatus): Promise<bookingsService.CheckinCascadeResult> {
     const target = bookings.find(b => b.id === id);
-    if (!target) return;
+    if (!target) return Promise.resolve(null);
+    const todayISO = localTodayISO();
 
     // 1. Optimistic: update booking + stamp timestamps + sync room status
     const now = new Date().toISOString();
@@ -469,13 +471,14 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         if (newStatus === "Checked In" || newStatus === "Confirmed") {
           const targetRoomStatus: BookingRoomStatus =
             newStatus === "Checked In" ? "Checked In" : "Confirmed";
-          updatedRooms = b.rooms.map(r =>
-            // Only cascade rows that are in the expected source state —
-            // same guard the RPC uses, so terminal rows (cancelled, etc.) stay.
-            (r.status === "Confirmed" || r.status === "Checked In")
-              ? { ...r, status: targetRoomStatus }
-              : r
-          );
+          updatedRooms = b.rooms.map(r => {
+            // Only cascade rows in the expected source state, and — BK-2118 —
+            // only rows whose OWN check-in date has arrived (Dhaka): the RPC
+            // now skips future rows, so the optimistic layer must too.
+            if (r.status !== "Confirmed" && r.status !== "Checked In") return r;
+            if (newStatus === "Checked In" && r.checkInISO && r.checkInISO > todayISO) return r;
+            return { ...r, status: targetRoomStatus };
+          });
         }
 
         return { ...b, status: newStatus, rooms: updatedRooms, ...ts };
@@ -489,10 +492,21 @@ export function HotelProvider({ children }: { children: ReactNode }) {
         )
       );
     }
-    // 2. Persist to Supabase in the background
-    bookingsService.updateBookingStatus(id, newStatus).catch(err =>
-      console.error("[changeBookingStatus] Supabase error:", err)
-    );
+    // 2. Persist — returned so callers can report the per-row cascade
+    // outcome ("N checked in, M remain scheduled"). On success the booking
+    // is re-fetched (the RPC is the authority on which rows flipped); on
+    // failure the optimistic update rolls back. Never rejects.
+    return bookingsService.updateBookingStatus(id, newStatus)
+      .then(async (result) => {
+        const updated = await bookingsService.getBookingByRef(id).catch(() => null);
+        if (updated) setBookings(prev => prev.map(b => b.id === id ? updated : b));
+        return result;
+      })
+      .catch(err => {
+        console.error("[changeBookingStatus] Supabase error — rolling back:", err);
+        setBookings(prev => prev.map(b => b.id === id ? target : b));
+        return null;
+      });
   }
 
   function recordPayment(id: string, additionalAmount: number, method: PaymentMethod, callerRole?: string): Promise<boolean> {
